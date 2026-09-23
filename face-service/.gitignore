@@ -6,7 +6,8 @@ recognizer/face_alignment/mtcnn_pytorch/caffe_models/
 recognizer/face_alignment/mtcnn_pytorch/src/weights/
 # enrollment gallery — runtime data, not source
 recognizer/gallery/
-
+recognizer/face_alignment/test_images/
+recognizer/face_alignment/mtcnn_pytorch/*.ipynb
 # debug output (local bind mounts, anywhere in the tree)
 **/debug_video/
 **/debug_camera/
