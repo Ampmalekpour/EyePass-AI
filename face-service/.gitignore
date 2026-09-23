@@ -8,6 +8,7 @@ recognizer/face_alignment/mtcnn_pytorch/src/weights/
 recognizer/gallery/
 recognizer/face_alignment/test_images/
 recognizer/face_alignment/mtcnn_pytorch/*.ipynb
+recognizer/face_alignment/mtcnn_pytorch/images/
 # debug output (local bind mounts, anywhere in the tree)
 **/debug_video/
 **/debug_camera/
