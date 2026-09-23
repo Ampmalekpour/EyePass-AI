@@ -1,7 +1,9 @@
 # model weights — operator-supplied, not source
 models/**/*
 !models/**/.gitkeep
-
+dynamics/
+recognizer/face_alignment/mtcnn_pytorch/caffe_models/
+recognizer/face_alignment/mtcnn_pytorch/src/weights/
 # enrollment gallery — runtime data, not source
 recognizer/gallery/
 
