@@ -1,0 +1,19 @@
+# detector/requirements.txt
+# --------------------------------------------------------------------
+# The image is built FROM the operator's own base_image (see
+# detector/Dockerfile, BASE_IMAGE build arg / AI_BASE_IMAGE in .env),
+# which already carries the heavy ML stack: torch, ultralytics (YOLO),
+# opencv-python, numpy. This file only adds what that base image does
+# NOT already have — the packages this new service split introduced,
+# plus what plate's own BYTETracker (tracker.py, copied verbatim from
+# the reference plate_tracker.py) needs: scipy (linear_sum_assignment
+# fallback) and lap (fast Hungarian matching).
+#
+# The detector never talks to MinIO directly (pipeline data — plate
+# crops, vehicle frames — is uploaded by the OCR service only; debug
+# output goes to the local bind volume, never MinIO), so boto3 is not
+# needed here.
+# --------------------------------------------------------------------
+redis==5.0.8
+scipy>=1.10
+lap>=0.4.0

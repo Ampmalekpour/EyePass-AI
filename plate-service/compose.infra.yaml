@@ -1,0 +1,145 @@
+# =====================================================================
+# SHARED PLATFORM INFRASTRUCTURE — Redis + MinIO
+# ---------------------------------------------------------------------
+# Redis and MinIO are NOT owned by the plate module — they're the
+# shared substrate the whole platform talks through (the same Redis
+# and MinIO the face module, camera_stream, and Django all use). This
+# file exists so the module runs standalone in dev and so you have
+# something concrete to hand over.
+#
+# If the platform already runs a Redis and a MinIO (it almost
+# certainly does — plate's existing deployment already depends on
+# eyepass-redis / eyepass-minio): don't start this file. Point .env at
+# those instead and run `docker compose up` (compose.yaml) alone.
+#
+#   docker network create eyeplate_net        # once, ever
+#   docker compose -f compose.infra.yaml up -d
+#
+# Ports are published to the host on purpose — that's what lets
+# redis_tools.py run straight from your own machine against the same
+# Redis the containers use.
+# =====================================================================
+
+name: eyeplate-infra
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: eyeplate_redis
+    # appendonly + everysec: at most ~1s of writes lost on an unclean
+    # kill. The command queue, active-camera state, self-healing
+    # checkpoints, and the internal ocr:tasks/ocr:results queues all
+    # live here — this is the durability floor for the whole module.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --dir /data
+    ports:
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    networks: [platform]
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: eyeplate_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "${MINIO_API_PUBLISH_PORT:-9000}:9000"      # S3 API
+      - "${MINIO_CONSOLE_PUBLISH_PORT:-9001}:9001"  # web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks: [platform]
+
+  # One-shot bucket creation for the plate module's two buckets
+  # (defaults match the existing deployment's eyepass-* names — see
+  # common/platecore/minio_store.py). Safe to re-run; exits immediately.
+  minio_init:
+    image: quay.io/minio/mc:latest
+    container_name: eyeplate_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 '${MINIO_ROOT_USER}' '${MINIO_ROOT_PASSWORD}';
+      mc mb --ignore-existing local/${MINIO_PRIVATE_BUCKET:-eyepass-private-bucket};
+      mc mb --ignore-existing local/${MINIO_PUBLIC_BUCKET:-eyepass-public-bucket};
+      exit 0;
+      "
+    restart: "no"
+    networks: [platform]
+
+  # -------------------------------------------------------------------
+  # Redis inspection. Off by default — add it with:
+  #   docker compose -f compose.infra.yaml --profile tools up -d
+  #
+  # RedisInsight (8001) is the fuller one — official, shows memory,
+  # slowlog, profiling. Redis Commander (8081) is lighter and quicker to
+  # load if you just want to eyeball a hash (e.g.
+  # plate:internal:detector:state to watch self-healing checkpoints
+  # update live). Keep both; use whichever.
+  # -------------------------------------------------------------------
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: eyeplate_redisinsight
+    profiles: [tools]
+    ports:
+      - "${REDISINSIGHT_PORT:-8001}:5540"
+    volumes:
+      - redisinsight_data:/data
+    environment:
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: eyeplate
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [platform]
+
+  redis_commander:
+    image: rediscommander/redis-commander:latest
+    container_name: eyeplate_redis_commander
+    profiles: [tools]
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [platform]
+
+networks:
+  platform:
+    external: true
+    name: ${SHARED_NETWORK:-eyeplate_net}
+
+volumes:
+  redis_data:
+    name: eyeplate_redis_data
+  minio_data:
+    name: eyeplate_minio_data
+  redisinsight_data:
+    name: eyeplate_redisinsight_data

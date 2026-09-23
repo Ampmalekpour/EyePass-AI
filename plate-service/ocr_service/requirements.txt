@@ -1,0 +1,44 @@
+# ocr_service/requirements.txt
+# --------------------------------------------------------------------
+# This service runs PaddleOCR CPU-only by default (config.OCR_USE_GPU=
+# false, matching the reference ocr_worker.py's own hardcoded
+# use_gpu=False) and, on its own, needs neither torch, ultralytics nor
+# CUDA — see ocr_service/Dockerfile's own header comment for why its
+# BASE_IMAGE still defaults to the same heavy image as plate_detector
+# as SHIPPED here regardless (OCR_BASE_IMAGE lets you decouple it once
+# you've verified a lighter base installs these cleanly).
+#
+# CORRECTNESS FIX: this file previously listed only redis/boto3/
+# shapely/pyclipper — NONE of paddlepaddle, paddleocr, opencv, numpy or
+# Pillow were listed, even though worker.py directly imports cv2,
+# numpy and paddleocr. That's fine ONLY if the operator's chosen
+# BASE_IMAGE already happens to provide all of those (a torch/
+# ultralytics/opencv detection base image plausibly does, since it's
+# also what plate_detector builds from) — but there was never an
+# explicit, checkable statement of that dependency, which makes this a
+# real "works by accident of which base image you pick" landmine. The
+# four packages below are now explicit. Their versions are a
+# best-effort placeholder, NOT verified against this deployment's
+# actual PadOcr/ model files (en_PP-OCRv3_det_infer, rec_svrt_fa_final_1,
+# ch_ppocr_mobile_v2.0_cls_infer, rec_svrt_motor) — PaddleOCR/
+# paddlepaddle version compatibility with specific exported inference
+# models can be strict. Before deploying, replace these pins with the
+# exact versions from wherever this system's existing ocr_worker.py
+# deployment already runs successfully, rather than trusting these
+# blindly. See DEBUGGING.md.
+#
+# If you set OCR_USE_GPU=true, swap paddlepaddle for paddlepaddle-gpu
+# here AND set OCR_BASE_IMAGE to one with a matching CUDA runtime.
+# --------------------------------------------------------------------
+redis==5.0.8
+boto3==1.35.36
+
+shapely>=2.0
+pyclipper>=1.3
+
+# --- previously missing entirely (see CORRECTNESS FIX note above) ---
+numpy>=1.24,<2.0
+opencv-python-headless>=4.8,<5.0
+Pillow>=10.0
+paddlepaddle==2.6.1
+paddleocr==2.7.3

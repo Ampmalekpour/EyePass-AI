@@ -1,0 +1,460 @@
+# =====================================================================
+# PLATE MODULE — plate_detector + plate_ocr
+# ---------------------------------------------------------------------
+#   docker compose up -d --build
+#
+# One file. Dev vs prod is not a different file, it's different values
+# in .env (LOG_LEVEL, engine/worker counts, memory limits, GPU on/off).
+#
+# Unlike the face module's own compose.yaml, this file does NOT include
+# a mediamtx/camera_stream service: the plate module already has its
+# own eyepass-camera-stream + MediaMTX deployment running in production
+# (that's what plate:camera:events — singular "camera" — is; see
+# common/platecore/keys.py). Point REDIS_* / MTX_RTSP_BASE_URL below at
+# that existing stack. If you genuinely need a standalone dev relay +
+# camera_stream (no existing deployment to point at), copy the two
+# service blocks from face_service's own compose.yaml as a starting
+# point, or run the reference project's docker-compose.standalone.yml
+# instead — both are drop-in compatible with the Redis contract this
+# module reads (`{module}:cameras:config` / `:details` / `:camera:events`).
+#
+# Redis and MinIO are external dependencies (compose.infra.yaml, or
+# whatever the platform already runs). No depends_on reaches across
+# that boundary on purpose — both services here must survive Redis or
+# MinIO vanishing at ANY time, not just at startup: each reconnects on
+# its own (platecore.bus.RedisBus.wait_until_available) and self-heals
+# back to its last known phase/count on restart.
+#
+# Two services, independently deployable, talking to each other only
+# through Redis (platecore.keys / platecore.codec) — no shared queue,
+# no shared process, no HTTP between them:
+#   plate_detector   reads camera frames from the MediaMTX relay,
+#                    detects + tracks vehicles, evaluates line/ROI
+#                    triggers, dispatches OCR tasks. Never touches
+#                    MinIO — its debug output (annotated overlay video)
+#                    is local bind volume only.
+#   plate_ocr        pulls OCR tasks, runs the car/motorcycle PaddleOCR
+#                    pipeline, validates + votes, uploads plate/vehicle
+#                    crops to MinIO, pushes results back to the owning
+#                    detector engine (plate:vehicle:results).
+#
+# GPU is baked into plate_detector below (delete the `deploy:` block if
+# you run on a host with no GPU — plate_ocr runs CPU-only by default
+# regardless, see ocr_service/requirements.txt).
+# =====================================================================
+
+name: eyeplate-plate
+
+x-common: &common
+  env_file: [.env]
+  restart: unless-stopped
+  networks: [platform]
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  # -------------------------------------------------------------------
+  # Detection + tracking + trigger/OCR-dispatch. Self-healing: reads
+  # its last known phase + engine_count from Redis on boot and restores
+  # itself, without waiting for the backend to resend anything.
+  # -------------------------------------------------------------------
+
+  mediamtx:
+    <<: *common
+    image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
+    container_name: plate_mediamtx
+    environment:
+      TZ: ${TZ:-UTC}
+      MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
+    volumes:
+      - ./camera-service/config/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "${RTSP_PORT:-8554}:8554/tcp"
+      - "${WEBRTC_PORT:-8889}:8889/tcp"
+      - "${WEBRTC_ICE_UDP_PORT:-8189}:8189/udp"
+      - "${HLS_PORT:-8888}:8888/tcp"
+      - "${MTX_API_PORT:-9997}:9997"
+      - "${RTMP_PORT:-1935}:1935"
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  camera_stream:
+    <<: *common
+    build:
+      context: ./camera-service
+    image: eyeplate/camera-stream:${IMAGE_TAG:-dev}
+    container_name: plate_camera_stream
+    init: true
+    labels:
+      autoheal: "true"
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://${REDIS_HOST}:${REDIS_PORT}/${REDIS_DB:-0}
+      MTX_HOST: mediamtx
+      MTX_PORT: "9997"
+      STREAM_BASE_URL: ${STREAM_BASE_URL:-localhost:8889}
+      CAMERA_STREAM_DEBUG: ${CAMERA_STREAM_DEBUG:-false}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+      # ---- camera health / timing (previously bare literals) ---------
+      OFFLINE_HOLD_SECONDS: ${OFFLINE_HOLD_SECONDS:-10}
+      TRUST_MTX_ONLY: ${TRUST_MTX_ONLY:-true}
+      CAMERA_RTSP_PORT: ${CAMERA_RTSP_PORT:-554}
+      CAMERA_PING_TIMEOUT_SEC: ${CAMERA_PING_TIMEOUT_SEC:-0.2}
+      MTX_POLL_INTERVAL_SEC: ${MTX_POLL_INTERVAL_SEC:-0.5}
+      MTX_API_TIMEOUT_SEC: ${MTX_API_TIMEOUT_SEC:-1.5}
+      MONITOR_LOOP_INTERVAL_SEC: ${MONITOR_LOOP_INTERVAL_SEC:-0.3}
+      MONITOR_IDLE_SLEEP_SEC: ${MONITOR_IDLE_SLEEP_SEC:-1.0}
+      REGISTER_CAMERA_TIMEOUT_SEC: ${REGISTER_CAMERA_TIMEOUT_SEC:-1.0}
+      REMOVE_FROM_MTX_TIMEOUT_SEC: ${REMOVE_FROM_MTX_TIMEOUT_SEC:-1.0}
+
+      # ---- debug output (local bind volume — never MinIO) -------------
+      DEBUG_ROOT_DIR: /debug
+      CAMERA_SNAPSHOT_DEBUG_ENABLED: ${CAMERA_SNAPSHOT_DEBUG_ENABLED:-false}
+      CAMERA_SNAPSHOT_INTERVAL_SEC: ${CAMERA_SNAPSHOT_INTERVAL_SEC:-60}
+      CAMERA_SNAPSHOT_TIMEOUT_SEC: ${CAMERA_SNAPSHOT_TIMEOUT_SEC:-5}
+    volumes:
+      - ${CAMERA_DEBUG_HOST_DIR:-./debug_camera}:/debug
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+
+  video_publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile.publisher
+    container_name: plate_video_publisher
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/${TEST_VIDEO_CAMERA_ID:-1}
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on:
+      mediamtx:
+        condition: service_started
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_detector:
+    <<: *common
+    build:
+      context: .
+      dockerfile: detector/Dockerfile
+      args:
+        BASE_IMAGE: ${AI_BASE_IMAGE:-base_image_gpu:latest}
+    image: eyeplate/plate-detector:${IMAGE_TAG:-dev}
+    container_name: plate_detector
+    # PID-1 reaper for the spawned engine subprocesses, so a crashed
+    # engine does not linger as a zombie.
+    init: true
+    labels:
+      autoheal: "true"     # picked up only if the `watchdog` profile is active
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_MODULE: ${REDIS_MODULE:-plate}
+
+      # Inside the network the relay is reachable by name. Point this
+      # at your EXISTING mediamtx if plate_detector doesn't share a
+      # network with it directly.
+      MTX_RTSP_BASE_URL: ${MTX_RTSP_BASE_URL:-rtsp://mediamtx:8554}
+
+      # ---- compute --------------------------------------------------
+      # auto | cpu | cuda | cuda:N. Resolved inside each engine CHILD
+      # process — see detector/src/engine.py resolve_device().
+      DETECTION_DEVICE: ${DETECTION_DEVICE:-auto}
+      STRICT_DEVICE: ${STRICT_DEVICE:-false}
+      TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-0}
+      MODEL_PATH: ${DETECTION_MODEL_PATH:-/models/best.pt}
+      DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-480}
+      DETECTION_CONF_THRESHOLD: ${DETECTION_CONF_THRESHOLD:-0.25}
+
+      # ---- engine topology / self-healing -----------------------------
+      MAX_CAMERAS_PER_ENGINE: ${MAX_CAMERAS_PER_ENGINE:-6}
+      DEFAULT_ENGINE_COUNT: ${DEFAULT_ENGINE_COUNT:-1}
+      ENGINE_REBALANCE_INTERVAL_SEC: ${ENGINE_REBALANCE_INTERVAL_SEC:-30}
+      ENGINE_SHUTDOWN_TIMEOUT_SEC: ${ENGINE_SHUTDOWN_TIMEOUT_SEC:-30}
+
+      # ---- camera health --------------------------------------------
+      HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}
+      CAMERA_OFFLINE_GRACE_SECONDS: ${CAMERA_OFFLINE_GRACE_SECONDS:-10}
+
+      # ---- internal-processing-error auto-restart (existing plate
+      # behavior, ported verbatim from alpr_api.py) --------------------
+      ERROR_RESTART_MAX_RETRIES: ${ERROR_RESTART_MAX_RETRIES:-1}
+      ERROR_RESTART_DELAY_SEC: ${ERROR_RESTART_DELAY_SEC:-3}
+      ERROR_RESTART_COUNTER_RESET_AFTER_SEC: ${ERROR_RESTART_COUNTER_RESET_AFTER_SEC:-600}
+
+      # ---- trigger / track criteria (verbatim thresholds) ------------
+      MIN_TRACK_AGE_FOR_CROSSING: ${MIN_TRACK_AGE_FOR_CROSSING:-5}
+      MIN_CONFIDENCE_FOR_CROSSING: ${MIN_CONFIDENCE_FOR_CROSSING:-0.40}
+      CROSSING_COOLDOWN_FRAMES: ${CROSSING_COOLDOWN_FRAMES:-30}
+      ROI_ENTRY_CONFIRMATION_FRAMES: ${ROI_ENTRY_CONFIRMATION_FRAMES:-3}
+      MIN_CONFIDENCE_FOR_ROI: ${MIN_CONFIDENCE_FOR_ROI:-0.35}
+      STOP_TIME_SECONDS: ${STOP_TIME_SECONDS:-3.0}
+      STOP_VELOCITY_THRESHOLD: ${STOP_VELOCITY_THRESHOLD:-8.0}
+      STOP_MIN_SAMPLES: ${STOP_MIN_SAMPLES:-10}
+      OCR_CONF_SKIP_THRESHOLD: ${OCR_CONF_SKIP_THRESHOLD:-0.85}
+      OCR_FINALIZE_TIMEOUT_SEC: ${OCR_FINALIZE_TIMEOUT_SEC:-10.0}
+
+      # ---- trigger history buffers (previously bare literals in triggers.py) --
+      TRIGGER_POSITION_HISTORY_MAX: ${TRIGGER_POSITION_HISTORY_MAX:-30}
+      TRIGGER_CONFIDENCE_HISTORY_MAX: ${TRIGGER_CONFIDENCE_HISTORY_MAX:-10}
+      TRIGGER_VELOCITY_WINDOW: ${TRIGGER_VELOCITY_WINDOW:-10}
+
+      # ---- quality gates (verbatim from video_processor.py) -----------
+      SHARPNESS_MIN_THRESHOLD: ${SHARPNESS_MIN_THRESHOLD:-100.0}
+      RESOLUTION_MIN_AREA: ${RESOLUTION_MIN_AREA:-1000}
+      CLASS_0_ASPECT_RATIO_MIN: ${CLASS_0_ASPECT_RATIO_MIN:-1.5}
+      CLASS_0_ASPECT_RATIO_MAX: ${CLASS_0_ASPECT_RATIO_MAX:-7.5}
+      GENERIC_ASPECT_RATIO_MIN: ${GENERIC_ASPECT_RATIO_MIN:-1.0}
+      GENERIC_ASPECT_RATIO_MAX: ${GENERIC_ASPECT_RATIO_MAX:-5.5}
+
+      # ---- track aggregation & buffers (verbatim) ---------------------
+      DEFAULT_ABSENT_FRAMES: ${DEFAULT_ABSENT_FRAMES:-30}
+      DEFAULT_MIN_SEEN_FRAMES: ${DEFAULT_MIN_SEEN_FRAMES:-8}
+      DEFAULT_MIN_CROPS_TO_FINALIZE: ${DEFAULT_MIN_CROPS_TO_FINALIZE:-1}
+      DEFAULT_N_BEST_CROPS: ${DEFAULT_N_BEST_CROPS:-5}
+      DEFAULT_CONF_DIGITS: ${DEFAULT_CONF_DIGITS:-2}
+
+      # ---- tracker (BYTETracker / tracker.py's PlateTrackerConfig — full
+      # surface; previously only track_buffer was reachable) ------------
+      TRACKER_TRACK_THRESH: ${TRACKER_TRACK_THRESH:-0.5}
+      TRACKER_MATCH_THRESH: ${TRACKER_MATCH_THRESH:-0.99}
+      TRACKER_TRACK_BUFFER: ${TRACKER_TRACK_BUFFER:-60}
+      TRACKER_NMS_THRESH: ${TRACKER_NMS_THRESH:-0.5}
+      TRACKER_MOT20: ${TRACKER_MOT20:-false}
+      TRACKER_SECOND_THRESH: ${TRACKER_SECOND_THRESH:-0.5}
+      TRACKER_DUPLICATE_THRESH: ${TRACKER_DUPLICATE_THRESH:-0.15}
+      TRACKER_PREDICT_UNCONFIRMED: ${TRACKER_PREDICT_UNCONFIRMED:-true}
+      TRACKER_UNCONFIRMED_THRESH: ${TRACKER_UNCONFIRMED_THRESH:-0.9}
+      TRACKER_UNCONFIRMED_MAX_MISS: ${TRACKER_UNCONFIRMED_MAX_MISS:-5}
+      TRACKER_NEW_TRACK_VEL_STD_SCALE: ${TRACKER_NEW_TRACK_VEL_STD_SCALE:-3.0}
+      TRACKER_SEED_VELOCITY_ON_FIRST_UPDATE: ${TRACKER_SEED_VELOCITY_ON_FIRST_UPDATE:-true}
+      TRACKER_SEED_MAX_RATIO: ${TRACKER_SEED_MAX_RATIO:-1.5}
+      TRACKER_RESEED_AFTER_GAP: ${TRACKER_RESEED_AFTER_GAP:-3.0}
+      TRACKER_RECOVERY_ENABLED: ${TRACKER_RECOVERY_ENABLED:-true}
+      TRACKER_RECOVERY_THRESH: ${TRACKER_RECOVERY_THRESH:-0.7}
+      TRACKER_RECOVERY_EXPANSION: ${TRACKER_RECOVERY_EXPANSION:-0.5}
+      TRACKER_RECOVERY_BASE_RADIUS: ${TRACKER_RECOVERY_BASE_RADIUS:-1.5}
+      TRACKER_RECOVERY_RADIUS_GROWTH: ${TRACKER_RECOVERY_RADIUS_GROWTH:-0.4}
+      TRACKER_RECOVERY_MAX_RADIUS: ${TRACKER_RECOVERY_MAX_RADIUS:-4.0}
+      TRACKER_RECOVERY_SHAPE_WEIGHT: ${TRACKER_RECOVERY_SHAPE_WEIGHT:-0.3}
+      TRACKER_RECOVERY_CLASS_PENALTY: ${TRACKER_RECOVERY_CLASS_PENALTY:-0.15}
+      TRACKER_GMC_ENABLED: ${TRACKER_GMC_ENABLED:-true}
+      TRACKER_GMC_MIN_PAIRS: ${TRACKER_GMC_MIN_PAIRS:-2}
+      TRACKER_GMC_MAX_SHIFT_RATIO: ${TRACKER_GMC_MAX_SHIFT_RATIO:-0.25}
+      TRACKER_MAX_REMOVED_HISTORY: ${TRACKER_MAX_REMOVED_HISTORY:-512}
+
+      # ---- RTSP reader (previously bare literals) ----------------------
+      RTSP_OPEN_TIMEOUT_MS: ${RTSP_OPEN_TIMEOUT_MS:-5000}
+      RTSP_READ_TIMEOUT_MS: ${RTSP_READ_TIMEOUT_MS:-5000}
+      RTSP_FFMPEG_STIMEOUT_US: ${RTSP_FFMPEG_STIMEOUT_US:-5000000}
+      RTSP_RECONNECT_BACKOFF_SEC: ${RTSP_RECONNECT_BACKOFF_SEC:-0.2}
+      RTSP_READ_FAIL_BACKOFF_SEC: ${RTSP_READ_FAIL_BACKOFF_SEC:-0.5}
+      RTSP_READER_JOIN_TIMEOUT_SEC: ${RTSP_READER_JOIN_TIMEOUT_SEC:-2.0}
+
+      # ---- engine loop / heartbeat --------------------------------------
+      SLOW_BATCH_WARN_MS: ${SLOW_BATCH_WARN_MS:-150.0}
+      PIPELINE_STATS_LOG_INTERVAL_SEC: ${PIPELINE_STATS_LOG_INTERVAL_SEC:-5.0}
+      HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-10}
+      HEARTBEAT_TTL_SEC: ${HEARTBEAT_TTL_SEC:-30}
+
+      # ---- debug output (local bind volume — never MinIO) -----------
+      DEBUG_VIDEO_ENABLED: ${DETECTOR_DEBUG_VIDEO_ENABLED:-false}
+      DEBUG_VIDEO_DIR: /debug
+      DEBUG_VIDEO_SEGMENT_SECONDS: ${DEBUG_VIDEO_SEGMENT_SECONDS:-240}
+      DEBUG_VIDEO_FPS: ${DEBUG_VIDEO_FPS:-12}
+      DEBUG_VIDEO_MAX_SEGMENTS: ${DEBUG_VIDEO_MAX_SEGMENTS:-12}
+      DEBUG_VIDEO_SCALE: ${DEBUG_VIDEO_SCALE:-1.0}
+      DEBUG_VIDEO_EVERY_N: ${DEBUG_VIDEO_EVERY_N:-1}
+      DEBUG_VIDEO_CODEC: ${DEBUG_VIDEO_CODEC:-mp4v}
+      DEBUG_VIDEO_EXT: ${DEBUG_VIDEO_EXT:-.mp4}
+      DEBUG_VIDEO_JSONL: ${DEBUG_VIDEO_JSONL:-true}
+      DEBUG_VIDEO_GHOST_FRAMES: ${DEBUG_VIDEO_GHOST_FRAMES:-45}
+      DEBUG_VIDEO_EVENT_LINES: ${DEBUG_VIDEO_EVENT_LINES:-14}
+      DEBUG_VIDEO_TRAIL: ${DEBUG_VIDEO_TRAIL:-30}
+      DEBUG_VIDEO_PANEL_WIDTH: ${DEBUG_VIDEO_PANEL_WIDTH:-430}
+      DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED: ${DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED:-false}
+      DEBUG_OCR_SUBMISSION_MONTAGE_DIR: /debug/ocr_submissions
+      DEBUG_OCR_SUBMISSION_MONTAGE_MAX_FILES: ${DEBUG_OCR_SUBMISSION_MONTAGE_MAX_FILES:-200}
+
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+      API_PORT: "8010"
+
+
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+    volumes:
+      # Model weights, mounted rather than baked so swapping the model
+      # needs no rebuild. Operator supplies best.pt here.
+      - ${DETECTION_MODELS_DIR:-./models/detection}:/models:ro
+      # NOTE: previously also mounted a `detector_data:/data` named
+      # docker volume here for "durable local state" — nothing in this
+      # module's own code ever writes to /data (confirmed via a full
+      # grep of detector/src and ocr_service/src); the only use of /data
+      # is Ultralytics' own YOLO_CONFIG_DIR cache (see detector/Dockerfile),
+      # which is fine to be ephemeral/rebuildable. Removed — self-healing
+      # reads its checkpoint from Redis, never from this volume, matching
+      # the face module's own "eliminate dead named volumes" cleanup.
+      # Annotated debug video + the new OCR-submission montages. A BIND
+      # mount, not a named volume, on purpose: meant to be opened
+      # straight off your own disk.
+      - ${DEBUG_VIDEO_HOST_DIR:-./debug_video}:/debug
+    ports:
+      - "${DETECTOR_API_PORT:-8010}:8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 120s        # YOLO load + CUDA init is slow on first boot
+    stop_grace_period: 60s      # must exceed ENGINE_SHUTDOWN_TIMEOUT_SEC
+    # GPU reservation. Requires nvidia-container-toolkit on the host.
+    # Delete this whole `deploy:` block to run on a host with no GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+
+  # -------------------------------------------------------------------
+  # Car/motorcycle PaddleOCR worker pool. Scaled independently of
+  # detector engine count — OCR capacity is no longer tied 1:1 to
+  # detection capacity now that they talk over Redis instead of an
+  # in-process queue pair. Self-healing: reads its last known
+  # phase + worker_count from Redis on boot. CPU-only by default (see
+  # ocr_service/requirements.txt / OCR_USE_GPU).
+  # -------------------------------------------------------------------
+  plate_ocr:
+    <<: *common
+    build:
+      context: .
+      dockerfile: ocr_service/Dockerfile
+      args:
+        # NOTE: this service's own Dockerfile comment (and the README)
+        # claim it does NOT need the heavy torch/ultralytics/CUDA base
+        # image plate_detector uses — but its FROM line previously
+        # hardcoded the exact same ${AI_BASE_IMAGE}, contradicting that.
+        # OCR_BASE_IMAGE decouples the two: unset, it defaults to
+        # exactly the prior (contradictory-but-working) behavior, so
+        # this is a zero-risk change — set OCR_BASE_IMAGE in .env to
+        # actually switch to a lighter image. See DEBUGGING.md.
+        BASE_IMAGE: ${OCR_BASE_IMAGE:-base_image_gpu:latest}
+    image: eyeplate/plate-ocr:${IMAGE_TAG:-dev}
+    container_name: plate_ocr
+    init: true
+    labels:
+      autoheal: "true"
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_MODULE: ${REDIS_MODULE:-plate}
+
+      # ---- MinIO ------------------------------------------------------
+      AWS_S3_ENDPOINT_URL: ${MINIO_ENDPOINT}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      AWS_ACCESS_KEY_ID_FULL: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY_FULL: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_REGION_NAME: us-east-1
+      AWS_S3_USE_SSL: ${MINIO_SECURE:-False}
+      AWS_PUBLIC_BUCKET_NAME: ${MINIO_PUBLIC_BUCKET:-eyepass-public-bucket}
+      AWS_PRIVATE_BUCKET_NAME: ${MINIO_PRIVATE_BUCKET:-eyepass-private-bucket}
+
+      # ---- models -----------------------------------------------------
+      OCR_MODELS_DIR: /models/ocr
+      OCR_USE_GPU: ${OCR_USE_GPU:-false}
+      OCR_CONF_THRESHOLD: ${OCR_CONF_THRESHOLD:-0.7}
+      OCR_SAVE_ALL_CROPS: ${OCR_SAVE_ALL_CROPS:-false}
+      OCR_CLAHE_CLIP_LIMIT: ${OCR_CLAHE_CLIP_LIMIT:-2.0}
+      OCR_CLAHE_GRID_SIZE: ${OCR_CLAHE_GRID_SIZE:-8}
+      OCR_MOTOR_MIN_BOX_AREA_RATIO: ${OCR_MOTOR_MIN_BOX_AREA_RATIO:-0.05}
+
+      # ---- worker pool / self-healing ----------------------------------
+      DEFAULT_WORKER_COUNT: ${OCR_DEFAULT_WORKER_COUNT:-3}
+      WORKER_LOAD_TIMEOUT_SEC: ${OCR_WORKER_LOAD_TIMEOUT_SEC:-180}
+      WORKER_SHUTDOWN_TIMEOUT_SEC: ${OCR_WORKER_SHUTDOWN_TIMEOUT_SEC:-30}
+      WATCHDOG_INTERVAL_SEC: ${OCR_WATCHDOG_INTERVAL_SEC:-5}
+      OCR_IDLE_POLL_INTERVAL_SEC: ${OCR_IDLE_POLL_INTERVAL_SEC:-0.2}
+      OCR_TASK_POP_RETRY_BACKOFF_SEC: ${OCR_TASK_POP_RETRY_BACKOFF_SEC:-1.0}
+      HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-10}
+      HEARTBEAT_TTL_SEC: ${HEARTBEAT_TTL_SEC:-30}
+
+      # ---- debug output (local bind volume — never MinIO) -------------
+      LOG_DECISION_TRACE: ${LOG_DECISION_TRACE:-true}
+      OCR_DEBUG_ROOT_DIR: /debug
+      OCR_SAVE_DECISION_DEBUG: ${OCR_SAVE_DECISION_DEBUG:-false}
+      OCR_DECISION_DEBUG_DIR: /debug/decisions
+      OCR_DECISION_DEBUG_MAX_FILES: ${OCR_DECISION_DEBUG_MAX_FILES:-200}
+
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+      API_PORT: "8011"
+    volumes:
+      # Operator supplies the PaddleOCR model folders here — see the
+      # README's "What you need to provide" table for the exact names
+      # each subfolder/file must keep.
+      - ${OCR_MODELS_DIR:-./models/ocr}:/models/ocr:ro
+      # NEW — the OCR service previously had no local debug output at
+      # all. Decision-trace montages land here (never MinIO — same
+      # storage-split rule as the detector's debug video).
+      - ${OCR_DEBUG_HOST_DIR:-./debug_ocr}:/debug
+    ports:
+      - "${OCR_API_PORT:-8011}:8011"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 180s        # PaddleOCR model load + warmup
+    stop_grace_period: 45s      # must exceed WORKER_SHUTDOWN_TIMEOUT_SEC
+
+  # -------------------------------------------------------------------
+  # `restart: unless-stopped` only covers a process that EXITED. It does
+  # nothing for a process that is alive and wedged (a hung CUDA call, a
+  # deadlocked thread). autoheal watches healthchecks and restarts
+  # anything labelled autoheal=true that goes unhealthy. Off by default:
+  #   docker compose --profile watchdog up -d
+  # -------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: plate_autoheal
+    profiles: [watchdog]
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "30"
+      AUTOHEAL_START_PERIOD: "180"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks: [platform]
+
+networks:
+  platform:
+    external: true
+    name: ${SHARED_NETWORK:-eyeplate_net}
