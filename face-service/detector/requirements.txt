@@ -1,0 +1,19 @@
+# detector/requirements.txt
+# --------------------------------------------------------------------
+# The image is built FROM the operator's own base_image (see
+# detector/Dockerfile, BASE_IMAGE build arg / AI_BASE_IMAGE in .env),
+# which already carries the heavy ML stack: torch, ultralytics (YOLO),
+# opencv-python, numpy. This file only adds what that base image does
+# NOT already have — the packages this new service split introduced.
+#
+# If your base_image already has any of these, pip will just confirm
+# the version and move on (or you can drop the pinned entries you know
+# are already satisfied — nothing here conflicts with keeping a looser
+# version already installed, but pin exact versions in production once
+# you've confirmed what the base image actually ships).
+#
+# The detector never talks to MinIO directly (see the README's storage
+# split — pipeline data is uploaded by the recognizer only, debug
+# output goes to the local bind volume), so boto3 is not needed here.
+# --------------------------------------------------------------------
+redis==5.0.8

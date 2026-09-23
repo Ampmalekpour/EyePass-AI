@@ -1,0 +1,16 @@
+# recognizer/requirements.txt
+# --------------------------------------------------------------------
+# Built FROM the operator's own base_image (see recognizer/Dockerfile,
+# BASE_IMAGE build arg / AI_BASE_IMAGE in .env), which already carries
+# torch, opencv-python, numpy, Pillow, scikit-learn. This file adds
+# what that base image does NOT already have.
+#
+# onnxruntime is listed because the primary recognition backend is
+# ONNX (USE_ONNX=true by default) — if the base image already bundles
+# it (onnxruntime or onnxruntime-gpu), drop this line rather than risk
+# a conflicting duplicate install.
+# --------------------------------------------------------------------
+redis==5.0.8
+boto3==1.35.36
+onnxruntime==1.19.2
+tqdm==4.66.5

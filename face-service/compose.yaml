@@ -1,0 +1,492 @@
+# =====================================================================
+# FACE MODULE — mediamtx + face-detector + face-recognizer
+# ---------------------------------------------------------------------
+#   docker compose up -d --build
+#
+# One file. Dev vs prod is not a different file, it's different values
+# in .env (LOG_LEVEL, SAVE_OUTPUT, DETECTION_DEVICE, worker/engine
+# counts, memory limits). There is nothing here to choose between — you
+# run this.
+#
+# Redis and MinIO are external dependencies (compose.infra.yaml, or
+# whatever the platform already runs). No depends_on reaches across
+# that boundary on purpose — both services here must survive Redis or
+# MinIO vanishing at ANY time, not just at startup: each reconnects on
+# its own (facecore.bus.RedisBus.wait_until_available) and self-heals
+# back to its last known phase/count on restart.
+#
+# Two services, independently deployable, talking to each other only
+# through Redis (facecore.keys / facecore.codec) — no shared queue, no
+# shared process, no HTTP between them:
+#   face_detector    reads camera frames from the MediaMTX relay,
+#                    detects + tracks heads, dispatches recognition
+#                    tasks. Never touches MinIO — its debug output
+#                    (annotated frames/videos) is local bind volume
+#                    only.
+#   face_recognizer   pulls recognition tasks, runs AdaFace against the
+#                    gallery, uploads pipeline artifacts (face crops,
+#                    camera frames, the gallery db) to MinIO, pushes
+#                    results back to the owning detector engine.
+#
+# GPU is baked into face_detector below (uncomment for face_recognizer
+# too if you run its ONNX/PyTorch backend on GPU). If you run on a host
+# with no GPU at all, delete the `deploy:` blocks — a two-line edit.
+# =====================================================================
+
+name: eyeplate-face
+
+x-common: &common
+  env_file: [.env]
+  restart: unless-stopped
+  networks: [platform]
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  # -------------------------------------------------------------------
+  # RTSP relay. Detector never touches a camera directly — only this
+  # relay, via _rtsp_url() / MTX_RTSP_BASE_URL (facecore-adjacent
+  # pattern lifted straight from the heatmap module).
+  #
+  # If the platform already runs a shared MediaMTX (recommended — one
+  # relay serving every AI module, not one per module), delete this
+  # service and point MTX_RTSP_BASE_URL in .env at that shared relay
+  # instead.
+  # -------------------------------------------------------------------
+  mediamtx:
+    <<: *common
+    image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
+    container_name: face_mediamtx
+    environment:
+      TZ: ${TZ:-UTC}
+      MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
+    volumes:
+      - ./camera-service/config/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "${RTSP_PORT:-8554}:8554/tcp"
+      - "${WEBRTC_PORT:-8889}:8889/tcp"
+      - "${WEBRTC_ICE_UDP_PORT:-8189}:8189/udp"
+      - "${HLS_PORT:-8888}:8888/tcp"
+      - "${MTX_API_PORT:-9997}:9997"     # `curl localhost:9997/v3/paths/list` for debugging
+      - "${RTMP_PORT:-1935}:1935"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # -------------------------------------------------------------------
+  # Watches `face:cameras:config` (written by BACKEND), registers each
+  # camera as a MediaMTX path, publishes `face:cameras:details` and
+  # `face:cameras:events`. Its own service, standing next to
+  # face_detector and face_recognizer — same shape as the heatmap
+  # module's camera_stream, just REDIS_MODULE=face instead of heatmap.
+  #
+  # If the platform already runs ONE shared camera_stream instance for
+  # every AI module instead of one per module, delete this block and
+  # point MTX_RTSP_BASE_URL at that shared relay instead — but that is
+  # a platform decision, not the default here.
+  # -------------------------------------------------------------------
+  camera_stream:
+    <<: *common
+    build:
+      context: ./camera-service
+    image: eyeplate/camera-stream:${IMAGE_TAG:-dev}
+    container_name: face_camera_stream
+    init: true
+    labels:
+      autoheal: "true"     # picked up only if the `watchdog` profile is active
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: ${REDIS_URL}
+      REDIS_MODULE: ${REDIS_MODULE:-face}
+      MTX_HOST: mediamtx
+      MTX_PORT: "9997"
+      STREAM_BASE_URL: ${STREAM_BASE_URL}
+      OFFLINE_HOLD_SECONDS: ${OFFLINE_HOLD_SECONDS:-10}
+      CAMERA_STREAM_DEBUG: ${CAMERA_STREAM_DEBUG:-false}
+
+      # ---- operational tunables (all were hardcoded before this
+      # revision — see src/main.py's own comments for exactly which
+      # literal each one replaces) ---------------------------------
+      TRUST_MTX_ONLY: ${TRUST_MTX_ONLY:-true}
+      CAMERA_RTSP_PORT: ${CAMERA_RTSP_PORT:-554}
+      CAMERA_PING_TIMEOUT_SEC: ${CAMERA_PING_TIMEOUT_SEC:-0.2}
+      MTX_POLL_INTERVAL_SEC: ${MTX_POLL_INTERVAL_SEC:-0.5}
+      MONITOR_LOOP_INTERVAL_SEC: ${MONITOR_LOOP_INTERVAL_SEC:-0.3}
+      MTX_API_TIMEOUT_SEC: ${MTX_API_TIMEOUT_SEC:-1.5}
+      REGISTER_CAMERA_TIMEOUT_SEC: ${REGISTER_CAMERA_TIMEOUT_SEC:-1.0}
+      REMOVE_FROM_MTX_TIMEOUT_SEC: ${REMOVE_FROM_MTX_TIMEOUT_SEC:-1.0}
+
+      # ---- debug output (local bind volume — never MinIO) -----------
+      DEBUG_ROOT_DIR: /debug
+      CAMERA_STATUS_LOG_PATH: /debug/camera-service/camera_status.log
+      # Off by default — needs ffmpeg added to camera-service/Dockerfile
+      # (one commented-out line there). See DEBUGGING.md.
+      CAMERA_SNAPSHOT_DEBUG_ENABLED: ${CAMERA_SNAPSHOT_DEBUG_ENABLED:-false}
+      CAMERA_SNAPSHOT_INTERVAL_SEC: ${CAMERA_SNAPSHOT_INTERVAL_SEC:-60}
+      CAMERA_SNAPSHOT_TIMEOUT_SEC: ${CAMERA_SNAPSHOT_TIMEOUT_SEC:-5}
+      CAMERA_SNAPSHOT_MAX_PER_CAMERA: ${CAMERA_SNAPSHOT_MAX_PER_CAMERA:-20}
+    volumes:
+      # Bind-mounted so a code edit needs `docker compose restart
+      # camera_stream`, not a rebuild. Only rebuild when the Dockerfile
+      # or its dependencies change.
+      - ./camera-service/src:/app/src
+      # Same shared debug root every other section writes under (see
+      # DEBUGGING.md) — camera_status.log and, if
+      # CAMERA_SNAPSHOT_DEBUG_ENABLED, one still per camera per
+      # CAMERA_SNAPSHOT_INTERVAL_SEC.
+      - ${DEBUG_ROOT_HOST_DIR:-./debug}:/debug
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+  # -------------------------------------------------------------------
+  # Detection + tracking + trigger/recognition-dispatch. Self-healing:
+  # reads its last known phase + engine_count from Redis on boot and
+  # restores itself, without waiting for the backend to resend anything.
+  # -------------------------------------------------------------------
+  face_detector:
+    <<: *common
+    build:
+      context: .
+      dockerfile: detector/Dockerfile
+      args:
+        BASE_IMAGE: ${AI_BASE_IMAGE:-base_image:latest}
+    image: eyeplate/face-detector:${IMAGE_TAG:-dev}
+    container_name: face_detector
+    # PID-1 reaper for the spawned engine subprocesses, so a crashed
+    # engine does not linger as a zombie.
+    init: true
+    labels:
+      autoheal: "true"     # picked up only if the `watchdog` profile is active
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_MODULE: ${REDIS_MODULE:-face}
+
+      # Inside the network the relay is reachable by name.
+      MTX_RTSP_BASE_URL: ${MTX_RTSP_BASE_URL:-rtsp://mediamtx:8554}
+
+      # ---- compute --------------------------------------------------
+      # auto | cpu | cuda | cuda:N. Resolved inside each engine CHILD
+      # process — see detector/src/engine.py resolve_device().
+      DETECTION_DEVICE: ${DETECTION_DEVICE:-auto}
+      STRICT_DEVICE: ${STRICT_DEVICE:-false}
+      TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-0}
+      MODEL_PATH: ${DETECTION_MODEL_PATH:-/models/best1.pt}
+      DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-800}
+      DETECTION_CONF_THRESHOLD: ${DETECTION_CONF_THRESHOLD:-0.25}
+
+      # ---- engine topology / self-healing -----------------------------
+      MAX_CAMERAS_PER_ENGINE: ${MAX_CAMERAS_PER_ENGINE:-6}
+      DEFAULT_ENGINE_COUNT: ${DEFAULT_ENGINE_COUNT:-1}
+      ENGINE_REBALANCE_INTERVAL_SEC: ${ENGINE_REBALANCE_INTERVAL_SEC:-30}
+      ENGINE_SHUTDOWN_TIMEOUT_SEC: ${ENGINE_SHUTDOWN_TIMEOUT_SEC:-30}
+
+      # ---- camera health --------------------------------------------
+      HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}
+      CAMERA_OFFLINE_GRACE_SECONDS: ${CAMERA_OFFLINE_GRACE_SECONDS:-30}
+
+      # ---- debug output (local bind volume — never MinIO) -----------
+      # VIDEO_OUTPUT_DIR now sits under the SAME /debug bind mount as
+      # the annotated video below (was /data/debug_video, inside the
+      # old `detector_data` named docker volume — not host-browsable;
+      # this service no longer uses a named volume for anything).
+      SAVE_OUTPUT: ${DETECTOR_SAVE_OUTPUT:-false}
+      SAVE_AS_VIDEO: ${DETECTOR_SAVE_AS_VIDEO:-true}
+      VIDEO_OUTPUT_DIR: /debug/legacy_raw_output
+      LEGACY_VIDEO_FPS: ${LEGACY_VIDEO_FPS:-20}
+
+      # ---- annotated debug video (debug_recorder.py) ----------------
+      # Rolling per-camera MP4 showing detections, tracks, landmarks,
+      # pose, crop quality, liveness and the recognition round-trip.
+      # Lands on the host in DEBUG_VIDEO_HOST_DIR (see volumes below).
+      DEBUG_VIDEO_ENABLED: ${DEBUG_VIDEO_ENABLED:-true}
+      DEBUG_VIDEO_DIR: /debug
+      DEBUG_VIDEO_SEGMENT_SECONDS: ${DEBUG_VIDEO_SEGMENT_SECONDS:-30}
+      DEBUG_VIDEO_FPS: ${DEBUG_VIDEO_FPS:-12}
+      DEBUG_VIDEO_MAX_SEGMENTS: ${DEBUG_VIDEO_MAX_SEGMENTS:-40}
+      DEBUG_VIDEO_SCALE: ${DEBUG_VIDEO_SCALE:-1.0}
+      DEBUG_VIDEO_EVERY_N: ${DEBUG_VIDEO_EVERY_N:-1}
+      DEBUG_VIDEO_JSONL: ${DEBUG_VIDEO_JSONL:-true}
+      DEBUG_VIDEO_PANEL_WIDTH: ${DEBUG_VIDEO_PANEL_WIDTH:-430}
+      DEBUG_VIDEO_CODEC: ${DEBUG_VIDEO_CODEC:-mp4v}
+      DEBUG_VIDEO_GHOST_FRAMES: ${DEBUG_VIDEO_GHOST_FRAMES:-45}
+      DEBUG_VIDEO_EVENT_LINES: ${DEBUG_VIDEO_EVENT_LINES:-14}
+      DEBUG_VIDEO_DRAW_LANDMARKS: ${DEBUG_VIDEO_DRAW_LANDMARKS:-true}
+
+      # ---- best-crop montage + liveness-reject stills (debug_extras.py)
+      # Both off by default — see DEBUGGING.md for what each shows.
+      DEBUG_BEST_CROP_MONTAGE_ENABLED: ${DEBUG_BEST_CROP_MONTAGE_ENABLED:-false}
+      DEBUG_BEST_CROP_MONTAGE_MAX_FILES: ${DEBUG_BEST_CROP_MONTAGE_MAX_FILES:-200}
+      DEBUG_LIVENESS_REJECTS_ENABLED: ${DEBUG_LIVENESS_REJECTS_ENABLED:-false}
+      DEBUG_LIVENESS_REJECTS_MAX_FILES: ${DEBUG_LIVENESS_REJECTS_MAX_FILES:-200}
+
+      # ---- tracker (BYTETracker) — defaults reproduce prior behaviour -
+      TRACKER_TRACK_THRESH: ${TRACKER_TRACK_THRESH:-0.5}
+      TRACKER_MATCH_THRESH: ${TRACKER_MATCH_THRESH:-0.9}
+      TRACKER_TRACK_BUFFER: ${TRACKER_TRACK_BUFFER:-35}
+      TRACKER_NMS_THRESH: ${TRACKER_NMS_THRESH:-0.5}
+      TRACKER_MOT20: ${TRACKER_MOT20:-true}
+      LANDMARK_VALID_CONF_THRESHOLD: ${LANDMARK_VALID_CONF_THRESHOLD:-0.2}
+      YAW_GROUP_FRONTAL_MAX_DEG: ${YAW_GROUP_FRONTAL_MAX_DEG:-15}
+      YAW_GROUP_QUARTER_MAX_DEG: ${YAW_GROUP_QUARTER_MAX_DEG:-30}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+      # ---- liveness / presentation-attack detection -----------------
+      # Non-DL anti-spoofing (photo / phone / monitor held to the
+      # camera). Verdict rides on the track into the recognition task
+      # and into ai:results. See detector/src/liveness.py; calibrate
+      # the thresholds with detector/src/calibrate_liveness.py.
+      LIVENESS_ENABLED: ${LIVENESS_ENABLED:-true}
+      LIVENESS_EVAL_EVERY_N_FRAMES: ${LIVENESS_EVAL_EVERY_N_FRAMES:-3}
+      LIVENESS_MIN_POSE_DELTA_DEG: ${LIVENESS_MIN_POSE_DELTA_DEG:-10}
+      LIVENESS_PLANAR_RESIDUAL_THR: ${LIVENESS_PLANAR_RESIDUAL_THR:-0.006}
+      LIVENESS_RING_FOLLOW_THR: ${LIVENESS_RING_FOLLOW_THR:-0.60}
+      LIVENESS_RIGID_RESIDUAL_THR: ${LIVENESS_RIGID_RESIDUAL_THR:-0.004}
+      LIVENESS_MIN_EVALS: ${LIVENESS_MIN_EVALS:-3}
+
+      API_PORT: "8010"
+    volumes:
+      # Model weights, mounted rather than baked so swapping the model
+      # needs no rebuild. Operator supplies best1.pt here.
+      - ${DETECTION_MODELS_DIR:-./models/detection}:/models:ro
+      # ALL debug output (annotated video, best-crop montages,
+      # liveness-reject stills, and the legacy SAVE_OUTPUT raw dump)
+      # lives under this one bind mount now — no named docker volume
+      # left in this service. Meant to be opened straight off your own
+      # disk next to the code, not fished out of a docker volume.
+      - ${DEBUG_VIDEO_HOST_DIR:-./debug/detector}:/debug
+    ports:
+      - "${DETECTOR_API_PORT:-8010}:8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 120s        # YOLO load + CUDA init is slow on first boot
+    stop_grace_period: 60s      # must exceed ENGINE_SHUTDOWN_TIMEOUT_SEC
+    depends_on:
+      mediamtx:
+        condition: service_started
+    # GPU reservation. Requires nvidia-container-toolkit on the host.
+    # Delete this whole `deploy:` block to run on a host with no GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+
+  # -------------------------------------------------------------------
+  # One-shot: pushes the operator-supplied local gallery (brieface.db +
+  # reference images + optional representations_<model>.pkl, all flat
+  # in one folder — see RECOGNITION_GALLERY_DIR below) into MinIO under
+  # the exact prefix/key face_recognizer already downloads from
+  # (GALLERY_MINIO_PREFIX / GALLERY_DB_MINIO_KEY, config.py). Nothing in
+  # recognizer/src changes because of this — it still only ever talks to
+  # MinIO; this service is just what keeps MinIO in sync with your local
+  # folder. Safe to re-run: `mc mirror --overwrite` only pushes
+  # new/changed files, and `mc mb --ignore-existing` makes this
+  # independent of whether compose.infra.yaml's minio_init has already
+  # run (separate compose project — no cross-file depends_on).
+  # -------------------------------------------------------------------
+  gallery_seed:
+    image: quay.io/minio/mc:latest
+    container_name: face_gallery_seed
+    env_file: [.env]
+    volumes:
+      - ${RECOGNITION_GALLERY_DIR:-./recognizer/gallery}:/gallery:ro
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 '${MINIO_ROOT_USER}' '${MINIO_ROOT_PASSWORD}' >/dev/null 2>&1; do
+        echo 'gallery_seed: waiting for MinIO...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/${MINIO_PRIVATE_BUCKET:-face-private-bucket};
+      mc mirror --overwrite /gallery local/${MINIO_PRIVATE_BUCKET:-face-private-bucket}/${GALLERY_MINIO_PREFIX:-dynamics/CTDBUR/};
+      echo 'gallery_seed: done';
+      exit 0;
+      "
+    restart: "no"
+    networks: [platform]
+
+  # -------------------------------------------------------------------
+  # AdaFace recognition worker pool. Scaled independently of detector
+  # engine count — recognition capacity is no longer tied 1:1 to
+  # detection capacity now that they talk over Redis instead of an
+  # in-process queue pair. Self-healing: reads its last known
+  # phase + worker_count from Redis on boot.
+  # -------------------------------------------------------------------
+  face_recognizer:
+    <<: *common
+    build:
+      context: .
+      dockerfile: recognizer/Dockerfile
+      args:
+        BASE_IMAGE: ${AI_BASE_IMAGE:-base_image:latest}
+    image: eyeplate/face-recognizer:${IMAGE_TAG:-dev}
+    container_name: face_recognizer
+    init: true
+    labels:
+      autoheal: "true"
+    depends_on:
+      gallery_seed:
+        condition: service_completed_successfully
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_MODULE: ${REDIS_MODULE:-face}
+
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      AWS_S3_ENDPOINT_URL: ${MINIO_ENDPOINT}
+      AWS_ACCESS_KEY_ID_FULL: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY_FULL: ${MINIO_ROOT_PASSWORD}
+      AWS_PRIVATE_BUCKET_NAME: ${MINIO_PRIVATE_BUCKET:-face-private-bucket}
+      AWS_PUBLIC_BUCKET_NAME: ${MINIO_PUBLIC_BUCKET:-face-public-bucket}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      AWS_S3_USE_SSL: ${MINIO_SECURE:-False}
+
+      # ---- models -----------------------------------------------------
+      USE_ONNX: ${USE_ONNX:-true}
+      MODEL_NAME: ${RECOGNITION_MODEL_NAME:-ir_50}
+      ONNX_MODEL_PATH: ${ONNX_MODEL_PATH:-/models/adaface_ir50_cpu.onnx}
+      PYTORCH_MODEL_PATH: ${PYTORCH_MODEL_PATH:-pretrained/adaface_ir50_ms1mv2.ckpt}
+      WARMUP_IMAGE_PATH: ${WARMUP_IMAGE_PATH:-pretrained/warmup.jpg}
+
+      # ---- gallery (pipeline data — MinIO) -----------------------------
+      GALLERY_MINIO_PREFIX: ${GALLERY_MINIO_PREFIX:-dynamics/CTDBUR/}
+      GALLERY_DB_MINIO_KEY: ${GALLERY_DB_MINIO_KEY:-dynamics/CTDBUR/brieface.db}
+
+      # ---- worker pool / self-healing ----------------------------------
+      DEFAULT_WORKER_COUNT: ${DEFAULT_WORKER_COUNT:-2}
+      WORKER_LOAD_TIMEOUT_SEC: ${WORKER_LOAD_TIMEOUT_SEC:-180}
+      WORKER_SHUTDOWN_TIMEOUT_SEC: ${WORKER_SHUTDOWN_TIMEOUT_SEC:-30}
+      WATCHDOG_INTERVAL_SEC: ${WATCHDOG_INTERVAL_SEC:-5}
+
+      # ---- performance --------------------------------------------------
+      USE_BATCHING: ${USE_BATCHING:-true}
+      BATCH_SIZE: ${BATCH_SIZE:-16}
+      ONNX_INTRA_OP_THREADS: ${ONNX_INTRA_OP_THREADS:-4}
+      ONNX_INTER_OP_THREADS: ${ONNX_INTER_OP_THREADS:-2}
+      ONNX_WARMUP_ITERATIONS: ${ONNX_WARMUP_ITERATIONS:-3}
+      PKL_SAVE_MAX_RETRIES: ${PKL_SAVE_MAX_RETRIES:-3}
+      PKL_SAVE_RETRY_DELAY_SEC: ${PKL_SAVE_RETRY_DELAY_SEC:-0.5}
+
+      # ---- decision-math overrides (defaults reproduce prior behaviour
+      # exactly — see recognizer/src/config.py section 7 for the math) --
+      HIGH_CONFIDENCE_RAW_SCORE_THR: ${HIGH_CONFIDENCE_RAW_SCORE_THR:-0.6}
+      CONF_PENALTY_HIGH_LOW_RAW: ${CONF_PENALTY_HIGH_LOW_RAW:-0.6667}
+      CONF_PENALTY_MID: ${CONF_PENALTY_MID:-0.5}
+
+      # ---- debug output (local bind volume — never MinIO) -----------
+      # /data is now a HOST BIND MOUNT (see volumes below), not the old
+      # `recognizer_data` docker volume — everything under it is
+      # directly browsable on disk, same as the detector's /debug.
+      DEBUG_SAVE_LANDMARKED_CROPS: ${DEBUG_SAVE_LANDMARKED_CROPS:-true}
+      DEBUG_SAVE_ALIGNED: ${DEBUG_SAVE_ALIGNED:-true}
+      DEBUG_LANDMARKED_MAX_FILES: ${DEBUG_LANDMARKED_MAX_FILES:-500}
+      DEBUG_ALIGNED_MAX_FILES: ${DEBUG_ALIGNED_MAX_FILES:-500}
+
+      # crop -> aligned -> top-K gallery matches, one composite per
+      # decision. Off by default — expensive to leave on in production
+      # (one image write per recognition), turn on while investigating.
+      DEBUG_SAVE_MATCHES: ${DEBUG_SAVE_MATCHES:-false}
+      DEBUG_MATCHES_TOP_N: ${DEBUG_MATCHES_TOP_N:-5}
+      DEBUG_MATCHES_MAX_FILES: ${DEBUG_MATCHES_MAX_FILES:-500}
+      DEBUG_SAVE_REJECTED: ${DEBUG_SAVE_REJECTED:-false}
+      DEBUG_REJECTED_MAX_FILES: ${DEBUG_REJECTED_MAX_FILES:-500}
+
+      # add-face / enrollment debug — ON by default, see DEBUGGING.md.
+      DEBUG_ENROLL_ENABLED: ${DEBUG_ENROLL_ENABLED:-true}
+      DEBUG_ENROLL_MAX_FILES: ${DEBUG_ENROLL_MAX_FILES:-500}
+
+      # per-decision trace (top-K similarities, fused scores, tsallis
+      # confidence, which penalty fired) — logged at DEBUG level only.
+      LOG_DECISION_TRACE: ${LOG_DECISION_TRACE:-true}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+      API_PORT: "8011"
+    volumes:
+      # ONNX model, mounted read-only — swap without a rebuild.
+      - ${RECOGNITION_MODELS_DIR:-./models/recognition}:/models:ro
+      # Operator-supplied: pytorch fallback ckpt + warmup.jpg.
+      - ${RECOGNITION_PRETRAINED_DIR:-./recognizer/pretrained}:/app/pretrained:ro
+      # Operator-supplied: the face_alignment package.
+      - ${FACE_ALIGNMENT_DIR:-./recognizer/face_alignment}:/app/face_alignment:ro
+      # Local BIND mount (was the `recognizer_data` named docker volume
+      # before this revision): debug output only (landmarked crops,
+      # aligned face dumps, match visualizations, add-face pose-check
+      # and enrollment-card images, recognition_logs.txt). Pipeline
+      # artifacts go to MinIO, never here — see DEBUGGING.md.
+      - ${DEBUG_ROOT_HOST_DIR:-./debug}/recognizer:/data
+    ports:
+      - "${RECOGNIZER_API_PORT:-8011}:8011"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 180s        # model load + gallery download + warmup
+    stop_grace_period: 45s      # must exceed WORKER_SHUTDOWN_TIMEOUT_SEC
+    # GPU reservation — uncomment if the recognizer's ONNX/PyTorch
+    # backend should run on GPU too. Off by default: AdaFace at
+    # this scale runs fine on CPU and it's one less GPU to contend for.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: ${GPU_COUNT:-1}
+    #           capabilities: [gpu]
+
+  # -------------------------------------------------------------------
+  # `restart: unless-stopped` only covers a process that EXITED. It does
+  # nothing for a process that is alive and wedged (a hung CUDA call, a
+  # deadlocked thread). autoheal watches healthchecks and restarts
+  # anything labelled autoheal=true that goes unhealthy. Off by default:
+  #   docker compose --profile watchdog up -d
+  # -------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: face_autoheal
+    profiles: [watchdog]
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "30"
+      AUTOHEAL_START_PERIOD: "180"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks: [platform]
+
+networks:
+  platform:
+    external: true
+    name: ${SHARED_NETWORK:-eyeplate_net}
+
+
+# No named docker volumes left in this module as of this revision:
+# both face_detector and face_recognizer's debug output moved from
+# named volumes (eyeplate_face_detector_data / _recognizer_data) to
+# host bind mounts under DEBUG_ROOT_HOST_DIR (see DEBUGGING.md) — every
+# section's debug output is directly browsable on disk now, the same
+# way the detector's annotated video always was.

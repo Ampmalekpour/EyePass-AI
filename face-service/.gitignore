@@ -1,0 +1,18 @@
+# model weights — operator-supplied, not source
+models/**/*
+!models/**/.gitkeep
+
+# enrollment gallery — runtime data, not source
+recognizer/gallery/
+
+# debug output (local bind mounts, anywhere in the tree)
+**/debug_video/
+**/debug_camera/
+**/debug_ocr/
+
+# python
+__pycache__/
+*.pyc
+
+# env (keep .env.example, not the real .env with secrets)
+.env

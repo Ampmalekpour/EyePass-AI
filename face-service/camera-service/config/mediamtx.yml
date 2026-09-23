@@ -1,0 +1,34 @@
+# References: https://github.com/OPENSPHERE-Inc/src-link/blob/master/mediamtx/mediamtx.yml
+# References: https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
+
+logLevel: info
+logDestinations: [stdout]
+
+api: yes
+apiAddress: :9997
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+      - action: pprof
+
+# rtsp: yes
+# rtspAddress: :8554
+
+webrtc: yes
+webrtcAddress: :8889
+
+# hls: yes
+# hlsAddress: :8888
+
+paths:
+  all_others:
+    source: publisher
