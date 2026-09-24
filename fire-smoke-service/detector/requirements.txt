@@ -1,0 +1,17 @@
+# detector/requirements.txt
+# --------------------------------------------------------------------
+# The image is built FROM the operator's own base image (see
+# detector/Dockerfile, BASE_IMAGE build arg / AI_BASE_IMAGE in .env) —
+# the SAME base image the plate and face modules build their detectors
+# from, which already carries the heavy ML stack: torch, ultralytics
+# (YOLO), opencv-python, numpy. This file only adds what that base
+# image does NOT already have.
+#
+# Unlike plate_detector, this service uploads its own THREAT/RESOLUTION
+# alert crops straight to MinIO (no separate OCR-style second-stage
+# service sits between detection and storage here), so boto3/botocore
+# ARE needed here even though plate_detector's own requirements.txt
+# doesn't carry them.
+# --------------------------------------------------------------------
+redis==5.0.8
+boto3==1.35.36

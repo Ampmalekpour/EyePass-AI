@@ -1,0 +1,17 @@
+# model weights — operator-supplied, not source
+models/detection/*
+!models/detection/.gitkeep
+
+# debug output (local bind mounts, never meant to be committed)
+debug_video/
+debug_camera/
+
+# test video clip used by --profile test-video
+test_video.mp4
+
+# python
+__pycache__/
+*.pyc
+
+# env (keep .env.example, not the real .env with secrets)
+.env

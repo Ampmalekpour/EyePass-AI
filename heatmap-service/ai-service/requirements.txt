@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------
+# LIGHT dependencies only.
+#
+# torch, torchvision, ultralytics, numpy and opencv come from the base
+# image (see Dockerfile) — the SAME base image the plate/face/fire
+# detectors build from. Do NOT add them here: pip would resolve a
+# generic wheel and quietly replace the CUDA-matched build the base
+# image was assembled around, and the container would silently fall
+# back to CPU — or fail to import at all.
+#
+# boto3 replaces the `minio` SDK the pre-existing standalone build used
+# — see common/heatmapcore/minio_store.py, matching the plate/face/fire
+# modules' own MinIO client.
+#
+# Verify what the base image already provides:
+#   docker run --rm base_image_gpu:latest pip list | grep -Ei "torch|ultralytics|opencv|numpy"
+# ---------------------------------------------------------------------
+
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+redis>=5.0
+boto3==1.35.36
+python-dotenv>=1.0

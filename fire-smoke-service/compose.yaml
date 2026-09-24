@@ -1,0 +1,320 @@
+# =====================================================================
+# FIRE/SMOKE MODULE — fire_detector
+# ---------------------------------------------------------------------
+#   docker compose up -d --build
+#
+# One file. Dev vs prod is not a different file, it's different values
+# in .env (LOG_LEVEL, engine count, memory limits, GPU on/off) — same
+# convention the plate and face modules use.
+#
+# Single service, unlike plate/face's detector+OCR/recognizer split:
+# fire/smoke has no second-stage recognition step — detection IS the
+# result (a THREAT/RESOLUTION event per 2x2 spatial region), so there
+# is nothing downstream of the detector to scale independently.
+#
+# Redis and MinIO are external dependencies (this module's own
+# compose.infra.yaml, or whatever the platform already runs — the SAME
+# Redis/MinIO the plate and face modules point at). No depends_on
+# reaches across that boundary on purpose — the detector must survive
+# Redis or MinIO vanishing at ANY time, not just at startup: it
+# reconnects on its own (firecore.bus.RedisBus.wait_until_available)
+# and self-heals back to its last known phase/engine-count on restart.
+#
+# This module DOES bundle its own mediamtx + camera_stream (same
+# pattern as the plate module's local dev compose), on ports offset
+# from plate/face's defaults so all three modules can run side by side
+# on one host without a port collision — see .env's MEDIAMTX/RTSP
+# section if you're pointing this at an EXISTING relay instead.
+#
+# GPU is baked into fire_detector below (delete the `deploy:` block if
+# you run on a host with no GPU — DETECTION_DEVICE=auto falls back to
+# CPU on its own either way).
+# =====================================================================
+
+name: eyeplate-fire
+
+x-common: &common
+  env_file: [.env]
+  restart: unless-stopped
+  networks: [platform]
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  # -------------------------------------------------------------------
+  # This module's own MediaMTX relay + camera_stream, same shape as
+  # plate-service's local dev compose. Point MTX_RTSP_BASE_URL at an
+  # EXISTING relay instead and delete these two services if this
+  # deployment already has one running for every module to share.
+  # -------------------------------------------------------------------
+  mediamtx:
+    <<: *common
+    image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
+    container_name: fire_mediamtx
+    environment:
+      TZ: ${TZ:-UTC}
+      MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
+    volumes:
+      - ./camera-service/config/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "${RTSP_PORT:-8564}:8554/tcp"
+      - "${WEBRTC_PORT:-8899}:8889/tcp"
+      - "${WEBRTC_ICE_UDP_PORT:-8199}:8189/udp"
+      - "${HLS_PORT:-8898}:8888/tcp"
+      - "${MTX_API_PORT:-9987}:9997"
+      - "${RTMP_PORT:-1945}:1935"
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  camera_stream:
+    <<: *common
+    build:
+      context: ./camera-service
+    image: eyeplate/fire-camera-stream:${IMAGE_TAG:-dev}
+    container_name: fire_camera_stream
+    init: true
+    labels:
+      autoheal: "true"
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://${REDIS_HOST}:${REDIS_PORT}/${REDIS_DB:-0}
+      MTX_HOST: mediamtx
+      MTX_PORT: "9997"
+      STREAM_BASE_URL: ${STREAM_BASE_URL:-localhost:8899}
+      CAMERA_STREAM_DEBUG: ${CAMERA_STREAM_DEBUG:-false}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+      OFFLINE_HOLD_SECONDS: ${OFFLINE_HOLD_SECONDS:-10}
+      TRUST_MTX_ONLY: ${TRUST_MTX_ONLY:-true}
+      CAMERA_RTSP_PORT: ${CAMERA_RTSP_PORT:-554}
+      CAMERA_PING_TIMEOUT_SEC: ${CAMERA_PING_TIMEOUT_SEC:-0.2}
+      MTX_POLL_INTERVAL_SEC: ${MTX_POLL_INTERVAL_SEC:-0.5}
+      MTX_API_TIMEOUT_SEC: ${MTX_API_TIMEOUT_SEC:-1.5}
+      MONITOR_LOOP_INTERVAL_SEC: ${MONITOR_LOOP_INTERVAL_SEC:-0.3}
+      MONITOR_IDLE_SLEEP_SEC: ${MONITOR_IDLE_SLEEP_SEC:-1.0}
+      REGISTER_CAMERA_TIMEOUT_SEC: ${REGISTER_CAMERA_TIMEOUT_SEC:-1.0}
+      REMOVE_FROM_MTX_TIMEOUT_SEC: ${REMOVE_FROM_MTX_TIMEOUT_SEC:-1.0}
+
+      DEBUG_ROOT_DIR: /debug
+      CAMERA_SNAPSHOT_DEBUG_ENABLED: ${CAMERA_SNAPSHOT_DEBUG_ENABLED:-false}
+      CAMERA_SNAPSHOT_INTERVAL_SEC: ${CAMERA_SNAPSHOT_INTERVAL_SEC:-60}
+      CAMERA_SNAPSHOT_TIMEOUT_SEC: ${CAMERA_SNAPSHOT_TIMEOUT_SEC:-5}
+    volumes:
+      - ${CAMERA_DEBUG_HOST_DIR:-./debug_camera}:/debug
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+  # -------------------------------------------------------------------
+  # Test-only: loops a local video file into mediamtx over RTSP so the
+  # rest of the stack sees it exactly like a live camera. Off by
+  # default — only starts with `docker compose --profile test-video up`.
+  # One publisher per camera id; add more blocks the same way if you
+  # need more than 6 test cameras. See README "Testing without real
+  # cameras".
+  # -------------------------------------------------------------------
+  video_publisher_1:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: fire_video_publisher_1
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/1
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  video_publisher_2:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: fire_video_publisher_2
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/2
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  video_publisher_3:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: fire_video_publisher_3
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/3
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  # -------------------------------------------------------------------
+  # Detection + spatial-grid threat verification + THREAT/RESOLUTION
+  # dispatch. Self-healing: reads its last known phase + engine_count
+  # from Redis on boot and restores itself, without waiting for the
+  # backend to resend anything.
+  # -------------------------------------------------------------------
+  fire_detector:
+    <<: *common
+    build:
+      context: .
+      dockerfile: detector/Dockerfile
+      args:
+        # Same base image the plate and face detectors build from —
+        # swap this without touching any code.
+        BASE_IMAGE: ${AI_BASE_IMAGE:-base_image_gpu:latest}
+    image: eyeplate/fire-detector:${IMAGE_TAG:-dev}
+    container_name: fire_detector
+    # PID-1 reaper for the spawned engine subprocesses, so a crashed
+    # engine does not linger as a zombie.
+    init: true
+    labels:
+      autoheal: "true"     # picked up only if the `watchdog` profile is active
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_MODULE: ${REDIS_MODULE:-fire}
+
+      # Inside the network the relay is reachable by name. Point this
+      # at your EXISTING mediamtx if fire_detector doesn't share a
+      # network with it directly.
+      MTX_RTSP_BASE_URL: ${MTX_RTSP_BASE_URL:-rtsp://mediamtx:8554}
+
+      # ---- compute --------------------------------------------------
+      DETECTION_DEVICE: ${DETECTION_DEVICE:-auto}
+      STRICT_DEVICE: ${STRICT_DEVICE:-false}
+      TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-0}
+      MODEL_PATH: ${DETECTION_MODEL_PATH:-/models/best.pt}
+      DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-640}
+      DETECTION_CONF_THRESHOLD: ${DETECTION_CONF_THRESHOLD:-0.25}
+
+      # ---- engine topology / self-healing -----------------------------
+      MAX_CAMERAS_PER_ENGINE: ${MAX_CAMERAS_PER_ENGINE:-6}
+      DEFAULT_ENGINE_COUNT: ${DEFAULT_ENGINE_COUNT:-1}
+      ENGINE_REBALANCE_INTERVAL_SEC: ${ENGINE_REBALANCE_INTERVAL_SEC:-30}
+      ENGINE_SHUTDOWN_TIMEOUT_SEC: ${ENGINE_SHUTDOWN_TIMEOUT_SEC:-30}
+
+      # ---- camera health ----------------------------------------------
+      HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}
+      CAMERA_OFFLINE_GRACE_SECONDS: ${CAMERA_OFFLINE_GRACE_SECONDS:-10}
+
+      # ---- internal-processing-error auto-restart ----------------------
+      ERROR_RESTART_MAX_RETRIES: ${ERROR_RESTART_MAX_RETRIES:-1}
+      ERROR_RESTART_DELAY_SEC: ${ERROR_RESTART_DELAY_SEC:-3}
+      ERROR_RESTART_COUNTER_RESET_AFTER_SEC: ${ERROR_RESTART_COUNTER_RESET_AFTER_SEC:-600}
+
+      # ---- spatial-grid threat verification ----------------------------
+      GRID_WINDOW_SIZE: ${GRID_WINDOW_SIZE:-30}
+      GRID_VERIFY_THRESHOLD: ${GRID_VERIFY_THRESHOLD:-22}
+      GRID_COOLDOWN_FRAMES: ${GRID_COOLDOWN_FRAMES:-90}
+
+      # ---- RTSP reader ---------------------------------------------------
+      RTSP_OPEN_TIMEOUT_MS: ${RTSP_OPEN_TIMEOUT_MS:-5000}
+      RTSP_READ_TIMEOUT_MS: ${RTSP_READ_TIMEOUT_MS:-5000}
+      RTSP_FFMPEG_STIMEOUT_US: ${RTSP_FFMPEG_STIMEOUT_US:-5000000}
+      RTSP_RECONNECT_BACKOFF_SEC: ${RTSP_RECONNECT_BACKOFF_SEC:-0.2}
+      RTSP_READ_FAIL_BACKOFF_SEC: ${RTSP_READ_FAIL_BACKOFF_SEC:-0.5}
+      RTSP_READER_JOIN_TIMEOUT_SEC: ${RTSP_READER_JOIN_TIMEOUT_SEC:-2.0}
+
+      # ---- engine loop / heartbeat ----------------------------------------
+      SLOW_BATCH_WARN_MS: ${SLOW_BATCH_WARN_MS:-150.0}
+      PIPELINE_STATS_LOG_INTERVAL_SEC: ${PIPELINE_STATS_LOG_INTERVAL_SEC:-5.0}
+      HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-10}
+      HEARTBEAT_TTL_SEC: ${HEARTBEAT_TTL_SEC:-30}
+
+      # ---- MinIO (THREAT/RESOLUTION alert crops) -----------------------
+      AWS_S3_ENDPOINT_URL: ${MINIO_ENDPOINT}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      AWS_ACCESS_KEY_ID_FULL: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY_FULL: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_REGION_NAME: us-east-1
+      AWS_S3_USE_SSL: ${MINIO_SECURE:-False}
+      AWS_PRIVATE_BUCKET_NAME: ${MINIO_PRIVATE_BUCKET:-eyepass-private-bucket}
+
+      # ---- debug output (local bind volume — never MinIO) -----------
+      DEBUG_VIDEO_ENABLED: ${DETECTOR_DEBUG_VIDEO_ENABLED:-false}
+      DEBUG_VIDEO_DIR: /debug
+      DEBUG_VIDEO_SEGMENT_SECONDS: ${DEBUG_VIDEO_SEGMENT_SECONDS:-240}
+      DEBUG_VIDEO_FPS: ${DEBUG_VIDEO_FPS:-12}
+      DEBUG_VIDEO_MAX_SEGMENTS: ${DEBUG_VIDEO_MAX_SEGMENTS:-12}
+      DEBUG_VIDEO_SCALE: ${DEBUG_VIDEO_SCALE:-1.0}
+      DEBUG_VIDEO_EVERY_N: ${DEBUG_VIDEO_EVERY_N:-1}
+      DEBUG_VIDEO_CODEC: ${DEBUG_VIDEO_CODEC:-mp4v}
+      DEBUG_VIDEO_EXT: ${DEBUG_VIDEO_EXT:-.mp4}
+      DEBUG_VIDEO_JSONL: ${DEBUG_VIDEO_JSONL:-true}
+
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+      API_PORT: "8012"
+
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+    volumes:
+      # Model weights, mounted rather than baked so swapping the model
+      # needs no rebuild. Operator supplies best.pt here.
+      - ${DETECTION_MODELS_DIR:-./models/detection}:/models:ro
+      # Annotated debug video. A BIND mount, not a named volume, on
+      # purpose: meant to be opened straight off your own disk.
+      - ${DEBUG_VIDEO_HOST_DIR:-./debug_video}:/debug
+    ports:
+      - "${DETECTOR_API_PORT:-8012}:8012"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8012/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 120s        # YOLO load + CUDA init is slow on first boot
+    stop_grace_period: 60s      # must exceed ENGINE_SHUTDOWN_TIMEOUT_SEC
+    # GPU reservation. Requires nvidia-container-toolkit on the host.
+    # Delete this whole `deploy:` block to run on a host with no GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+
+  # -------------------------------------------------------------------
+  # `restart: unless-stopped` only covers a process that EXITED. It does
+  # nothing for a process that is alive and wedged (a hung CUDA call, a
+  # deadlocked thread). autoheal watches healthchecks and restarts
+  # anything labelled autoheal=true that goes unhealthy. Off by default:
+  #   docker compose --profile watchdog up -d
+  # -------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: fire_autoheal
+    profiles: [watchdog]
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "30"
+      AUTOHEAL_START_PERIOD: "180"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks: [platform]
+
+networks:
+  platform:
+    external: true
+    name: ${SHARED_NETWORK:-eyeplate_net}

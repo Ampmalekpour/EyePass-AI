@@ -129,19 +129,80 @@ services:
 
 
   video_publisher:
-    build:
-      context: .
-      dockerfile: Dockerfile.publisher
-    container_name: plate_video_publisher
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_1
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/${TEST_VIDEO_CAMERA_ID:-1}
+      MTX_RTSP_URL: rtsp://mediamtx:8554/1
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on:
-      mediamtx:
-        condition: service_started
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_2:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_2
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/2
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_3:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_3
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/3
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_4:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_4
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/4
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_5:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_5
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/5
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_6:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_6
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: rtsp://mediamtx:8554/6
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
