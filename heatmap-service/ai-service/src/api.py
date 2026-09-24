@@ -436,7 +436,19 @@ def create_app() -> FastAPI:
                     DETECTION_DEVICE, MTX_RTSP_BASE_URL)
 
         lifecycle.self_heal()
-        lifecycle.start_process()
+
+        # Matches the plate/face/fire modules' boot semantics: self_heal()
+        # already resumes PROCESSING on its own if that was the last
+        # persisted phase. Don't ALSO force start_process() unconditionally
+        # here — that used to promote to processing on every cold boot even
+        # with zero cameras ever activated, which is inconsistent with the
+        # other three modules (they stay IDLE on a truly fresh boot). If the
+        # durable `ai:active` ledger already has cameras in it (redeploy
+        # while the backend still considers cameras active), promote now —
+        # `_reconcile_on_startup` (started below) is what actually attaches
+        # them; this only makes sure the phase itself reflects real demand.
+        if active_state.all_active():
+            lifecycle.start_process()
         ready["engines"] = True
 
         threading.Thread(target=monitor_engine_status, daemon=True, name="engine-status").start()
