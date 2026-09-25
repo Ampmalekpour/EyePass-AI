@@ -165,4 +165,28 @@ class RedisKeys:
         return f"{self.module}:internal:demand:events"
 
 
+    # ================================================================
+    # INTERNAL — control hub (see control-hub/src/protocol.py)
+    # ================================================================
+    @property
+    def hub_events(self) -> str:
+        """STREAM. publisher: detector engines (track_started, trigger,
+        submitted, track_update, track_ended, engine_started).
+        consumer: control hub (consumer group)."""
+        return f"{self.module}:internal:hub:events"
+
+    @property
+    def hub_results(self) -> str:
+        """STREAM. publisher: recognizer / OCR workers, one entry per
+        finished task, keyed by the task's global track uid.
+        consumer: control hub (consumer group)."""
+        return f"{self.module}:internal:hub:results"
+
+    def hub_ctl(self, engine_id) -> str:
+        """LIST, one per detector engine. publisher: control hub
+        (result acks, satisfied flag, periodic re-query requests).
+        consumer: that engine (BRPOP)."""
+        return f"{self.module}:internal:hub:ctl:{engine_id}"
+
+
 DEFAULT_KEYS = RedisKeys()

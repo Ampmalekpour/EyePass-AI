@@ -23,6 +23,15 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "recognizer", "src"))
 
+# detector/src and recognizer/src both have a top-level `config` module.
+# When the whole suite runs in one process, a detector test may already
+# have imported the DETECTOR's config (and pose.py would bind to it), so
+# drop any cached copies and load the recognizer's own.
+for _m in ("config", "pose"):
+    _cached = sys.modules.get(_m)
+    if _cached is not None and "recognizer" not in (getattr(_cached, "__file__", "") or ""):
+        del sys.modules[_m]
+
 import config  # noqa: E402
 import pose  # noqa: E402
 

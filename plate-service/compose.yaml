@@ -271,8 +271,12 @@ services:
       STOP_TIME_SECONDS: ${STOP_TIME_SECONDS:-3.0}
       STOP_VELOCITY_THRESHOLD: ${STOP_VELOCITY_THRESHOLD:-8.0}
       STOP_MIN_SAMPLES: ${STOP_MIN_SAMPLES:-10}
-      OCR_CONF_SKIP_THRESHOLD: ${OCR_CONF_SKIP_THRESHOLD:-0.85}
-      OCR_FINALIZE_TIMEOUT_SEC: ${OCR_FINALIZE_TIMEOUT_SEC:-10.0}
+      # (OCR_CONF_SKIP_THRESHOLD / OCR_FINALIZE_TIMEOUT_SEC moved to the
+      # control hub: PLATE_SATISFIED_CONF / PLATE_FINALIZE_TIMEOUT_SEC)
+
+      # ---- control hub: crop submission (see platecore/hub.py) -----
+      SUBMIT_TIMEOUT_SEC: ${SUBMIT_TIMEOUT_SEC:-5.0}
+      TRACK_UPDATE_INTERVAL_SEC: ${TRACK_UPDATE_INTERVAL_SEC:-5.0}
 
       # ---- trigger history buffers (previously bare literals in triggers.py) --
       TRIGGER_POSITION_HISTORY_MAX: ${TRIGGER_POSITION_HISTORY_MAX:-30}
@@ -494,6 +498,53 @@ services:
       retries: 4
       start_period: 180s        # PaddleOCR model load + warmup
     stop_grace_period: 45s      # must exceed WORKER_SHUTDOWN_TIMEOUT_SEC
+
+  # -------------------------------------------------------------------
+  # CONTROL HUB — owns every track's recognition state for this module.
+  # The detector reports track events (born / trigger / crop sent /
+  # gone), the OCR workers report results, and the hub alone decides
+  # what reaches the backend (plate:vehicle:results) and when. CPU-only and
+  # tiny. Self-healing: track state is checkpointed to Redis and
+  # restored on restart; unacked stream entries are replayed. Run
+  # exactly ONE per module per Redis (a second copy just stands by on
+  # the leader lease). See ../control-hub/README.md.
+  # -------------------------------------------------------------------
+  control_hub:
+    <<: *common
+    build:
+      context: ../control-hub
+    image: eyeplate/control-hub:${IMAGE_TAG:-dev}
+    container_name: plate_control_hub
+    init: true
+    labels:
+      autoheal: "true"
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      HUB_MODULES: plate
+      HUB_HEALTH_PORT: "8020"
+
+      # ---- policy (defaults reproduce the previous pipeline's gates;
+      # see control-hub/README.md for every knob) ---------------------
+      PLATE_SATISFIED_CONF: ${PLATE_SATISFIED_CONF:-0.85}
+      PLATE_CONSENSUS_MIN: ${PLATE_CONSENSUS_MIN:-3}
+      PLATE_TRIGGER_MAX_WAIT_SEC: ${PLATE_TRIGGER_MAX_WAIT_SEC:-3.0}
+      PLATE_PERIODIC_INTERVAL_SEC: ${PLATE_PERIODIC_INTERVAL_SEC:-3.0}
+      PLATE_PERIODIC_FIRST_DELAY_SEC: ${PLATE_PERIODIC_FIRST_DELAY_SEC:-1.0}
+      PLATE_FINALIZE_TIMEOUT_SEC: ${PLATE_FINALIZE_TIMEOUT_SEC:-10.0}
+      PLATE_FINAL_MIN_SEEN_FRAMES: ${PLATE_FINAL_MIN_SEEN_FRAMES:-8}
+      PLATE_FINAL_MIN_CROPS: ${PLATE_FINAL_MIN_CROPS:-1}
+      PLATE_TRACK_STALE_SEC: ${PLATE_TRACK_STALE_SEC:-120}
+      PLATE_LATE_RESULT_GRACE_SEC: ${PLATE_LATE_RESULT_GRACE_SEC:-30}
+    ports:
+      - "${HUB_API_PORT:-8021}:8020"      # /health, /tracks
+    stop_grace_period: 15s
 
   # -------------------------------------------------------------------
   # `restart: unless-stopped` only covers a process that EXITED. It does

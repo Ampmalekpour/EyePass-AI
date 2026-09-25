@@ -161,11 +161,10 @@ STOP_MIN_SAMPLES = _int("STOP_MIN_SAMPLES", 15)
 STOP_TIME_SECONDS = _float("STOP_TIME_SECONDS", 3.0)
 STOP_VELOCITY_THRESHOLD = _float("STOP_VELOCITY_THRESHOLD", 1.5)
 
-PERIODIC_MODE = os.getenv("PERIODIC_MODE", "frame")
-PERIODIC_FRAME_INTERVAL = _int("PERIODIC_FRAME_INTERVAL", 60)
-PERIODIC_TIME_INTERVAL = _float("PERIODIC_TIME_INTERVAL", 3.0)
-PERIODIC_RECOG_CONF_THRESH = _float("PERIODIC_RECOG_CONF_THRESH", 0.70)
-FINALIZE_MAX_CROPS = _int("FINALIZE_MAX_CROPS", 1)
+# (PERIODIC_* / PERIODIC_RECOG_CONF_THRESH / FINALIZE_MAX_CROPS used to
+# be duplicated here from the detector's config; nothing in the
+# recognizer read them. Periodic cadence and the "satisfied" threshold
+# now live in the control hub, FINALIZE_MAX_CROPS in the detector.)
 
 # ============================================================================
 # 6. QUALITY GATES & HEAD POSE (verbatim from the reference config.py)

@@ -33,6 +33,35 @@ call to Django, and the key names/shapes that Django and
 is safe to deploy in place).
 
 
+## Control hub (third service — owns recognition state)
+
+The detector no longer merges OCR results, holds triggers or builds
+the final record. A third service, **`control_hub`** (source in
+[`../control-hub`](../control-hub/README.md), started by this folder's
+`compose.yaml`), owns every track's state:
+
+```
+plate_detector  --track events-->  control_hub  --> plate:vehicle:results
+       |  ^                              ^
+ tasks |  | ctl (ack / satisfied /       | results (per task, keyed by the
+       v  |  periodic request)           | track's global uid)
+plate_ocr  ------------------------------+
+```
+
+- The detector reports `track_started`, `trigger` (cross_line / stop_roi, including
+  the crossing **direction**), `submitted`, `track_update` and
+  `track_ended`, then forgets the track.
+- The OCR workers send each result to the hub, not back to the engine.
+- The hub votes across results, decides when the track is
+  **satisfied** (and tells the detector to stop sending crops),
+  publishes each trigger once, and publishes the `leave_scene` record
+  after the last in-flight result arrives.
+
+The backend key and payload shape are unchanged; new fields are
+additive. The inconsistencies this fixed are listed in
+[`../control-hub/README.md`](../control-hub/README.md#what-changed-and-why).
+
+
 ## Contents
 
 ```
@@ -163,6 +192,11 @@ has no per-camera concept (see `ocr_service/src/main.py`'s docstring).
 | `internal:ocr:tasks` | LIST — shared work queue, every detector engine LPUSHes, every OCR worker BRPOPs |
 | `internal:ocr:results:{engine_id}` | LIST, one per detector engine — a result routes back to the exact `Engine` instance that owns the track |
 | `internal:ocr:tasks:pending` | informational counter (watch it in RedisInsight/Commander, or `redis_tools.py`'s `show_ocr_queue_depth()`) |
+| `internal:hub:events` | STREAM — detector engines → control hub (track lifecycle, triggers, submissions) |
+| `internal:hub:results` | STREAM — OCR workers → control hub (one entry per task, keyed by track uid) |
+| `internal:hub:ctl:{engine_id}` | LIST — control hub → one detector engine (result ack, satisfied flag, periodic request) |
+| `internal:hub:track:{uid}` | control hub's per-track checkpoint (restored on restart) |
+| `internal:hub:leader` / `internal:hub:heartbeat` | one active hub per module / liveness |
 
 `redis_tools.py` has helpers for every row in both tables
 (`set_camera`, `activate`/`deactivate`, `show_active_cameras`,
@@ -343,6 +377,13 @@ Docker images — it is `tests/`-only; the Dockerfiles install the real
 base image (detector) or a plain python image (OCR service — see
 `ocr_service/Dockerfile`'s comment on why it doesn't need the heavy
 torch/CUDA base image at all).
+
+`tests/test_engine_hub.py` covers the engine's side of the control-hub
+contract on the real Engine methods: crop submission and its gates
+(in flight / satisfied / unchanged crop), hub ctl handling, the
+track-end finalize pass, and ending live tracks on camera removal. The
+hub itself has its own suite (`../control-hub/tests`), including an
+end-to-end run against a real `redis-server`.
 
 Run it yourself:
 ```bash

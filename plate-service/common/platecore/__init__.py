@@ -30,6 +30,7 @@ __all__ = [
     "active_state",
     "lifecycle",
     "codec",
+    "hub",
     "minio_store",
     "logging_setup",
 ]

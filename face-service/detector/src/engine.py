@@ -3,30 +3,33 @@ engine.py
 --------------------------------------------------------------------
 The Engine: one YOLO model + one BYTETracker per camera it owns,
 running in its own subprocess (see _engine_process_main /
-EngineManager). Detection, tracking and spatial-trigger logic are
-carried over from the reference video_processor.py unchanged; the only
-structural change is where face-crop tasks go and where their results
-come back from:
+EngineManager). Detection, tracking, spatial-trigger geometry, best-
+crop ranking and liveness run here, per frame.
 
-    reference pipeline:  self.fr_input_queue.put(task)   (mp.Queue,
-                          consumed by AFRWorker subprocesses this same
-                          Engine spawned and owned 1:1)
+Everything about a track's RECOGNITION STATE lives in the control hub
+(control-hub/), not here:
 
-    this pipeline:        self.rec_client.submit(task)    (Redis LIST,
-                          consumed by ANY worker in the recognizer
-                          service's independently-sized pool)
+    detector (this file)                 control hub
+    --------------------                 -----------
+    track born     -> track_started ---> holds the track's state
+    trigger fires  -> trigger ---------> publishes it now (identity
+                     (+ submits a crop)   known) or when its result lands
+    crop sent      -> submitted -------> tracks in-flight tasks
+    recognizer result ------------------> votes, decides "satisfied"
+                   <- ctl: result/state   (detector stops sending)
+                   <- ctl: request        (periodic re-query)
+    track gone     -> track_ended ------> waits for the finalize pass,
+                     (+ finalize crops)   publishes the final record
 
-Everything downstream of that call — the periodic/spatial dispatch
-state machine, the finalize fast-lane vs high-fidelity routes, the
-best-crop ranking, the final publish to the backend — is the same
-logic as the reference pipeline, because the task/result SHAPES are
-unchanged; only the transport is.
+The engine never publishes to face:ai:results itself any more and
+forgets a track the moment it emits track_ended — a result that
+arrives late, or after an engine restart / camera rebalance, still has
+a home (the hub), which is what used to get dropped.
 --------------------------------------------------------------------
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 import math
 import multiprocessing as mp
@@ -44,10 +47,12 @@ import config
 import debug_extras
 from debug_recorder import DebugConfig, DebugRecorder
 from facecore.bus import RedisBus
-from facecore.codec import DateTimeEncoder
+from facecore.hub import (
+    K_SUBMITTED, K_TRACK_ENDED, K_TRACK_STARTED, K_TRACK_UPDATE, K_TRIGGER,
+    HubClient, TrackRecState, new_task_id, new_track_uid,
+)
 from facecore.logging_setup import setup_logger
 from liveness import LivenessAnalyzer, LivenessConfig
-from rec_client import RecognitionClient
 from rtsp_reader import RTSPStreamReader, encode_image, measure_sharpness
 from tracker import BYTETracker
 from triggers import process_track_triggers
@@ -153,9 +158,11 @@ class Engine:
         self.model = YOLO(self.model_path).to(self.device)
         self.logger.info(f"YOLO loaded on {self.device} | {self.model_path}")
 
-        # ---- Redis: publish crop tasks / receive recognition results --
+        # ---- Redis: crop tasks out, control-hub events/ctl both ways --
         self.bus = RedisBus(module=config.REDIS_MODULE)
-        self.rec_client = RecognitionClient(self.bus, self.engine_id)
+        self.hub = HubClient(self.bus, self.engine_id)
+        # uid -> (camera_id, track_id), to route hub ctl messages
+        self._uid_index: Dict[str, Tuple[str, int]] = {}
 
         # ---- liveness (anti-spoof) + annotated debug video -------------
         # Both are per-camera objects created in add_camera(); these are
@@ -170,11 +177,10 @@ class Engine:
             self.debug_cfg.segment_seconds, self.debug_cfg.dir,
         )
 
-        self.PERIODIC_MODE = config.PERIODIC_MODE
-        self.PERIODIC_FRAME_INTERVAL = config.PERIODIC_FRAME_INTERVAL
-        self.PERIODIC_TIME_INTERVAL = config.PERIODIC_TIME_INTERVAL
-        self.PERIODIC_RECOG_CONF_THRESH = config.PERIODIC_RECOG_CONF_THRESH
         self.FINALIZE_MAX_CROPS = config.FINALIZE_MAX_CROPS
+        # When several requests are pending for one track, the task is
+        # labelled with the most important one (a single crop answers all).
+        self.STAGE_PRIORITY = {"finalize": 3, "line_cross": 2, "stopped_roi": 2, "periodic": 1}
 
         if self.save_output:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -452,6 +458,7 @@ class Engine:
             "last_frame_ts": None,
             "_started_ts": time.time(),
             "track_meta": {},
+            "rec_state": {},
             "best_crops": {},
             "best_frame": {},
             "periodic_enabled": bool(cond_per_trig),
@@ -472,11 +479,20 @@ class Engine:
         self.logger.info("add_camera(%s): step 5/5 — done", camera_id)
         self.logger.info(f"Added camera {camera_id} -> {url}")
 
-    def remove_camera(self, camera_id: str):
+    def remove_camera(self, camera_id: str, reason: str = "camera_removed"):
         camera_id = str(camera_id)
-        cam = self.cameras.pop(camera_id, None)
+        cam = self.cameras.get(camera_id)
         if not cam:
             return
+        # Hand every live track to the hub before forgetting it — a
+        # deactivation, a rebalance migration or an engine shutdown must
+        # still produce a final record for tracks the backend has seen.
+        for tid, tmeta in list(cam["track_meta"].items()):
+            try:
+                self._end_track(camera_id, tid, tmeta, reason=reason)
+            except Exception:
+                self.logger.exception("cam=%s track=%s: ending on removal failed", camera_id, tid)
+        self.cameras.pop(camera_id, None)
         try:
             cam["reader"].stop()
         except Exception:
@@ -661,26 +677,6 @@ class Engine:
         else:
             return 1
 
-    def _should_send_periodic_check(self, meta: dict) -> bool:
-        if not meta:
-            return False
-        seen_frames = meta.get("seen_frames", 0)
-
-        if self.PERIODIC_MODE == "time":
-            current_time = time.time()
-            last_periodic_ts = meta.get("last_periodic_timestamp", 0.0)
-            if last_periodic_ts == 0.0:
-                meta["last_periodic_timestamp"] = current_time
-                return seen_frames == self.PERIODIC_FRAME_INTERVAL
-            elapsed_time = current_time - last_periodic_ts
-            if elapsed_time >= self.PERIODIC_TIME_INTERVAL:
-                meta["last_periodic_timestamp"] = current_time
-                return True
-        else:
-            if seen_frames > 0 and seen_frames % self.PERIODIC_FRAME_INTERVAL == 0:
-                return True
-        return False
-
     # ============================================================================
     # Debug-recorder context
     # ============================================================================
@@ -754,7 +750,7 @@ class Engine:
                                   len(self.cameras), qdepths or "{}")
 
             self._drain_control()
-            self._drain_recognition_outputs()
+            self._drain_hub_ctl()
 
             if not self.cameras:
                 time.sleep(0.05)
@@ -872,30 +868,32 @@ class Engine:
                 for track in online_targets:
                     track_id = int(track.track_id)
 
+                    now_ts = time.time()
                     meta = cam["track_meta"].get(track_id)
                     if meta is None:
+                        uid = new_track_uid(camera_id, self.engine_id)
                         cam["track_meta"][track_id] = {
+                            "uid": uid,
                             "first_seen_fid": fid,
                             "last_seen_fid": fid,
+                            "first_seen_ts": now_ts,
                             "seen_frames": 1,
-                            "recognition_history": {},
-                            "deferred_events": {}
                         }
                         meta = cam["track_meta"][track_id]
-                        self.logger.info("cam=%s track=%d NEW", camera_id, track_id)
+                        cam["rec_state"][track_id] = TrackRecState(uid)
+                        self._uid_index[uid] = (camera_id, track_id)
+                        self.hub.emit(K_TRACK_STARTED, {
+                            "uid": uid, "camera_id": camera_id, "track_id": track_id,
+                            "video_source": cam["url"], "triggers": self._hub_triggers(cam),
+                        })
+                        self.logger.info("cam=%s track=%d NEW uid=%s", camera_id, track_id, uid)
                         _rec = cam.get("recorder")
                         if _rec is not None:
                             _rec.log("TRACK_NEW", f"trk{track_id} appeared", track_id=track_id)
                     else:
                         meta["last_seen_fid"] = fid
                         meta["seen_frames"] += 1
-                        meta.setdefault("recognition_history", {})
-                        meta.setdefault("deferred_events", {})
-
-                    if meta.get("pending_recognition", False):
-                        elapsed = time.time() - meta.get("pending_since", 0.0)
-                        if elapsed > 1.0:
-                            meta["pending_recognition"] = False
+                    rec_state: TrackRecState = cam["rec_state"][track_id]
 
                     track_class = int(track.flag_fdf)
 
@@ -914,6 +912,12 @@ class Engine:
                         yaw_pitch_roll, valid_landmarks = self._compute_pose_from_track(track_landmarks, W, H)
                         mlc = float(np.mean(track_landmarks[:, 2]))
 
+                    # No usable landmarks this frame: keep the crop only as a
+                    # placeholder when the track has nothing better yet.
+                    # Previously this `continue`d, which also skipped the
+                    # trigger geometry below for that frame — a line crossed
+                    # while landmarks flickered was detected late or missed.
+                    skip_crop = False
                     if track_landmarks is None or mlc <= 0.0:
                         existing_crops = cam["best_crops"].get(track_id, {}).get("reg1", [])
                         if not existing_crops:
@@ -921,7 +925,7 @@ class Engine:
                             yaw_group = 1
                             mlc = 0.01
                         else:
-                            continue
+                            skip_crop = True
 
                     if yaw_pitch_roll is not None:
                         yaw_group = self._get_yaw_group(yaw_pitch_roll["yaw"])
@@ -942,7 +946,7 @@ class Engine:
                     reso = int(ww * hh)
                     ar = float(ww / hh) if hh > 0 else 0.0
 
-                    was_added, updated_best = self._update_best_crops(
+                    was_added, updated_best = (False, False) if skip_crop else self._update_best_crops(
                         cam, track_id, track_class, crop, score, reso, ar, sharp, mlc, yaw_group,
                         landmarks=track_landmarks, crop_offset=(x1, y1)
                     )
@@ -958,10 +962,11 @@ class Engine:
                     # LIVENESS / PRESENTATION-ATTACK CHECK
                     # ============================================================
                     # Writes liveness / liveness_score / liveness_reason /
-                    # liveness_evals straight onto meta, so it rides along
-                    # into every recognition task AND into the ai:results
-                    # payload without any extra plumbing — _publish_face_update
-                    # deep-copies meta as-is.
+                    # liveness_evals onto meta. The verdict rides along in
+                    # every recognition task and in every hub event
+                    # (trigger / track_update / track_ended); the hub
+                    # attaches it to what it publishes and, with
+                    # FACE_LIVENESS_POLICY=reject, acts on it.
                     analyzer = cam.get("liveness")
                     if analyzer is not None and gray is not None:
                         prev_verdict = meta.get("liveness")
@@ -986,14 +991,22 @@ class Engine:
                                     f"({verdict.get('liveness_reason')})",
                                     track_id=track_id, data=verdict,
                                 )
+                            # verdict changes reach the hub immediately, not
+                            # at the next heartbeat
+                            rec_state.last_update_emit = now_ts
+                            self.hub.emit(K_TRACK_UPDATE, self._track_stats(cam, track_id, meta))
                             if now_verdict == "fake":
                                 debug_extras.save_liveness_reject(
                                     camera_id, track_id, roi_frame, (x1, y1, x2, y2), meta
                                 )
 
                     # ============================================================================
-                    # STATE-AWARE SPATIAL TRIGGER HANDLERS (CASES A, B, C)
+                    # SPATIAL TRIGGERS -> control hub
                     # ============================================================================
+                    # The engine only detects the trigger and, when the hub
+                    # has not said "satisfied", sends a crop for it in the
+                    # same frame. Whether/when the event is published —
+                    # and with which identity — is the hub's decision.
                     try:
                         trigger_states = cam.setdefault("trigger_states", {})
                         spatial_events = process_track_triggers(
@@ -1011,61 +1024,43 @@ class Engine:
                         for event_type, event_data in spatial_events.items():
                             if event_data is None:
                                 continue
-                            if event_type not in ["line_cross", "stopped_roi"]:
+                            if event_type not in ("line_cross", "stopped_roi"):
                                 continue
                             if event_type == "line_cross" and not cam.get("cross_line_enabled", False):
                                 continue
                             if event_type == "stopped_roi" and not cam.get("flag_stop_roi_enabled", False):
                                 continue
                             if meta.get(f"{event_type}_sent", False):
-                                continue
+                                continue  # once per event per track (the hub dedupes too)
+                            meta[f"{event_type}_sent"] = True
 
-                            reg1_crops = cam["best_crops"].get(track_id, {}).get("reg1", [])
-                            current_best_fid = reg1_crops[0]["frame_number"] if reg1_crops else None
-                            has_rec_result = "identified_as" in meta
-                            current_conf = float(meta.get("confidence", 0.0))
-                            last_sent_fid = meta.get("last_sent_fid", -1)
-
-                            # CASE A: high-confidence identity already known -> dispatch immediately.
-                            if has_rec_result and current_conf >= self.PERIODIC_RECOG_CONF_THRESH:
-                                self._publish_face_update(camera_id, track_id, meta, event_type)
-                                meta[f"{event_type}_sent"] = True
-                            else:
-                                # CASE B/C: no/low-confidence identity -> buffer + maybe ask for one.
-                                if event_type not in meta["deferred_events"]:
-                                    meta["deferred_events"][event_type] = event_data
-
-                                if not meta.get("pending_recognition", False):
-                                    if current_best_fid != last_sent_fid:
-                                        if self._send_spatial_event_crop(camera_id, track_id, meta, event_type):
-                                            if current_best_fid is not None:
-                                                meta["last_sent_fid"] = current_best_fid
+                            rec_state.request(event_type, now_ts)
+                            task_id = self._try_submit(camera_id, track_id, meta, rec_state, now_ts)
+                            self.hub.emit(K_TRIGGER, {
+                                "uid": meta["uid"], "camera_id": camera_id, "track_id": track_id,
+                                "event": event_type, "task_id": task_id,
+                                "detail": self._trigger_detail(event_data),
+                                "seen_frames": meta.get("seen_frames", 0),
+                                "liveness": self._liveness_snapshot(meta),
+                            })
+                            self.logger.info("cam=%s track=%d TRIGGER %s -> hub (task=%s)",
+                                             camera_id, track_id, event_type, task_id)
+                            _rec = cam.get("recorder")
+                            if _rec is not None:
+                                _rec.log("TRIGGER", f"trk{track_id} {event_type} "
+                                                    f"{event_data.get('direction', '')}", track_id=track_id)
                     except Exception as trigger_fault:
                         self.logger.error(f"Failed spatial validation step on track {track_id}: {trigger_fault}")
 
-                    # ====================== CONDITIONAL PERIODIC SEND ======================
-                    if self._should_send_periodic_check(meta):
-                        if cam.get("periodic_enabled", False):
-                            reg1_crops = cam["best_crops"].get(track_id, {}).get("reg1", [])
-                            current_best_fid = reg1_crops[0]["frame_number"] if reg1_crops else None
-                            has_rec_result = "identified_as" in meta
-                            current_conf = float(meta.get("confidence", 0.0))
-                            last_sent_fid = meta.get("last_sent_fid", -1)
-
-                            should_send = False
-                            if meta.get("pending_recognition", False):
-                                should_send = False
-                            elif not has_rec_result:
-                                should_send = current_best_fid != last_sent_fid
-                            else:
-                                if current_conf >= self.PERIODIC_RECOG_CONF_THRESH:
-                                    should_send = False
-                                else:
-                                    should_send = current_best_fid is not None and current_best_fid > last_sent_fid
-
-                            if should_send:
-                                if self._send_intermediate_best_crop(camera_id, track_id, meta):
-                                    meta["last_sent_fid"] = current_best_fid
+                    # ====================== PENDING REQUESTS / HEARTBEAT ======================
+                    # Periodic re-queries arrive as hub "request" messages;
+                    # a trigger whose crop could not be sent yet stays
+                    # requested until a better crop exists.
+                    if rec_state.requested:
+                        self._try_submit(camera_id, track_id, meta, rec_state, now_ts)
+                    if now_ts - rec_state.last_update_emit >= config.TRACK_UPDATE_INTERVAL_SEC:
+                        rec_state.last_update_emit = now_ts
+                        self.hub.emit(K_TRACK_UPDATE, self._track_stats(cam, track_id, meta))
 
                     if self.save_output and track.detbb is not None:
                         tx1, ty1, tx2, ty2 = map(int, track.detbb)
@@ -1076,7 +1071,6 @@ class Engine:
                         })
 
                     if cam.get("recorder") is not None:
-                        pend_since = meta.get("pending_since", 0.0)
                         debug_tracks.append({
                             "track_id": track_id,
                             "bbox": (x1, y1, x2, y2),
@@ -1098,12 +1092,13 @@ class Engine:
                             "liveness_reason": meta.get("liveness_reason"),
                             "liveness_evals": meta.get("liveness_evals"),
                             "liveness_metrics": meta.get("liveness_metrics"),
-                            "identified_as": meta.get("identified_as"),
-                            "rec_confidence": meta.get("confidence", 0.0),
-                            "rec_pending": meta.get("recognition_event_type")
-                            if meta.get("pending_recognition") else None,
-                            "rec_pending_age": (time.time() - pend_since) if pend_since else 0.0,
-                            "rec_latency_ms": meta.get("rec_latency_ms"),
+                            "identified_as": rec_state.display.get("label"),
+                            "rec_confidence": rec_state.display.get("confidence", 0.0) or 0.0,
+                            "rec_pending": rec_state.pending_label(now_ts, config.SUBMIT_TIMEOUT_SEC),
+                            "rec_pending_age": (now_ts - rec_state.in_flight_since)
+                            if rec_state.in_flight_task else 0.0,
+                            "rec_latency_ms": rec_state.last_latency_ms,
+                            "rec_satisfied": rec_state.satisfied,
                         })
 
                 if self.save_output:
@@ -1119,487 +1114,258 @@ class Engine:
                 for tid, tmeta in list(cam["track_meta"].items()):
                     if (fid - int(tmeta["last_seen_fid"])) > self.ABSENT_N:
                         to_finalize.append((tid, tmeta))
-                finalize_max_crops = getattr(self, "FINALIZE_MAX_CROPS", 1)
                 for tid, tmeta in to_finalize:
-                    self._finalize_or_drop_track(camera_id, tid, tmeta, finalize_max_crops)
+                    self._end_track(camera_id, tid, tmeta, reason="absent")
 
         self.logger.info("Engine stopping...")
         self.cleanup()
 
     # ============================================================================
-    # Recognition dispatch (Redis-backed)
+    # Control hub — what the engine tells it, and the crops it sends
     # ============================================================================
-    def _send_intermediate_best_crop(self, camera_id: str, track_id: int, meta: dict) -> bool:
-        cam = self.cameras.get(camera_id)
-        if not cam:
-            return False
+    @staticmethod
+    def _hub_triggers(cam: Dict[str, Any]) -> Dict[str, bool]:
+        """Camera trigger flags in the hub's (= this module's event) names."""
+        return {
+            "periodic": bool(cam.get("periodic_enabled", False)),
+            "line_cross": bool(cam.get("cross_line_enabled", False)),
+            "stopped_roi": bool(cam.get("flag_stop_roi_enabled", False)),
+            "leave_scene": bool(cam.get("leave_scene_enabled", False)),
+        }
 
-        crops_dict = cam["best_crops"].get(track_id, {})
-        best_reg = crops_dict.get("reg1", []) or crops_dict.get("reg2", []) or crops_dict.get("reg3", [])
-        if not best_reg:
-            return False
+    @staticmethod
+    def _trigger_detail(event_data: Dict[str, Any]) -> Dict[str, Any]:
+        """The part of a trigger the backend never used to receive —
+        crossing direction, stop duration/velocity — as plain JSON."""
+        out: Dict[str, Any] = {}
+        for k in ("direction", "confidence", "duration", "velocity", "class"):
+            v = event_data.get(k)
+            if v is None:
+                continue
+            out[k] = v if isinstance(v, str) else float(v)
+        pt = event_data.get("point")
+        if pt is not None:
+            out["point"] = [int(pt[0]), int(pt[1])]
+        return out
 
-        best_crop_item = best_reg[0]
-        landmarks = best_crop_item.get("landmarks")
-        if landmarks is None:
-            return False
+    @staticmethod
+    def _liveness_snapshot(meta: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: meta.get(k) for k in ("liveness", "liveness_score", "liveness_reason", "liveness_evals")
+                if meta.get(k) is not None}
 
-        mean_conf = float(np.mean(landmarks[:, 2]))
-        if mean_conf <= 0.6:
-            return False
+    def _track_stats(self, cam, track_id: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "uid": meta["uid"], "camera_id": cam["camera_id"], "track_id": track_id,
+            "seen_frames": int(meta.get("seen_frames", 0)),
+            "n_crops": len(cam["best_crops"].get(track_id, {}).get("reg1", [])),
+            "duration_frames": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
+            "liveness": self._liveness_snapshot(meta),
+        }
 
-        encoded = encode_image(best_crop_item["image"])
+    def _eligible_crops(self, cam, track_id: int) -> List[dict]:
+        """Crops the recognizer can actually use: landmarks present and
+        confident enough to align (the recognizer rejects the rest)."""
+        out = []
+        for item in cam["best_crops"].get(track_id, {}).get("reg1", []):
+            lm = item.get("landmarks")
+            if lm is None or len(lm) == 0:
+                continue
+            if float(np.mean(lm[:, 2])) > config.MIN_LANDMARK_CONF_FOR_SUBMIT:
+                out.append(item)
+        return out
+
+    @staticmethod
+    def _crop_payload(item: dict) -> Optional[dict]:
+        encoded = encode_image(item["image"])
         if encoded is None:
-            return False
-
-        landmarks_payload = [
+            return None
+        landmarks = item.get("landmarks")
+        lm_payload = [
             {"index": int(i), "x": float(x), "y": float(y), "conf": float(c)}
             for i, (x, y, c) in enumerate(landmarks)
-        ]
+        ] if landmarks is not None else []
+        return {
+            "image_bytes": encoded,
+            "class_flag": item.get("class_flag"),
+            "mlc": item.get("mlc", 0.0),
+            "yaw_group": item.get("yaw_group", 0),
+            "resolution": item.get("resolution", 0),
+            "frame_number": item.get("frame_number", 0),
+            "landmarks": lm_payload,
+            "num_landmarks": len(lm_payload),
+            "mean_landmark_conf": float(np.mean([p["conf"] for p in lm_payload])) if lm_payload else 0.0,
+        }
 
-        task = {
-            "task_type": "periodic",
+    def _best_frame_payload(self, cam, track_id: int) -> Optional[dict]:
+        bf = cam["best_frame"].get(track_id)
+        if not bf:
+            return None
+        encoded = encode_image(bf["frame"])
+        if not encoded:
+            return None
+        return {"image_bytes": encoded, "bbox": bf["bbox"], "resolution": bf["resolution"]}
+
+    def _build_task(self, cam, camera_id: str, track_id: int, meta: dict, stage: str,
+                    crops: List[dict], with_frame: bool) -> Optional[dict]:
+        payloads = [p for p in (self._crop_payload(c) for c in crops) if p is not None]
+        if not payloads:
+            return None
+        task_id = new_task_id(meta["uid"], stage)
+        return {
+            "task_type": stage,
+            "stage": stage,
+            "task_id": task_id,
+            "track_uid": meta["uid"],
             "engine_id": self.engine_id,
             "process_id": self.engine_id,
             "stream_idx": camera_id,
             "camera_id": camera_id,
             "video_source": cam["url"],
             "track_id": track_id,
-            "is_intermediate": True,
+            "is_intermediate": stage != "finalize",
+            "finalize_max_crops": self.FINALIZE_MAX_CROPS,
             "meta": {
                 "seen_frames": meta.get("seen_frames", 0),
                 "duration": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
-                "liveness": meta.get("liveness"),
-                "liveness_score": meta.get("liveness_score"),
-                "liveness_reason": meta.get("liveness_reason"),
+                "trigger_context": stage,
+                **self._liveness_snapshot(meta),
             },
-            "crops": {
-                "reg1": [{
-                    "image_bytes": encoded,
-                    "class_flag": best_crop_item.get("class_flag"),
-                    "mlc": best_crop_item.get("mlc", 0.0),
-                    "yaw_group": best_crop_item.get("yaw_group", 0),
-                    "resolution": best_crop_item.get("resolution", 0),
-                    "frame_number": best_crop_item.get("frame_number", 0),
-                    "landmarks": landmarks_payload,
-                    "num_landmarks": len(landmarks_payload),
-                    "mean_landmark_conf": mean_conf
-                }],
-                "reg2": [], "reg3": [],
-            },
-            "best_frame": None,
+            "crops": {"reg1": payloads, "reg2": [], "reg3": []},
+            "best_frame": self._best_frame_payload(cam, track_id) if with_frame else None,
         }
 
-        meta["pending_recognition"] = True
-        meta["pending_since"] = time.time()
-        meta["recognition_event_type"] = "periodic"
-
-        self.logger.info("cam=%s track=%d -> recognizer (periodic, mean_lm_conf=%.2f)",
-                          camera_id, track_id, mean_conf)
+    def _dispatch(self, cam, camera_id: str, track_id: int, meta: dict, task: dict, n_crops: int):
+        self.hub.emit(K_SUBMITTED, {"uid": meta["uid"], "camera_id": camera_id, "track_id": track_id,
+                                    "task_id": task["task_id"], "stage": task["stage"], "n_crops": n_crops})
+        self.hub.submit(task)
+        debug_extras.save_best_crop_montage(camera_id, track_id, task["stage"],
+                                            cam["best_crops"].get(track_id, {}), "reg1")
         rec = self._recorder(camera_id)
         if rec is not None:
-            rec.log("REC_SUBMIT", f"trk{track_id} periodic mlc{mean_conf:.2f} "
+            rec.log("REC_SUBMIT", f"trk{track_id} {task['stage']} crops={n_crops} "
                                   f"live={meta.get('liveness')}", track_id=track_id)
-        submitted_reg = "reg1" if crops_dict.get("reg1") else ("reg2" if crops_dict.get("reg2") else "reg3")
-        debug_extras.save_best_crop_montage(camera_id, track_id, "periodic", crops_dict, submitted_reg)
-        self.rec_client.submit(task)
-        return True
 
-    def _send_spatial_event_crop(self, camera_id: str, track_id: int, meta: dict, event_type: str) -> bool:
+    def _try_submit(self, camera_id: str, track_id: int, meta: dict,
+                    rec_state: TrackRecState, now: float) -> Optional[str]:
+        """Send the current best crop if something is requested, the hub
+        has not said "satisfied", nothing is in flight, and the crop is
+        new since the last send. Returns the task_id or None."""
         cam = self.cameras.get(camera_id)
         if not cam:
-            return False
-
-        crops_dict = cam["best_crops"].get(track_id, {})
-        best_reg = crops_dict.get("reg1", []) or crops_dict.get("reg2", []) or crops_dict.get("reg3", [])
-        if not best_reg:
-            return False
-
-        best_crop_item = best_reg[0]
-        landmarks = best_crop_item.get("landmarks")
-        if landmarks is None:
-            return False
-
-        mean_conf = float(np.mean(landmarks[:, 2]))
-        if mean_conf <= 0.6:
-            return False
-
-        encoded = encode_image(best_crop_item["image"])
-        if encoded is None:
-            return False
-
-        landmarks_payload = [
-            {"index": int(i), "x": float(x), "y": float(y), "conf": float(c)}
-            for i, (x, y, c) in enumerate(landmarks)
-        ]
-
-        task = {
-            "task_type": event_type,
-            "engine_id": self.engine_id,
-            "process_id": self.engine_id,
-            "stream_idx": camera_id,
-            "camera_id": camera_id,
-            "video_source": cam["url"],
-            "track_id": track_id,
-            "is_intermediate": True,
-            "meta": {
-                "seen_frames": meta.get("seen_frames", 0),
-                "duration": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
-                "trigger_context": f"spatial_activation_{event_type}",
-                "liveness": meta.get("liveness"),
-                "liveness_score": meta.get("liveness_score"),
-                "liveness_reason": meta.get("liveness_reason"),
-            },
-            "crops": {
-                "reg1": [{
-                    "image_bytes": encoded,
-                    "class_flag": best_crop_item.get("class_flag"),
-                    "mlc": best_crop_item.get("mlc", 0.0),
-                    "yaw_group": best_crop_item.get("yaw_group", 0),
-                    "resolution": best_crop_item.get("resolution", 0),
-                    "frame_number": best_crop_item.get("frame_number", 0),
-                    "landmarks": landmarks_payload,
-                    "num_landmarks": len(landmarks_payload),
-                    "mean_landmark_conf": mean_conf
-                }],
-                "reg2": [], "reg3": [],
-            },
-            "best_frame": None,
-        }
-
-        meta["pending_recognition"] = True
-        meta["pending_since"] = time.time()
-        meta["recognition_event_type"] = event_type
-        meta[f"{event_type}_sent"] = True
-
+            return None
+        stage = rec_state.next_stage(now, config.SUBMIT_TIMEOUT_SEC, self.STAGE_PRIORITY)
+        if stage is None:
+            return None
+        eligible = self._eligible_crops(cam, track_id)
+        if not eligible:
+            return None
+        best = eligible[0]
+        key = int(best.get("frame_number", 0))
+        if key == rec_state.last_sent_key:
+            return None  # same crop, same answer — wait for a better one
+        task = self._build_task(cam, camera_id, track_id, meta, stage, [best],
+                                with_frame=config.SEND_BEST_FRAME_MIDTRACK)
+        if task is None:
+            return None
+        rec_state.mark_submitted(task["task_id"], stage, key, now)
+        self._dispatch(cam, camera_id, track_id, meta, task, 1)
         self.logger.info("cam=%s track=%d -> recognizer (%s, mean_lm_conf=%.2f)",
-                          camera_id, track_id, event_type, mean_conf)
-        rec = self._recorder(camera_id)
-        if rec is not None:
-            rec.log("REC_SUBMIT", f"trk{track_id} {event_type} mlc{mean_conf:.2f} "
-                                  f"live={meta.get('liveness')}", track_id=track_id)
-        submitted_reg = "reg1" if crops_dict.get("reg1") else ("reg2" if crops_dict.get("reg2") else "reg3")
-        debug_extras.save_best_crop_montage(camera_id, track_id, event_type, crops_dict, submitted_reg)
-        self.rec_client.submit(task)
-        return True
+                         camera_id, track_id, stage, float(np.mean(best["landmarks"][:, 2])))
+        return task["task_id"]
 
-    def _finalize_or_drop_track(self, camera_id: str, track_id: int, meta: Dict[str, int],
-                                finalize_max_crops: int = None):
+    def _end_track(self, camera_id: str, track_id: int, meta: Dict[str, Any], reason: str = "absent"):
+        """The track left (or its camera/engine is going away). Optionally
+        send the high-fidelity finalize pass, tell the hub, forget it."""
         cam = self.cameras.get(camera_id)
         if not cam:
             return
-
-        leave_scene_trig = cam.get("leave_scene_enabled", False)
-
-        # ROUTE A: fast lane — dispatch whatever identity state we hold now.
-        if not leave_scene_trig:
-            self.logger.info("cam=%s track=%d -> ai:results (fast finalize, leave_scene disabled)",
-                              camera_id, track_id)
-            self._publish_face_update(camera_id, track_id, meta, "finalize")
-            cam["track_meta"].pop(track_id, None)
-            cam["best_crops"].pop(track_id, None)
-            cam["best_frame"].pop(track_id, None)
-            if "trigger_states" in cam and track_id in cam["trigger_states"]:
-                del cam["trigger_states"][track_id]
-            if cam.get("liveness") is not None:
-                cam["liveness"].drop(track_id)
-            return
-
-        # ROUTE B: high-fidelity lane — send crops for a final verification pass.
+        rec_state: Optional[TrackRecState] = cam["rec_state"].pop(track_id, None)
+        uid = meta.get("uid")
         seen_frames = int(meta.get("seen_frames", 0))
-        crops_dict = cam["best_crops"].get(track_id, {})
+        all_crops = cam["best_crops"].get(track_id, {}).get("reg1", [])
+        eligible = self._eligible_crops(cam, track_id)
+        min_required = 1 if self.FINALIZE_MAX_CROPS == 1 else self.MIN_CROPS_TO_FINALIZE
 
-        if finalize_max_crops is None:
-            finalize_max_crops = getattr(self, "FINALIZE_MAX_CROPS", 1)
+        finalize_task_id = None
+        if cam.get("leave_scene_enabled", False) and rec_state is not None and not rec_state.satisfied \
+                and seen_frames >= self.MIN_SEEN_FRAMES and len(eligible) >= min_required:
+            crops = eligible[:1] if self.FINALIZE_MAX_CROPS == 1 else eligible[:self.FINALIZE_MAX_CROPS]
+            task = self._build_task(cam, camera_id, track_id, meta, "finalize", crops, with_frame=True)
+            if task is not None:
+                self._save_output_crops(camera_id, track_id, crops)
+                self._dispatch(cam, camera_id, track_id, meta, task, len(crops))
+                finalize_task_id = task["task_id"]
+        elif cam.get("leave_scene_enabled", False):
+            why = ("hub satisfied" if rec_state is not None and rec_state.satisfied
+                   else f"seen={seen_frames}/{self.MIN_SEEN_FRAMES} eligible_crops={len(eligible)}/{min_required}")
+            self.logger.info("cam=%s track=%d no finalize pass (%s)", camera_id, track_id, why)
 
-        num_crops = max([len(lst) for lst in crops_dict.values()] if crops_dict else [0])
-        min_required = 1 if finalize_max_crops == 1 else self.MIN_CROPS_TO_FINALIZE
-        should_finalize = (num_crops >= min_required) and (seen_frames >= self.MIN_SEEN_FRAMES)
+        if uid:
+            stats = self._track_stats(cam, track_id, meta)
+            self.hub.emit(K_TRACK_ENDED, {**stats, "reason": reason, "n_crops": len(all_crops),
+                                          "finalize_task_id": finalize_task_id})
+            self._uid_index.pop(uid, None)
+        self.logger.info("cam=%s track=%d ENDED (%s) uid=%s seen=%d finalize=%s",
+                         camera_id, track_id, reason, uid, seen_frames, finalize_task_id)
+        rec = self._recorder(camera_id)
+        if rec is not None:
+            rec.log("FINALIZE" if finalize_task_id else "TRACK_END",
+                    f"trk{track_id} {reason} seen={seen_frames} crops={len(all_crops)}", track_id=track_id)
 
-        if not should_finalize:
-            self.logger.info(
-                "cam=%s track=%d DROPPED at absence timeout — no dispatch "
-                "(crops=%d/%d required, seen_frames=%d/%d required)",
-                camera_id, track_id, num_crops, min_required, seen_frames, self.MIN_SEEN_FRAMES,
-            )
-            rec = self._recorder(camera_id)
-            if rec is not None:
-                rec.log("DROP", f"trk{track_id} crops={num_crops}/{min_required} "
-                                f"seen={seen_frames}/{self.MIN_SEEN_FRAMES}", track_id=track_id)
-
-        if should_finalize:
-            crops_data = {"reg1": [], "reg2": [], "reg3": []}
-            proceed_with_dispatch = True
-
-            crop_dir = None
-            if self.save_output:
-                crop_dir = os.path.join(self.output_dir, str(camera_id), "crops", f"track_{track_id}")
-                os.makedirs(crop_dir, exist_ok=True)
-
-            if finalize_max_crops == 1:
-                best_reg = crops_dict.get("reg1", []) or crops_dict.get("reg2", []) or crops_dict.get("reg3", [])
-                if best_reg:
-                    best_crop_item = best_reg[0]
-                    landmarks = best_crop_item.get("landmarks")
-
-                    if landmarks is not None and len(landmarks) > 0:
-                        mean_conf = float(np.mean(landmarks[:, 2]))
-                    else:
-                        mean_conf = float(best_crop_item.get("mlc", 0.0))
-
-                    encoded = encode_image(best_crop_item["image"])
-                    if encoded is not None:
-                        landmarks_payload = []
-                        if landmarks is not None:
-                            landmarks_payload = [
-                                {"index": int(i), "x": float(x), "y": float(y), "conf": float(c)}
-                                for i, (x, y, c) in enumerate(landmarks)
-                            ]
-
-                        mlc = best_crop_item.get("mlc", 0.0)
-                        yaw_group = best_crop_item.get("yaw_group", 0)
-                        resolution = best_crop_item.get("resolution", 0)
-
-                        if self.save_output:
-                            filename = f"{track_id}_reg1_mlc_{mlc:.6f}_yaw_{yaw_group}_res_{resolution}_idx0.jpg"
-                            cv2.imwrite(os.path.join(crop_dir, filename), best_crop_item["image"])
-
-                        crops_data["reg1"].append({
-                            "image_bytes": encoded, "class_flag": best_crop_item["class_flag"],
-                            "mlc": mlc, "yaw_group": yaw_group, "resolution": resolution,
-                            "frame_number": best_crop_item["frame_number"],
-                            "landmarks": landmarks_payload, "num_landmarks": len(landmarks_payload),
-                            "mean_landmark_conf": mean_conf
-                        })
-                    else:
-                        self.logger.warning("cam=%s track=%d DROPPED — best crop failed to JPEG-encode",
-                                             camera_id, track_id)
-                        proceed_with_dispatch = False
-                else:
-                    self.logger.warning("cam=%s track=%d DROPPED — should_finalize but best_crops is empty",
-                                         camera_id, track_id)
-                    proceed_with_dispatch = False
-            else:
-                for reg_key in ["reg1", "reg2", "reg3"]:
-                    for idx, item in enumerate(crops_dict.get(reg_key, [])):
-                        img = item["image"]
-                        encoded = encode_image(img)
-                        if encoded is None:
-                            continue
-
-                        mlc = item.get("mlc", 0.0)
-                        yaw_group = item.get("yaw_group", 0)
-                        resolution = item.get("resolution", 0)
-
-                        landmarks_payload = []
-                        if item.get("landmarks") is not None:
-                            landmarks_payload = [
-                                {"index": int(i), "x": float(x), "y": float(y), "conf": float(c)}
-                                for i, (x, y, c) in enumerate(item["landmarks"])
-                            ]
-
-                        if self.save_output:
-                            filename = f"{track_id}_{reg_key}_mlc_{mlc:.6f}_yaw_{yaw_group}_res_{resolution}_idx{idx}.jpg"
-                            cv2.imwrite(os.path.join(crop_dir, filename), img)
-
-                        crops_data[reg_key].append({
-                            "image_bytes": encoded, "class_flag": item["class_flag"],
-                            "mlc": mlc, "yaw_group": yaw_group, "resolution": resolution,
-                            "frame_number": item["frame_number"],
-                            "landmarks": landmarks_payload, "num_landmarks": len(landmarks_payload),
-                            "mean_landmark_conf": float(np.mean([p["conf"] for p in landmarks_payload]))
-                            if landmarks_payload else 0.0
-                        })
-
-            if proceed_with_dispatch:
-                best_frame_data = None
-                if track_id in cam["best_frame"]:
-                    bf = cam["best_frame"][track_id]
-                    if self.save_output:
-                        cv2.imwrite(os.path.join(crop_dir, f"{track_id}_best_frame.jpg"), bf["frame"])
-                    encoded_frame = encode_image(bf["frame"])
-                    if encoded_frame:
-                        best_frame_data = {
-                            "image_bytes": encoded_frame, "bbox": bf["bbox"], "resolution": bf["resolution"],
-                        }
-
-                task = {
-                    "task_type": "finalize",
-                    "finalize_max_crops": finalize_max_crops,
-                    "engine_id": self.engine_id,
-                    "process_id": self.engine_id,
-                    "stream_idx": camera_id,
-                    "camera_id": camera_id,
-                    "video_source": cam["url"],
-                    "track_id": track_id,
-                    "meta": {
-                        "seen_frames": seen_frames,
-                        "duration": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
-                        "liveness": meta.get("liveness"),
-                        "liveness_score": meta.get("liveness_score"),
-                        "liveness_reason": meta.get("liveness_reason"),
-                    },
-                    "crops": crops_data,
-                    "best_frame": best_frame_data,
-                }
-
-                self.logger.info("cam=%s track=%d -> recognizer (finalize, crops=%d, seen_frames=%d)",
-                                  camera_id, track_id, num_crops, seen_frames)
-                rec = self._recorder(camera_id)
-                if rec is not None:
-                    rec.log("FINALIZE", f"trk{track_id} -> recognizer crops={num_crops} "
-                                        f"live={meta.get('liveness')}", track_id=track_id)
-                self.rec_client.submit(task)
-                cam.setdefault("finalizing_meta", {})[track_id] = cam["track_meta"].pop(track_id, meta)
-            else:
-                cam["track_meta"].pop(track_id, None)
-        else:
-            cam["track_meta"].pop(track_id, None)
-
+        cam["track_meta"].pop(track_id, None)
         cam["best_crops"].pop(track_id, None)
         cam["best_frame"].pop(track_id, None)
-        if "trigger_states" in cam and track_id in cam["trigger_states"]:
-            del cam["trigger_states"][track_id]
+        cam.get("trigger_states", {}).pop(track_id, None)
         if cam.get("liveness") is not None:
             cam["liveness"].drop(track_id)
 
-    def _drain_recognition_outputs(self):
-        """Non-blocking drain of everything the recognizer has finished
-        for this engine since the last tick — same call-site shape as
-        the reference fr_output_queue.get_nowait() loop, backed by
-        RecognitionClient.drain() instead."""
-        for recognition_payload in self.rec_client.drain():
-            if not isinstance(recognition_payload, dict):
-                continue
-
-            track_id = recognition_payload.get("track_id")
-            event_type = recognition_payload.get("event_type")
-            personnel_id = recognition_payload.get("personnelid")
-            first_name = recognition_payload.get("first_name")
-            last_name = recognition_payload.get("last_name")
-            score = recognition_payload.get("detection_score")
-            face_image_url = recognition_payload.get("face_image")
-            camera_image_url = recognition_payload.get("camera_image")
-
-            self.logger.info(
-                f"[FR Output] '{event_type.upper()}' for Track {track_id} -> "
-                f"ID: {personnel_id} ({first_name} {last_name}) | Conf: {score if score else 0.0:.4f}"
-            )
-            for _cid, _cam in self.cameras.items():
-                _rec = _cam.get("recorder")
-                if _rec is not None:
-                    _rec.log("REC_RESULT",
-                             f"trk{track_id} {event_type} -> {personnel_id} "
-                             f"({first_name} {last_name}) {float(score or 0.0):.3f}",
-                             track_id=track_id if isinstance(track_id, int) else None)
-
-            if event_type in ["periodic", "line_cross", "stopped_roi"]:
-                for cam_id, cam in self.cameras.items():
-                    if track_id in cam.get("track_meta", {}):
-                        meta = cam["track_meta"][track_id]
-                        meta.setdefault("recognition_history", {})
-                        meta.setdefault("deferred_events", {})
-
-                        step_snapshot = {
-                            "personnel_id": personnel_id, "first_name": first_name, "last_name": last_name,
-                            "confidence": float(score if score else 0.0),
-                            "face_image_url": face_image_url, "camera_image_url": camera_image_url,
-                            "timestamp": time.time()
-                        }
-
-                        if event_type == "periodic":
-                            meta["recognition_history"].setdefault("periodic", [])
-                            meta["recognition_history"]["periodic"].append(step_snapshot)
-                        else:
-                            meta["recognition_history"][event_type] = step_snapshot
-
-                        if camera_image_url:
-                            meta["last_saved_camera_image"] = camera_image_url
-
-                        old_max_conf = float(meta.get("confidence", 0.0))
-                        new_conf = float(score if score else 0.0)
-                        if "identified_as" not in meta or new_conf > old_max_conf:
-                            meta["identified_as"] = personnel_id
-                            meta["confidence"] = new_conf
-                            meta["last_saved_face_image"] = face_image_url
-
-                        # Round-trip latency: submit -> ai:results, shown
-                        # in the debug video HUD and logged below. Purely
-                        # observational — never gates anything.
-                        pending_since = meta.get("pending_since")
-                        if pending_since:
-                            meta["rec_latency_ms"] = (time.time() - pending_since) * 1000.0
-
-                        meta["pending_recognition"] = False
-
-                        deferred_map = meta.get("deferred_events", {})
-                        if event_type in ["line_cross", "stopped_roi"]:
-                            deferred_map.pop(event_type, None)
-                            self._publish_face_update(cam_id, track_id, meta, event_type)
-                            meta[f"{event_type}_sent"] = True
-
-                        for cached_type in list(deferred_map.keys()):
-                            deferred_map.pop(cached_type)
-                            self._publish_face_update(cam_id, track_id, meta, cached_type)
-                            meta[f"{cached_type}_sent"] = True
-
-            elif event_type == "finalize":
-                for cam_id, cam in self.cameras.items():
-                    if track_id in cam.get("finalizing_meta", {}):
-                        meta = cam["finalizing_meta"][track_id]
-
-                        if camera_image_url:
-                            meta["last_saved_camera_image"] = camera_image_url
-
-                        old_max_conf = float(meta.get("confidence", 0.0))
-                        new_conf = float(score if score else 0.0)
-                        if "identified_as" not in meta or new_conf > old_max_conf:
-                            meta["identified_as"] = personnel_id
-                            meta["confidence"] = new_conf
-                            meta["last_saved_face_image"] = face_image_url
-                            meta["first_name"] = first_name
-                            meta["last_name"] = last_name
-
-                        pending_since = meta.get("pending_since")
-                        if pending_since:
-                            meta["rec_latency_ms"] = (time.time() - pending_since) * 1000.0
-
-                        self._publish_face_update(cam_id, track_id, meta, "finalize")
-                        cam["finalizing_meta"].pop(track_id, None)
-                        break
-
-    def _publish_face_update(self, camera_id, track_id, meta, update_type):
-        """Publishes a mid-track / final face-recognition update onto
-        `{module}:ai:results` (the backend contract), replacing the
-        reference pipeline's HTTP POST to Django."""
-        raw_meta_snapshot = copy.deepcopy(meta)
-
-        payload = {
-            "camera_id": camera_id,
-            "track_id": track_id,
-            "event_type": update_type,
-            "timestamp": time.time(),
-            "is_final": update_type == "finalize",
-            "meta": raw_meta_snapshot,
-        }
-
+    def _save_output_crops(self, camera_id: str, track_id: int, crops: List[dict]):
+        if not self.save_output:
+            return
         try:
-            self.bus.push_result(payload, json_encoder=DateTimeEncoder)
-            rec = self._recorder(camera_id)
-            if rec is not None:
-                rec.log("PUBLISH",
-                        f"trk{track_id} {update_type} id={meta.get('identified_as')} "
-                        f"conf={float(meta.get('confidence', 0.0)):.3f} "
-                        f"live={meta.get('liveness')}",
-                        track_id=track_id if isinstance(track_id, int) else None)
+            crop_dir = os.path.join(self.output_dir, str(camera_id), "crops", f"track_{track_id}")
+            os.makedirs(crop_dir, exist_ok=True)
+            for idx, item in enumerate(crops):
+                fn = (f"{track_id}_reg1_mlc_{item.get('mlc', 0.0):.6f}_yaw_{item.get('yaw_group', 0)}"
+                      f"_res_{item.get('resolution', 0)}_idx{idx}.jpg")
+                cv2.imwrite(os.path.join(crop_dir, fn), item["image"])
         except Exception:
-            self.logger.exception("failed to publish face update for track %s (%s)", track_id, update_type)
+            self.logger.debug("save_output crop dump failed", exc_info=True)
+
+    def _drain_hub_ctl(self):
+        """Apply every hub message queued for this engine: result acks
+        (clear the in-flight lock), satisfied flag, periodic requests."""
+        now = time.time()
+        for msg in self.hub.drain():
+            loc = self._uid_index.get(msg.get("uid"))
+            if not loc:
+                continue  # track already ended here — the hub owns it now
+            camera_id, track_id = loc
+            cam = self.cameras.get(camera_id)
+            rec_state = cam["rec_state"].get(track_id) if cam else None
+            if rec_state is None:
+                continue
+            was_satisfied = rec_state.satisfied
+            rec_state.apply_ctl(msg, now)
+            disp = rec_state.display or {}
+            if msg.get("action") == "result":
+                self.logger.info("cam=%s track=%d <- hub result %s: %s (conf %.3f, satisfied=%s)",
+                                 camera_id, track_id, msg.get("task_id"), disp.get("label"),
+                                 float(disp.get("confidence") or 0.0), rec_state.satisfied)
+            if rec_state.satisfied and not was_satisfied:
+                self.logger.info("cam=%s track=%d SATISFIED (%s) — no more crops for this track",
+                                 camera_id, track_id, disp.get("label"))
+            rec = cam.get("recorder")
+            if rec is not None and msg.get("action") in ("result", "request"):
+                rec.log("REC_RESULT" if msg["action"] == "result" else "HUB_REQUEST",
+                        f"trk{track_id} {disp.get('label') if msg['action'] == 'result' else msg.get('stage')} "
+                        f"{float(disp.get('confidence') or 0.0):.3f}", track_id=track_id)
 
     def cleanup(self):
         for camera_id in list(self.cameras.keys()):
-            self.remove_camera(camera_id)
+            self.remove_camera(camera_id, reason="engine_stopped")
 
-        self.rec_client.stop()
+        self.hub.stop()
 
         for w in list(self.writers.values()):
             try:

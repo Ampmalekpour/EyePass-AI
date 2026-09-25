@@ -170,8 +170,18 @@ STOP_TIME_SECONDS = _float("STOP_TIME_SECONDS", 3.0)
 STOP_VELOCITY_THRESHOLD = _float("STOP_VELOCITY_THRESHOLD", 8.0)  # px/s
 STOP_MIN_SAMPLES = _int("STOP_MIN_SAMPLES", 10)
 
-OCR_CONF_SKIP_THRESHOLD = _float("OCR_CONF_SKIP_THRESHOLD", 0.85)
-OCR_FINALIZE_TIMEOUT_SEC = _float("OCR_FINALIZE_TIMEOUT_SEC", 10.0)
+# ---- OCR dispatch (control hub era) ------------------------------------
+# OCR_CONF_SKIP_THRESHOLD and OCR_FINALIZE_TIMEOUT_SEC moved to the
+# control hub as PLATE_SATISFIED_CONF (now counts VALID reads only) and
+# PLATE_FINALIZE_TIMEOUT_SEC. The detector only decides whether it may
+# send crops right now — see platecore/hub.py.
+#
+# How long a submitted task blocks the next submission for the same
+# track if the hub never acks its result (previously: forever — a lost
+# OCR result blocked every later trigger on that track).
+SUBMIT_TIMEOUT_SEC = _float("SUBMIT_TIMEOUT_SEC", 5.0)
+# Low-rate per-track heartbeat to the hub.
+TRACK_UPDATE_INTERVAL_SEC = _float("TRACK_UPDATE_INTERVAL_SEC", 5.0)
 
 # ============================================================================
 # 7b. TRIGGER HISTORY BUFFERS (triggers.py's TriggerTrackState — verbatim

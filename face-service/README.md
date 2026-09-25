@@ -26,6 +26,35 @@ Communication with the backend is **entirely** the Redis contract below
 — neither service makes an HTTP call to Django or anywhere else.
 
 
+## Control hub (third service — owns recognition state)
+
+The detector no longer merges recognizer results, holds triggers or builds
+the final record. A third service, **`control_hub`** (source in
+[`../control-hub`](../control-hub/README.md), started by this folder's
+`compose.yaml`), owns every track's state:
+
+```
+face_detector  --track events-->  control_hub  --> face:ai:results
+       |  ^                              ^
+ tasks |  | ctl (ack / satisfied /       | results (per task, keyed by the
+       v  |  periodic request)           | track's global uid)
+face_recognizer  ------------------------+
+```
+
+- The detector reports `track_started`, `trigger` (line_cross / stopped_roi, including
+  the crossing **direction**), `submitted`, `track_update` and
+  `track_ended`, then forgets the track.
+- The recognizer sends each result to the hub, not back to the engine.
+- The hub votes across results, decides when the track is
+  **satisfied** (and tells the detector to stop sending crops),
+  publishes each trigger once, and publishes the `finalize` record
+  after the last in-flight result arrives.
+
+The backend key and payload shape are unchanged; new fields are
+additive. The inconsistencies this fixed are listed in
+[`../control-hub/README.md`](../control-hub/README.md#what-changed-and-why).
+
+
 ## Contents
 
 ```
@@ -119,6 +148,11 @@ keys), `detection_score`, etc.
 | `internal:rec:tasks` | LIST — shared work queue, every detector engine LPUSHes, every recognizer worker BRPOPs |
 | `internal:rec:results:{engine_id}` | LIST, one per detector engine — a result routes back to the exact `Engine` instance that owns the track |
 | `internal:rec:tasks:pending` | informational counter (watch it in RedisInsight/Commander) |
+| `internal:hub:events` | STREAM — detector engines → control hub (track lifecycle, triggers, submissions) |
+| `internal:hub:results` | STREAM — recognizer workers → control hub (one entry per task, keyed by track uid) |
+| `internal:hub:ctl:{engine_id}` | LIST — control hub → one detector engine (result ack, satisfied flag, periodic request) |
+| `internal:hub:track:{uid}` | control hub's per-track checkpoint (restored on restart) |
+| `internal:hub:leader` / `internal:hub:heartbeat` | one active hub per module / liveness |
 
 `redis_tools.py` has helpers for every row in both tables
 (`seed_camera_config`, `send_activate`/`send_deactivate`,
@@ -229,7 +263,7 @@ exactly mirroring the heatmap module's own `_rtsp_url()` pattern.
 
 This delivery was verified with `python3 -m py_compile` across every
 file (clean) plus a real unit test suite
-(`tests/`, `python3 tests/run_all.py`, 25/25 passing) covering:
+(`tests/`, `python3 tests/run_all.py`) covering:
 
 - `facecore.codec` — task/result pickle round-trips, the `DateTimeEncoder`.
 - `facecore.lifecycle` — every transition, `checkpoint_now()`, and
@@ -259,6 +293,13 @@ tests. None of this stubbing ships in the Docker images — it is
 `tests/`-only, and the Dockerfiles install the real `redis`/`boto3`/
 `onnxruntime` packages and build from your base image, which already
 has torch/ultralytics/OpenCV.
+
+`tests/test_engine_hub.py` covers the engine's side of the control-hub
+contract on the real Engine methods: crop submission and its gates
+(in flight / satisfied / unchanged crop / weak landmarks), hub ctl handling, the
+track-end finalize pass, and ending live tracks on camera removal. The
+hub itself has its own suite (`../control-hub/tests`), including an
+end-to-end run against a real `redis-server`.
 
 Run it yourself:
 ```bash

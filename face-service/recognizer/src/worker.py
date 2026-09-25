@@ -2,6 +2,14 @@
 worker.py (recognizer)
 --------------------------------------------------------------------
 `RecognitionWorker` replaces the reference `AFRWorker(mp.Process)`.
+
+CONTROL HUB (2026-09): results for live-camera tasks no longer go back
+to the detector engine that asked; they go to the control hub's
+results stream (`face:internal:hub:results`, keyed by the task's
+`track_uid`), which owns every track's recognition state and decides
+what the backend sees. See `_emit_track_result`. Enrollment tasks are
+unaffected and still reply on their own `rec:results:enroll:{id}` list.
+
 Same job — pull a task, filter crops by landmark confidence, align,
 embed, compare against the gallery, aggregate, and hand back a result
 — but everything that used to be two in-process `multiprocessing.Queue`
@@ -385,7 +393,6 @@ class RecognitionWorker(mp.Process):
         process_id = task.get("process_id", -1)
         stream_idx = task.get("stream_idx", -1)
         video_source = task.get("video_source", "")
-        engine_id = task.get("engine_id")
 
         task_type = task.get("task_type", "finalize")
         finalize_max_crops = task.get("finalize_max_crops", 1)
@@ -403,6 +410,8 @@ class RecognitionWorker(mp.Process):
 
         if not crop_infos:
             self.logger.info("[AFR-%s] No valid crops received for track %s", self.worker_id, track_id)
+            self._emit_track_result(task, {"personnelid": "0", "description": "no crops in task",
+                                           "detection_score": 0.0}, status="skipped", is_valid=False)
             return
 
         passed_crops, _rejected = self._filter_crops_by_landmark_confidence(crop_infos)
@@ -447,14 +456,45 @@ class RecognitionWorker(mp.Process):
             missing_count=0,
         )
 
-        if engine_id is None:
-            self.logger.warning("[AFR-%s] task for track %s carried no engine_id — cannot route result", self.worker_id, track_id)
+        self._emit_track_result(task, payload, status="ok" if is_valid else "unknown", is_valid=is_valid)
+
+    def _emit_track_result(self, task: Dict[str, Any], payload: Dict[str, Any], status: str, is_valid: bool):
+        """Every recognition task gets exactly one answer.
+
+        Tasks from the current detector carry `track_uid` and are answered
+        on the control hub's results stream (the hub owns the track's
+        recognition state). A task without one comes from a pre-hub
+        detector (e.g. mid rolling upgrade) and is answered the old way,
+        on that engine's own result list."""
+        track_uid = task.get("track_uid")
+        if track_uid:
+            data = dict(payload)
+            data.update({
+                "uid": track_uid,
+                "task_id": task.get("task_id"),
+                "stage": task.get("stage") or task.get("task_type"),
+                "camera_id": task.get("camera_id"),
+                "track_id": task.get("track_id"),
+                "status": status,
+                "is_valid": bool(is_valid),
+                "confidence": float(payload.get("detection_score") or 0.0),
+                "worker_id": self.worker_id,
+            })
+            try:
+                self.bus.hub_push_result(data)
+            except Exception:
+                self.logger.exception("[AFR-%s] failed to push hub result for %s", self.worker_id, track_uid)
             return
 
+        engine_id = task.get("engine_id")
+        if engine_id is None:
+            self.logger.warning("[AFR-%s] task for track %s carried neither track_uid nor engine_id — "
+                                "cannot route result", self.worker_id, task.get("track_id"))
+            return
         try:
             self.bus.push_result_bytes(engine_id, encode_result(payload))
         except Exception:
-            self.logger.exception("[AFR-%s] failed to push result for track %s", self.worker_id, track_id)
+            self.logger.exception("[AFR-%s] failed to push result for track %s", self.worker_id, task.get("track_id"))
 
     # ------------------------------------------------------------------
     # ADD-FACE — enrollment task handlers (NEW)
@@ -700,7 +740,12 @@ class RecognitionWorker(mp.Process):
                     self._process_enroll_commit(task)
                 else:
                     self._process_task(task)
-            except Exception:
+            except Exception as e:
                 self.logger.exception("[AFR-%s] unhandled error processing task", self.worker_id)
+                if isinstance(task, dict) and task.get("track_uid"):
+                    # the hub must not wait for an answer that will never come
+                    self._emit_track_result(task, {"personnelid": "0", "detection_score": 0.0,
+                                                   "description": f"error: {e}"},
+                                            status="error", is_valid=False)
 
         self.logger.info("[AFR-%s] Stopped.", self.worker_id)

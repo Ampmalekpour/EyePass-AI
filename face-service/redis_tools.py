@@ -237,8 +237,8 @@ def watch_camera_events(seconds=60.0):
 
 def watch_results(seconds=60.0):
     """Blocks on ai:results (BRPOP) and prints each recognition/finalize
-    event as the detector publishes it — the fastest way to see the full
-    detector -> recognizer -> detector -> ai:results round trip live."""
+    event as the control hub publishes it — the fastest way to see the full
+    detector -> recognizer -> control hub -> ai:results round trip live."""
     print(f"Watching {RESULTS_KEY} for {seconds:.0f}s (Ctrl+C to stop)...")
     deadline = time.time() + seconds
     try:
@@ -250,7 +250,9 @@ def watch_results(seconds=60.0):
                 meta = data.get("meta", {})
                 print(f"[{time.strftime('%H:%M:%S')}] cam={data.get('camera_id')} "
                       f"track={data.get('track_id')} event={data.get('event_type')} "
-                      f"person={meta.get('identified_as')} conf={meta.get('confidence')}")
+                      f"final={data.get('is_final')} person={meta.get('identified_as')} "
+                      f"conf={meta.get('confidence')} via={meta.get('resolution')} "
+                      f"live={meta.get('liveness')}")
     except KeyboardInterrupt:
         pass
 

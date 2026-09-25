@@ -3,20 +3,29 @@ engine.py
 --------------------------------------------------------------------
 The plate detection/tracking/trigger engine — one YOLO model per
 process, handling however many cameras EngineManager assigns it via
-batched Ultralytics inference. Ported from the reference
-video_processor.py's `Engine` class with one structural change: OCR is
-no longer an in-process pool of `OCRWorker` subprocesses this Engine
-spawns and owns (`ocr_input_queue`/`ocr_output_queue`,
-`mp.Queue`-based) — it is the separate `ocr_service`, reached over
-Redis through `OcrClient` (see ocr_client.py). Detection capacity and
-OCR capacity now scale independently.
+batched Ultralytics inference. Batch inference, BYTETrack update,
+spatial-trigger geometry, best-crop ranking and the debug recorder run
+here, per frame.
 
-Everything else — batch inference, BYTETrack update, spatial triggers,
-best-crop ranking, finalize/drop logic, the debug recorder hookup — is
-the same math and the same log lines as the reference pipeline, just
-reorganized: triggers.py/rtsp_reader.py/tracker.py/debug_recorder.py
-are now their own files instead of living inside this one 2900-line
-module.
+A track's OCR STATE lives in the control hub (control-hub/), not here:
+
+    detector (this file)                 control hub
+    --------------------                 -----------
+    track born     -> track_started ---> holds the track's state
+    trigger fires  -> trigger ---------> publishes cross_line / stop_roi
+                     (+ submits crops)    now (plate known) or when its
+                                          OCR result lands
+    crops sent     -> submitted -------> tracks in-flight tasks
+    OCR result ------------------------> votes across stages, decides
+                   <- ctl: result/state   "satisfied" (detector stops
+                                          sending)
+                   <- ctl: request        periodic re-query (cond_per_trig,
+                                          which used to be ignored)
+    track gone     -> track_ended ------> waits for the leave_scene OCR,
+                     (+ leave_scene crops) publishes the final record
+
+The engine never pushes to plate:vehicle:results itself any more and
+forgets a track the moment it emits track_ended.
 --------------------------------------------------------------------
 """
 
@@ -39,9 +48,11 @@ from ultralytics import YOLO
 import config
 from debug_recorder import DebugConfig, DebugRecorder
 from platecore.bus import RedisBus
-from platecore.codec import DateTimeEncoder
+from platecore.hub import (
+    K_SUBMITTED, K_TRACK_ENDED, K_TRACK_STARTED, K_TRACK_UPDATE, K_TRIGGER,
+    HubClient, TrackRecState, new_task_id, new_track_uid,
+)
 from platecore.logging_setup import setup_logger
-from ocr_client import OcrClient
 from rtsp_reader import RTSPStreamReader, encode_image, measure_sharpness
 from tracker import BYTETracker, PlateTrackerConfig
 from triggers import TriggerTrackState, process_track_triggers
@@ -205,11 +216,15 @@ class Engine:
             f"imgsz={self.imgsz} conf={self.conf}"
         )
 
-        # OCR — pushed to the separate ocr_service over Redis instead of
-        # spawned in-process (see ocr_client.py's docstring).
+        # OCR tasks out to the ocr_service, track events/ctl with the
+        # control hub (see platecore/hub.py).
         self.bus = RedisBus(module=config.REDIS_MODULE)
-        self.ocr_client = OcrClient(self.bus, self.engine_id)
-        self.logger.info("OCR client ready (engine_id=%s)", self.engine_id)
+        self.hub = HubClient(self.bus, self.engine_id)
+        self._uid_index: Dict[str, Tuple[str, int]] = {}
+        # when several requests are pending, the task carries the most
+        # important label (one set of crops answers all of them)
+        self.STAGE_PRIORITY = {"leave_scene": 3, "cross_line": 2, "stop_roi": 2, "periodic": 1}
+        self.logger.info("control-hub client ready (engine_id=%s boot=%s)", self.engine_id, self.hub.boot_id)
 
         # writers optional
         self.writers: Dict[str, cv2.VideoWriter] = {}
@@ -244,142 +259,13 @@ class Engine:
             except Exception:
                 pass
 
-    def _ocr_rows_for_track(self, cam: Dict[str, Any], track_id: int):
-        rows = []
-        store = cam.get("track_ocr", {}).get(track_id, {}) or {}
-        for stage in ("cross_line", "stop_roi", "periodic", "leave_scene"):
-            res = store.get(stage)
-            if not res:
-                continue
-            conf = res.get("confidence")
-            conf = 0.0 if conf is None else float(conf)
-            rows.append((
-                stage,
-                f"{str(res.get('plate_text'))[:12]:<12} {conf:.2f} "
-                f"{'OK' if res.get('is_valid') else 'INVALID'}"
-            ))
-        return rows
-
-    def _handle_ocr_result(self, result: dict) -> bool:
-        if not isinstance(result, dict):
-            self.logger.warning(f"[OCR-RESULT] Ignoring non-dict OCR result: {type(result)}")
-            return False
-
-        task_id = result.get("task_id")
-        camera_id = result.get("camera_id")
-        track_id = result.get("track_id")
-        trigger_type = result.get("trigger_type")
-
-        missing = [
-            name for name, value in {
-                "task_id": task_id, "camera_id": camera_id,
-                "track_id": track_id, "trigger_type": trigger_type,
-            }.items() if value is None
-        ]
-        if missing:
-            self.logger.warning(f"[OCR-RESULT] Dropping result with missing routing fields={missing}; result={result}")
-            return False
-
-        valid_trigger_types = {"cross_line", "stop_roi", "periodic", "leave_scene"}
-        if trigger_type not in valid_trigger_types:
-            self.logger.warning(f"[OCR-RESULT] Dropping result with invalid trigger_type={trigger_type!r}; task_id={task_id}")
-            return False
-
-        cam = self.cameras.get(camera_id)
-        if not cam:
-            self.logger.warning(f"[OCR-RESULT] Dropping result for unknown camera_id={camera_id!r}; task_id={task_id}")
-            return False
-
-        if track_id not in cam.get("track_meta", {}):
-            self.logger.warning(
-                f"[OCR-LATE] result arrived after track cleanup camera={camera_id} "
-                f"track={track_id} trigger={trigger_type} task={task_id}"
-            )
-            self._dbg_log(camera_id, "OCR_LATE", f"#{track_id} {trigger_type} arrived after cleanup",
-                          track_id=track_id, data={"task_id": task_id})
-            return False
-
-        cam.setdefault("track_ocr", {})
-        cam.setdefault("track_paths", {})
-
-        track_bucket = cam["track_ocr"].setdefault(track_id, {})
-        paths_bucket = cam["track_paths"].setdefault(track_id, {})
-
-        track_bucket[trigger_type] = result
-
-        payload = result.get("payload", {}) or {}
-        plate_path = payload.get("plate_image")
-        frame_path = payload.get("frame_image")
-        paths_bucket[trigger_type] = {"plate_path": plate_path, "frame_path": frame_path}
-
-        self.logger.info(
-            f"[OCR-RESULT] Stored OCR result camera_id={camera_id} track_id={track_id} "
-            f"trigger_type={trigger_type} status={result.get('status')} valid={result.get('is_valid')} "
-            f"plate={result.get('plate_text')!r} task_id={task_id} paths={paths_bucket[trigger_type]}"
-        )
-
-        _conf = result.get("confidence")
-        self._dbg_log(
-            camera_id, "OCR_RESULT",
-            f"#{track_id} {trigger_type} -> '{result.get('plate_text')}' "
-            f"conf={0.0 if _conf is None else float(_conf):.2f} valid={result.get('is_valid')}",
-            track_id=track_id,
-            data={"task_id": task_id, "status": result.get("status"), "plate_text": result.get("plate_text"),
-                  "confidence": _conf, "is_valid": result.get("is_valid"),
-                  "plate_path": plate_path, "frame_path": frame_path},
-        )
-
-        tmeta = cam.get("track_meta", {}).get(track_id)
-        if tmeta is not None:
-            if self._is_track_waiting_for_ocr(tmeta) and tmeta.get("ocr_pending_trigger_type") == trigger_type:
-                # Round-trip latency: detector-submit -> result-arrival,
-                # the analog of the face module's pending_since/
-                # rec_latency_ms pattern. Complements ocr_service's own
-                # _queue_latency_ms(task_id) (detector-submit -> worker
-                # picked it up) — together the two numbers say whether a
-                # slow OCR round trip is queue wait or actual processing.
-                submitted_at = tmeta.get("ocr_pending_submitted_at")
-                ocr_latency_ms = (time.time() - float(submitted_at)) * 1000.0 if submitted_at else None
-                self._clear_track_ocr_pending(tmeta)
-                if ocr_latency_ms is not None:
-                    tmeta["last_ocr_latency_ms"] = round(ocr_latency_ms, 1)
-                self.logger.info(
-                    f"[OCR-RESULT] Cleared OCR pending meta camera_id={camera_id} "
-                    f"track_id={track_id} trigger_type={trigger_type} task_id={task_id} "
-                    f"ocr_latency_ms={tmeta.get('last_ocr_latency_ms')}"
-                )
-                self._dbg_log(camera_id, "OCR_LATENCY",
-                              f"#{track_id} {trigger_type} round_trip={tmeta.get('last_ocr_latency_ms')}ms",
-                              track_id=track_id, data={"ocr_latency_ms": tmeta.get("last_ocr_latency_ms")})
-
-            if trigger_type in ("cross_line", "stop_roi"):
-                self._publish_vehicle_update(camera_id=camera_id, track_id=track_id, meta=tmeta, update_type=trigger_type)
-
-        if trigger_type == "leave_scene":
-            tmeta = cam.get("track_meta", {}).get(track_id)
-            if tmeta is not None and tmeta.get("finalize_waiting_for_ocr", False):
-                expected_stage = tmeta.get("finalize_ocr_trigger_type", "leave_scene")
-                if expected_stage == "leave_scene":
-                    self.logger.info(
-                        f"[OCR-RESULT->FINALIZE] camera={camera_id} track_id={track_id} "
-                        f"trigger_type={trigger_type} task_id={task_id}"
-                    )
-                    tmeta.pop("finalize_waiting_for_ocr", None)
-                    tmeta.pop("finalize_ocr_trigger_type", None)
-                    tmeta.pop("finalize_ocr_submitted_at", None)
-                    self._finalize_or_drop_track(camera_id, track_id, tmeta)
-
-        return True
-
-    def _drain_ocr_results(self, max_items: int = 100) -> int:
-        drained = 0
-        for result in self.ocr_client.drain()[:max_items]:
-            try:
-                self._handle_ocr_result(result)
-            except Exception as e:
-                self.logger.exception(f"[OCR-RESULT] Failed handling OCR result: {e}")
-            drained += 1
-        return drained
+    @staticmethod
+    def _ocr_rows_for_track(cam: Dict[str, Any], track_id: int):
+        """Per-stage OCR rows for the debug video, as last reported by
+        the control hub (ctl `display.rows`)."""
+        rs = cam.get("rec_state", {}).get(track_id)
+        rows = (rs.display.get("rows") if rs is not None else None) or []
+        return [tuple(r) for r in rows if isinstance(r, (list, tuple)) and len(r) == 2]
 
     # ---------------- ranking ----------------
     def _rank(self, det_score: float, resolution: int) -> Tuple[int, int]:
@@ -454,7 +340,7 @@ class Engine:
             "camera_id": camera_id, "url": url, "roi": roi,
             "line_points": line_points, "stop_roi": stop_roi,
             "line_points_px": None, "stop_roi_px": None, "triggers": triggers,
-            "trigger_states": {}, "track_ocr": {}, "track_paths": {},
+            "trigger_states": {}, "rec_state": {},
             "reader": reader, "tracker": tracker, "fid": 0, "frames_processed": 0,
             "last_frame_ts": None, "track_meta": {}, "best_crops": {}, "best_frame": {},
             "active": True,
@@ -470,11 +356,19 @@ class Engine:
             f"line_points={line_points} stop_roi={stop_roi} triggers={triggers}"
         )
 
-    def remove_camera(self, camera_id: str):
+    def remove_camera(self, camera_id: str, reason: str = "camera_removed"):
         camera_id = str(camera_id)
-        cam = self.cameras.pop(camera_id, None)
+        cam = self.cameras.get(camera_id)
         if not cam:
             return
+        # hand every live track to the hub first — deactivation, rebalance
+        # migration and engine shutdown still produce a final record
+        for tid, tmeta in list(cam.get("track_meta", {}).items()):
+            try:
+                self._end_track(camera_id, tid, tmeta, reason=reason)
+            except Exception:
+                self.logger.exception(f"camera={camera_id} track={tid}: ending on removal failed")
+        self.cameras.pop(camera_id, None)
         try:
             cam["reader"].stop()
         except Exception:
@@ -573,60 +467,41 @@ class Engine:
             return True, updated_best
         return False, False
 
-    # ---------------- OCR submission ----------------
-    def _is_track_waiting_for_ocr(self, meta):
-        return bool(meta.get("ocr_waiting_for_result", False))
+    # ---------------- control hub: events, crops, track end ----------------
+    @staticmethod
+    def _hub_triggers(cam: Dict[str, Any]) -> Dict[str, bool]:
+        """Camera trigger flags in the hub's (= this module's event) names."""
+        t = cam.get("triggers") or {}
+        return {
+            "periodic": bool(t.get("cond_per_trig", False)),
+            "cross_line": bool(t.get("cross_line_trig", False)),
+            "stop_roi": bool(t.get("stop_roi_trig", False)),
+            "leave_scene": bool(t.get("leave_scene_trig", False)),
+        }
 
-    def _mark_track_ocr_pending(self, meta, trigger_type):
-        meta["ocr_waiting_for_result"] = True
-        meta["ocr_pending_trigger_type"] = trigger_type
-        meta["ocr_pending_submitted_at"] = time.time()
+    @staticmethod
+    def _trigger_detail(ev: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k in ("direction", "confidence", "duration", "velocity", "class"):
+            v = ev.get(k)
+            if v is None:
+                continue
+            out[k] = v if isinstance(v, str) else float(v)
+        pt = ev.get("point")
+        if pt is not None:
+            out["point"] = [int(pt[0]), int(pt[1])]
+        return out
 
-    def _clear_track_ocr_pending(self, meta):
-        meta["ocr_waiting_for_result"] = False
-        meta["ocr_pending_trigger_type"] = None
-        meta["ocr_pending_submitted_at"] = None
+    def _track_stats(self, cam, track_id: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "uid": meta["uid"], "camera_id": cam["camera_id"], "track_id": track_id,
+            "seen_frames": int(meta.get("seen_frames", 0)),
+            "n_crops": len(cam["best_crops"].get(track_id, [])),
+            "duration_frames": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
+        }
 
-    def _should_submit_ocr_for_stage(self, cam, camera_id, track_id, submit_stage,
-                                      ocr_conf_threshold=None):
-        if ocr_conf_threshold is None:
-            ocr_conf_threshold = config.OCR_CONF_SKIP_THRESHOLD
-        existing_ocr = cam.get("track_ocr", {}).get(track_id, {})
-        real_ocr_results = [(s, r) for s, r in existing_ocr.items() if r is not None]
-
-        if not real_ocr_results:
-            return True
-
-        best_conf, best_stage, best_result = -1.0, None, None
-        for old_stage, ocr_res in real_ocr_results:
-            conf_value = float(ocr_res.get("confidence") or 0.0)
-            if conf_value > best_conf:
-                best_conf, best_stage, best_result = conf_value, old_stage, ocr_res
-
-        if best_conf >= ocr_conf_threshold:
-            self._dbg_log(camera_id, "OCR_SKIP",
-                          f"#{track_id} {submit_stage} skipped: have "
-                          f"'{best_result.get('plate_text')}' {best_conf:.2f} from {best_stage}",
-                          track_id=track_id)
-            return False
-        return True
-
-    def _submit_track_to_ocr(self, camera_id: str, track_id: int, meta: Dict[str, int],
-                              trigger_type: str = "periodic") -> bool:
-        cam = self.cameras.get(camera_id)
-        if not cam:
-            return False
-
-        valid_trigger_types = {"cross_line", "stop_roi", "leave_scene", "periodic"}
-        if trigger_type not in valid_trigger_types:
-            self.logger.error(f"[OCR-TASK] invalid trigger_type={trigger_type!r} camera={camera_id} track={track_id}")
-            return False
-
-        seen_frames = int(meta.get("seen_frames", 0))
+    def _build_task(self, cam, camera_id: str, track_id: int, meta: dict, stage: str) -> Optional[dict]:
         crops = cam["best_crops"].get(track_id, [])
-        if not crops:
-            return False
-
         crops_data = []
         for item in crops:
             encoded = encode_image(item["image"])
@@ -637,144 +512,167 @@ class Engine:
                 "resolution": item["resolution"], "frame_number": item["frame_number"],
             })
         if not crops_data:
-            return False
-
+            return None
         best_frame_data = None
-        if track_id in cam["best_frame"]:
-            bf = cam["best_frame"][track_id]
+        bf = cam["best_frame"].get(track_id)
+        if bf:
             encoded_frame = encode_image(bf["frame"])
             if encoded_frame:
                 best_frame_data = {"image_bytes": encoded_frame, "bbox": bf["bbox"], "resolution": bf["resolution"]}
-
-        task_id = f"{self.engine_id}:{camera_id}:{track_id}:{trigger_type}:{time.time_ns()}"
-        task = {
-            "task_id": task_id, "process_id": self.engine_id, "stream_idx": camera_id,
+        return {
+            "task_id": new_task_id(meta["uid"], stage), "track_uid": meta["uid"], "stage": stage,
+            "engine_id": self.engine_id, "process_id": self.engine_id, "stream_idx": camera_id,
             "camera_id": camera_id, "video_source": cam["url"], "track_id": track_id,
-            "trigger_type": trigger_type,
+            "trigger_type": stage,
             "meta": {
-                "seen_frames": seen_frames,
+                "seen_frames": int(meta.get("seen_frames", 0)),
                 "duration": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
-                "trigger_reason": trigger_type, "trigger_snapshot": True,
+                "trigger_reason": stage, "trigger_snapshot": True,
             },
             "crops": crops_data, "best_frame": best_frame_data,
         }
-        self.ocr_client.submit(task)
 
+    def _dispatch(self, cam, camera_id: str, track_id: int, meta: dict, task: dict):
+        n = len(task["crops"])
+        self.hub.emit(K_SUBMITTED, {"uid": meta["uid"], "camera_id": camera_id, "track_id": track_id,
+                                    "task_id": task["task_id"], "stage": task["stage"], "n_crops": n})
+        self.hub.submit(task)
         if config.DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED:
             debug_extras.save_ocr_submission_montage(
-                camera_id=camera_id, track_id=track_id, trigger_type=trigger_type,
-                task_id=task_id, crops=crops, best_frame=cam["best_frame"].get(track_id),
-                logger=self.logger,
+                camera_id=camera_id, track_id=track_id, trigger_type=task["stage"],
+                task_id=task["task_id"], crops=cam["best_crops"].get(track_id, []),
+                best_frame=cam["best_frame"].get(track_id), logger=self.logger,
             )
-
-        det_scores = [round(float(c["score"]), 3) for c in crops_data]
+        det_scores = [round(float(c["score"]), 3) for c in task["crops"]]
         self.logger.info(
-            f"[OCR-SUBMIT] camera={camera_id} track={track_id} stage={trigger_type} "
-            f"seen_frames={seen_frames} crops={len(crops_data)} det_scores={det_scores} "
-            f"best_frame={'yes' if best_frame_data else 'no'} task_id={task_id}"
+            f"[OCR-SUBMIT] camera={camera_id} track={track_id} uid={meta['uid']} stage={task['stage']} "
+            f"seen_frames={meta.get('seen_frames', 0)} crops={n} det_scores={det_scores} "
+            f"best_frame={'yes' if task['best_frame'] else 'no'} task_id={task['task_id']}"
         )
         self._dbg_log(camera_id, "OCR_SUBMIT",
-                      f"#{track_id} {trigger_type} crops={len(crops_data)} "
-                      f"best_frame={'yes' if best_frame_data else 'no'} seen={seen_frames}f",
-                      track_id=track_id,
-                      data={"task_id": task_id, "trigger_type": trigger_type,
-                            "n_crops": len(crops_data), "det_scores": det_scores})
-        return True
+                      f"#{track_id} {task['stage']} crops={n} best_frame={'yes' if task['best_frame'] else 'no'}",
+                      track_id=track_id, data={"task_id": task["task_id"], "n_crops": n, "det_scores": det_scores})
 
-    # ---------------- publish / finalize ----------------
-    def _publish_vehicle_update(self, camera_id, track_id, meta, update_type):
+    def _try_submit(self, camera_id: str, track_id: int, meta: dict,
+                    rec_state: TrackRecState, now: float) -> Optional[str]:
+        """Send the current top-N crops if something is requested, the hub
+        has not said "satisfied", nothing is in flight, and the crop set
+        changed since the last send. Returns the task_id or None."""
         cam = self.cameras.get(camera_id)
         if not cam:
-            return
-        track_paths = cam.get("track_paths", {}).get(track_id, {})
-        payload = {
-            "process_id": self.engine_id, "camera_id": camera_id, "track_id": track_id,
-            "update_type": update_type, "is_final": False, "meta": meta,
-            "events": meta.get("events", {}),
-            "ocr_results": cam.get("track_ocr", {}).get(track_id, {}),
-            "track_paths": track_paths,
-        }
-        try:
-            self.bus.push_result(payload, json_encoder=DateTimeEncoder)
-            self._dbg_log(camera_id, "PUBLISH", f"#{track_id} {update_type} -> core (not final)",
-                          track_id=track_id,
-                          data={"update_type": update_type, "is_final": False,
-                                "events": list(meta.get("events", {}).keys()), "track_paths": track_paths})
-            self.logger.info(
-                f"[PUBLISH] camera={camera_id} track={track_id} update_type={update_type} "
-                f"events={list(meta.get('events', {}).keys())}"
-            )
-        except Exception as e:
-            self._dbg_log(camera_id, "ERROR", f"#{track_id} redis publish FAILED ({update_type}): {e}", track_id=track_id)
-            self.logger.error(f"[PUBLISH-FAILED] camera={camera_id} track={track_id} update_type={update_type}: {e}")
-
-    def _finalize_or_drop_track(self, camera_id: str, track_id: int, meta: dict):
-        cam = self.cameras.get(camera_id)
-        if not cam:
-            return
-
-        seen_frames = int(meta.get("seen_frames", 0))
+            return None
+        stage = rec_state.next_stage(now, config.SUBMIT_TIMEOUT_SEC, self.STAGE_PRIORITY)
+        if stage is None:
+            return None
         crops = cam["best_crops"].get(track_id, [])
-        num_crops = len(crops)
-        should_finalize = (num_crops >= self.MIN_CROPS_TO_FINALIZE) and (seen_frames >= self.MIN_SEEN_FRAMES)
+        if not crops:
+            return None
+        key = f"{crops[0]['frame_number']}:{len(crops)}"
+        if key == rec_state.last_sent_key:
+            self._dbg_log(camera_id, "OCR_SKIP", f"#{track_id} {stage} waiting for a better crop set",
+                          track_id=track_id)
+            return None
+        task = self._build_task(cam, camera_id, track_id, meta, stage)
+        if task is None:
+            return None
+        rec_state.mark_submitted(task["task_id"], stage, key, now)
+        self._dispatch(cam, camera_id, track_id, meta, task)
+        return task["task_id"]
 
-        if should_finalize:
-            ocr_results = cam.get("track_ocr", {}).get(track_id, {})
-            track_paths = cam.get("track_paths", {}).get(track_id, {})
-            payload = {
-                "update_type": "leave_scene", "is_final": True, "process_id": self.engine_id,
-                "stream_idx": camera_id, "camera_id": camera_id, "video_source": cam["url"],
-                "track_id": track_id,
-                "meta": {
-                    "seen_frames": seen_frames,
-                    "duration": int(meta.get("last_seen_fid", 0) - meta.get("first_seen_fid", 0)),
-                },
-                "events": meta.get("events", {}), "ocr_results": ocr_results, "track_paths": track_paths,
-            }
-            try:
-                self.bus.push_result(payload, json_encoder=DateTimeEncoder)
-                _plates = {s: r.get("plate_text") for s, r in (ocr_results or {}).items() if r}
-                self._dbg_log(camera_id, "FINALIZE",
-                              f"#{track_id} leave_scene FINAL -> core seen={seen_frames}f crops={num_crops} plates={_plates}",
-                              track_id=track_id,
-                              data={"is_final": True, "events": list(payload["events"].keys()),
-                                    "plates": _plates, "track_paths": track_paths})
-                lifetime_s = time.time() - float(meta.get("first_seen_wall_ts", time.time()))
-                self.logger.info(
-                    f"[FINALIZE] camera={camera_id} track={track_id} -> published leave_scene "
-                    f"seen_frames={seen_frames} crops={num_crops} lifetime={lifetime_s:.2f}s "
-                    f"events={list(payload['events'].keys())} plates={_plates}"
-                )
-            except Exception as e:
-                self._dbg_log(camera_id, "ERROR", f"#{track_id} finalize publish FAILED: {e}", track_id=track_id)
-                self.logger.error(f"[FINALIZE-FAILED] camera={camera_id} track={track_id}: {e}")
-        else:
-            done = [s for s, r in cam.get("track_ocr", {}).get(track_id, {}).items() if r]
-            _reasons = []
-            if num_crops < self.MIN_CROPS_TO_FINALIZE:
-                _reasons.append(f"crops {num_crops}<{self.MIN_CROPS_TO_FINALIZE}")
-            if seen_frames < self.MIN_SEEN_FRAMES:
-                _reasons.append(f"seen {seen_frames}<{self.MIN_SEEN_FRAMES}")
-            self._dbg_log(camera_id, "DROP", f"#{track_id} DROPPED: {', '.join(_reasons)} (ocr done: {done})",
-                          track_id=track_id,
-                          data={"seen_frames": seen_frames, "n_crops": num_crops, "ocr_stages_done": done})
-            lifetime_s = time.time() - float(meta.get("first_seen_wall_ts", time.time()))
-            first_fid = meta.get("first_seen_fid", 0)
-            last_fid = meta.get("last_seen_fid", 0)
-            self.logger.warning(
-                f"[DROP] camera={camera_id} track={track_id} reasons=[{', '.join(_reasons)}] "
-                f"seen_frames={seen_frames}/{self.MIN_SEEN_FRAMES}min crops={num_crops}/{self.MIN_CROPS_TO_FINALIZE}min "
-                f"lifetime={lifetime_s:.2f}s fid_range=[{first_fid}..{last_fid}] ocr_stages_done={done}"
-            )
+    def _end_track(self, camera_id: str, track_id: int, meta: dict, reason: str = "absent"):
+        """The track left (or its camera/engine is going away): optionally
+        send the leave_scene OCR pass, tell the hub, forget the track."""
+        cam = self.cameras.get(camera_id)
+        if not cam:
+            return
+        rec_state: Optional[TrackRecState] = cam["rec_state"].pop(track_id, None)
+        uid = meta.get("uid")
+        seen_frames = int(meta.get("seen_frames", 0))
+        num_crops = len(cam["best_crops"].get(track_id, []))
+        leave_scene_trig = bool((cam.get("triggers") or {}).get("leave_scene_trig", False))
+
+        finalize_task_id = None
+        if leave_scene_trig and rec_state is not None and not rec_state.satisfied \
+                and seen_frames >= self.MIN_SEEN_FRAMES and num_crops >= self.MIN_CROPS_TO_FINALIZE:
+            task = self._build_task(cam, camera_id, track_id, meta, "leave_scene")
+            if task is not None:
+                self._dispatch(cam, camera_id, track_id, meta, task)
+                finalize_task_id = task["task_id"]
+        elif leave_scene_trig:
+            why = ("hub satisfied" if rec_state is not None and rec_state.satisfied
+                   else f"seen={seen_frames}/{self.MIN_SEEN_FRAMES} crops={num_crops}/{self.MIN_CROPS_TO_FINALIZE}")
+            self._dbg_log(camera_id, "OCR_SKIP", f"#{track_id} leave_scene OCR skipped ({why})", track_id=track_id)
+
+        if uid:
+            self.hub.emit(K_TRACK_ENDED, {**self._track_stats(cam, track_id, meta), "reason": reason,
+                                          "finalize_task_id": finalize_task_id})
+            self._uid_index.pop(uid, None)
+
+        lifetime_s = time.time() - float(meta.get("first_seen_wall_ts", time.time()))
+        self.logger.info(
+            f"[TRACK-END] camera={camera_id} track={track_id} uid={uid} reason={reason} "
+            f"seen_frames={seen_frames} crops={num_crops} lifetime={lifetime_s:.2f}s "
+            f"leave_scene_task={finalize_task_id}"
+        )
+        self._dbg_log(camera_id, "FINALIZE",
+                      f"#{track_id} {reason} -> hub seen={seen_frames}f crops={num_crops} "
+                      f"leave_scene_ocr={'yes' if finalize_task_id else 'no'}", track_id=track_id)
 
         cam["track_meta"].pop(track_id, None)
         cam["best_crops"].pop(track_id, None)
         cam["best_frame"].pop(track_id, None)
         cam.get("trigger_states", {}).pop(track_id, None)
-        cam.get("track_ocr", {}).pop(track_id, None)
-        cam.get("track_paths", {}).pop(track_id, None)
+
+    def _drain_hub_ctl(self):
+        now = time.time()
+        for msg in self.hub.drain():
+            loc = self._uid_index.get(msg.get("uid"))
+            if not loc:
+                continue  # track already ended here — the hub owns it now
+            camera_id, track_id = loc
+            cam = self.cameras.get(camera_id)
+            rec_state = cam["rec_state"].get(track_id) if cam else None
+            if rec_state is None:
+                continue
+            was_satisfied = rec_state.satisfied
+            rec_state.apply_ctl(msg, now)
+            disp = rec_state.display or {}
+            action = msg.get("action")
+            if action == "result":
+                self.logger.info(
+                    f"[OCR-RESULT] camera={camera_id} track={track_id} task={msg.get('task_id')} "
+                    f"hub_answer={disp.get('label')!r} conf={disp.get('confidence')} "
+                    f"satisfied={rec_state.satisfied} rtt_ms={rec_state.last_latency_ms}"
+                )
+                self._dbg_log(camera_id, "OCR_RESULT",
+                              f"#{track_id} -> '{disp.get('label')}' conf={disp.get('confidence')}",
+                              track_id=track_id, data={"task_id": msg.get("task_id"), "display": disp})
+            elif action == "request":
+                self._dbg_log(camera_id, "HUB_REQUEST", f"#{track_id} {msg.get('stage')}", track_id=track_id)
+            if rec_state.satisfied and not was_satisfied:
+                self.logger.info(f"[SATISFIED] camera={camera_id} track={track_id} plate={disp.get('label')!r} "
+                                 f"— no more OCR for this track")
 
     # ---------------- debug frame assembly ----------------
+    def _debug_ocr_fields(self, cam, track_id: int, now: float) -> Dict[str, Any]:
+        rs = cam.get("rec_state", {}).get(track_id)
+        rows = self._ocr_rows_for_track(cam, track_id)
+        if rs is None:
+            return {"ocr_rows": rows, "ocr_summary": None, "ocr_pending": None, "ocr_pending_age": 0.0,
+                    "last_ocr_latency_ms": None, "finalize_waiting": False, "finalize_stage": None,
+                    "finalize_age": 0.0}
+        label = rs.display.get("label")
+        return {
+            "ocr_rows": rows,
+            "ocr_summary": (f"{label} {float(rs.display.get('confidence') or 0.0):.2f}"
+                            f"{' SAT' if rs.satisfied else ''}") if label else None,
+            "ocr_pending": rs.pending_label(now, config.SUBMIT_TIMEOUT_SEC),
+            "ocr_pending_age": (now - rs.in_flight_since) if rs.in_flight_task else 0.0,
+            "last_ocr_latency_ms": rs.last_latency_ms,
+            # the finalize wait happens in the control hub now
+            "finalize_waiting": False, "finalize_stage": None, "finalize_age": 0.0,
+        }
+
     def _write_debug_frame(self, cam, camera_id, full_frame, roi_offset, dbg_dets, dbg_tracks, fid):
         rec: DebugRecorder = cam["debug"]
         n_live = len(dbg_tracks)
@@ -810,13 +708,7 @@ class Engine:
                 "velocity": tstate.recent_velocity() if tstate else None,
                 "stopped": bool(tstate.stop_reported) if tstate else False,
                 "stop_duration": 0.0, "events": dict(tmeta.get("events", {})),
-                "ocr_rows": self._ocr_rows_for_track(cam, tid), "ocr_summary": None,
-                "ocr_pending": tmeta.get("ocr_pending_trigger_type") if tmeta.get("ocr_waiting_for_result") else None,
-                "ocr_pending_age": time.time() - float(tmeta.get("ocr_pending_submitted_at") or time.time()),
-                "last_ocr_latency_ms": tmeta.get("last_ocr_latency_ms"),
-                "finalize_waiting": bool(tmeta.get("finalize_waiting_for_ocr")),
-                "finalize_stage": tmeta.get("finalize_ocr_trigger_type"),
-                "finalize_age": time.time() - float(tmeta.get("finalize_ocr_submitted_at") or time.time()),
+                **self._debug_ocr_fields(cam, tid, time.time()),
             }
 
         triggers = cam.get("triggers") or {}
@@ -850,7 +742,7 @@ class Engine:
                 time.sleep(0.05)
                 continue
 
-            self._drain_ocr_results()
+            self._drain_hub_ctl()
 
             frames, cam_ids, roi_offsets, full_frames = [], [], [], []
 
@@ -1033,31 +925,26 @@ class Engine:
 
                     for track in online_targets:
                         track_id = int(track.track_id)
+                        now_ts = time.time()
                         meta = cam["track_meta"].get(track_id)
                         is_new_track = meta is None
                         if meta is None:
+                            uid = new_track_uid(camera_id, self.engine_id)
                             meta = {
-                                "first_seen_fid": fid, "last_seen_fid": fid,
-                                "first_seen_wall_ts": time.time(), "seen_frames": 1, "events": {},
-                                "ocr_waiting_for_result": False, "ocr_pending_trigger_type": None,
-                                "ocr_pending_submitted_at": None,
-                                "finalize_waiting_for_ocr": False, "finalize_ocr_trigger_type": None,
-                                "finalize_ocr_submitted_at": None,
+                                "uid": uid, "first_seen_fid": fid, "last_seen_fid": fid,
+                                "first_seen_wall_ts": now_ts, "seen_frames": 1, "events": {},
                             }
                             cam["track_meta"][track_id] = meta
+                            cam["rec_state"][track_id] = TrackRecState(uid)
+                            self._uid_index[uid] = (camera_id, track_id)
+                            self.hub.emit(K_TRACK_STARTED, {
+                                "uid": uid, "camera_id": camera_id, "track_id": track_id,
+                                "video_source": cam["url"], "triggers": self._hub_triggers(cam),
+                            })
                         else:
                             meta["last_seen_fid"] = fid
                             meta["seen_frames"] += 1
-                            meta.setdefault("ocr_waiting_for_result", False)
-                            meta.setdefault("ocr_pending_trigger_type", None)
-                            meta.setdefault("ocr_pending_submitted_at", None)
-                            meta.setdefault("finalize_waiting_for_ocr", False)
-                            meta.setdefault("finalize_ocr_trigger_type", None)
-                            meta.setdefault("finalize_ocr_submitted_at", None)
-
-                        cam.setdefault("track_ocr", {}).setdefault(
-                            track_id, {"cross_line": None, "stop_roi": None, "leave_scene": None, "periodic": None}
-                        )
+                        rec_state: TrackRecState = cam["rec_state"][track_id]
 
                         track_class = int(track.flag_fdf)
                         if track.detbb is None:
@@ -1092,21 +979,32 @@ class Engine:
                             bbox_roi=(x1, y1, x2, y2), roi_offset=(rx1, ry1, rx2, ry2),
                         )
 
-                        if cross_line_trig and trigger_events.get("line_cross"):
-                            ev = trigger_events["line_cross"]
-                            if "cross_line" not in meta["events"]:
-                                meta["events"]["cross_line"] = datetime.datetime.now().isoformat()
+                        # Spatial triggers -> control hub. Both behave the
+                        # same now (they used to differ: cross_line published
+                        # nothing when a confident read already existed, and
+                        # stop_roi published nothing when its OCR submit
+                        # failed). The hub publishes each exactly once.
+                        for ev_key, stage, enabled in (("line_cross", "cross_line", cross_line_trig),
+                                                       ("stopped_roi", "stop_roi", stop_roi_trig)):
+                            ev = trigger_events.get(ev_key)
+                            if not (enabled and ev):
+                                continue
+                            if stage in meta["events"]:
+                                continue  # once per event per track (the hub dedupes too)
+                            meta["events"][stage] = datetime.datetime.now().isoformat()
+                            rec_state.request(stage, now_ts)
+                            task_id = self._try_submit(camera_id, track_id, meta, rec_state, now_ts)
+                            self.hub.emit(K_TRIGGER, {
+                                "uid": meta["uid"], "camera_id": camera_id, "track_id": track_id,
+                                "event": stage, "task_id": task_id, "detail": self._trigger_detail(ev),
+                                "seen_frames": meta.get("seen_frames", 0),
+                                "n_crops": len(cam["best_crops"].get(track_id, [])),
+                            })
                             self.logger.info(
-                                f"[LINE-CROSS] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} "
-                                f"direction={ev['direction']} point={ev['point']} confidence={ev['confidence']:.2f}"
+                                f"[{'LINE-CROSS' if stage == 'cross_line' else 'STOPPED-ROI'}] camera={camera_id} "
+                                f"track={track_id} uid={meta['uid']} class={ev['class']} detail={self._trigger_detail(ev)} "
+                                f"-> hub (task={task_id})"
                             )
-                            if not self._is_track_waiting_for_ocr(meta):
-                                if self._should_submit_ocr_for_stage(cam, camera_id, track_id, "cross_line"):
-                                    submitted = self._submit_track_to_ocr(camera_id, track_id, meta, "cross_line")
-                                    if submitted:
-                                        self._mark_track_ocr_pending(meta, "cross_line")
-                                    else:
-                                        self._publish_vehicle_update(camera_id, track_id, meta, "cross_line")
 
                         if stop_roi_trig and trigger_events.get("roi_entry"):
                             ev = trigger_events["roi_entry"]
@@ -1114,24 +1012,6 @@ class Engine:
                                 f"[ROI-ENTRY] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} "
                                 f"point={ev['point']} confidence={ev['confidence']:.2f}"
                             )
-
-                        if stop_roi_trig and trigger_events.get("stopped_roi"):
-                            ev = trigger_events["stopped_roi"]
-                            if "stop_roi" not in meta["events"]:
-                                meta["events"]["stop_roi"] = datetime.datetime.now().isoformat()
-                            self.logger.info(
-                                f"[STOPPED-ROI] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} "
-                                f"duration={ev['duration']:.1f}s velocity={ev['velocity']:.1f}px/s "
-                                f"point={ev['point']} confidence={ev['confidence']:.2f}"
-                            )
-                            if not self._is_track_waiting_for_ocr(meta):
-                                if self._should_submit_ocr_for_stage(cam, camera_id, track_id, "stop_roi"):
-                                    submitted = self._submit_track_to_ocr(camera_id, track_id, meta, "stop_roi")
-                                    if submitted:
-                                        self._mark_track_ocr_pending(meta, "stop_roi")
-                                else:
-                                    self._publish_vehicle_update(camera_id, track_id, meta, "stop_roi")
-
                         if stop_roi_trig and trigger_events.get("roi_exit"):
                             ev = trigger_events["roi_exit"]
                             self.logger.info(f"[ROI-EXIT] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} point={ev['point']}")
@@ -1152,6 +1032,14 @@ class Engine:
                                                  bbox_xyxy=full_bbox, det_score=score, resolution=reso)
 
                         meta["last_bbox_full"] = (x1 + rx1, y1 + ry1, x2 + rx1, y2 + ry1)
+
+                        # pending requests (hub periodic re-query, or a trigger
+                        # whose crops were not new yet) + low-rate heartbeat
+                        if rec_state.requested:
+                            self._try_submit(camera_id, track_id, meta, rec_state, now_ts)
+                        if now_ts - rec_state.last_update_emit >= config.TRACK_UPDATE_INTERVAL_SEC:
+                            rec_state.last_update_emit = now_ts
+                            self.hub.emit(K_TRACK_UPDATE, self._track_stats(cam, track_id, meta))
                         if cam.get("debug") is not None and cam["debug"].enabled:
                             tstate = cam.get("trigger_states", {}).get(track_id)
                             crops_store = cam["best_crops"].get(track_id, [])
@@ -1173,100 +1061,15 @@ class Engine:
                                 "stopped": bool(tstate.stop_reported) if tstate else False,
                                 "stop_duration": (time.time() - tstate.roi_entry_time) if (tstate and tstate.roi_entry_time) else 0.0,
                                 "events": dict(meta.get("events", {})),
-                                "ocr_rows": self._ocr_rows_for_track(cam, track_id),
-                                "ocr_summary": " | ".join(f"{s}:{t.split()[0]}" for s, t in self._ocr_rows_for_track(cam, track_id)) or None,
-                                "ocr_pending": meta.get("ocr_pending_trigger_type") if meta.get("ocr_waiting_for_result") else None,
-                                "ocr_pending_age": time.time() - float(meta.get("ocr_pending_submitted_at") or time.time()),
-                                "last_ocr_latency_ms": meta.get("last_ocr_latency_ms"),
-                                "finalize_waiting": bool(meta.get("finalize_waiting_for_ocr")),
-                                "finalize_stage": meta.get("finalize_ocr_trigger_type"),
-                                "finalize_age": time.time() - float(meta.get("finalize_ocr_submitted_at") or time.time()),
+                                **self._debug_ocr_fields(cam, track_id, now_ts),
                             }
 
-                    # finalize inactive tracks
-                    to_finalize = []
+                    # tracks gone for > ABSENT_N frames -> hand them to the hub
                     for tid, tmeta in list(cam["track_meta"].items()):
                         if (fid - int(tmeta["last_seen_fid"])) > self.ABSENT_N:
-                            to_finalize.append((tid, tmeta))
-
-                    for tid, tmeta in to_finalize:
-                        if tmeta.get("finalize_waiting_for_ocr", False):
-                            continue
-                        triggers = cam.get("triggers") or {}
-                        leave_scene_trig = bool(triggers.get("leave_scene_trig", False))
-                        self._dbg_log(camera_id, "FINALIZE",
-                                      f"#{tid} absent > {self.ABSENT_N} frames -> leaving scene (leave_scene_trig={leave_scene_trig})",
-                                      track_id=tid)
-                        finalize_now = True
-
-                        if leave_scene_trig:
-                            submit_stage = "leave_scene"
-                            if "leave_scene" not in tmeta["events"]:
-                                tmeta["events"]["leave_scene"] = datetime.datetime.now().isoformat()
-
-                            if self._is_track_waiting_for_ocr(tmeta):
-                                pending_trigger = tmeta.get("ocr_pending_trigger_type")
-                                pending_submitted_at = tmeta.get("ocr_pending_submitted_at")
-                                self.logger.info(
-                                    f"[LEAVE-SCENE-BLOCKED] camera={camera_id} track={tid} "
-                                    f"pending={pending_trigger} -> delaying finalize until it completes"
-                                )
-                                tmeta["finalize_waiting_for_ocr"] = True
-                                tmeta["finalize_ocr_trigger_type"] = pending_trigger or "leave_scene"
-                                tmeta["finalize_ocr_submitted_at"] = (
-                                    float(pending_submitted_at) if pending_submitted_at is not None else time.time()
-                                )
-                                finalize_now = False
-                            else:
-                                if self._should_submit_ocr_for_stage(cam, camera_id, tid, submit_stage):
-                                    submitted = self._submit_track_to_ocr(camera_id, tid, tmeta, "leave_scene")
-                                    if submitted:
-                                        self._mark_track_ocr_pending(tmeta, "leave_scene")
-                                        tmeta["finalize_waiting_for_ocr"] = True
-                                        tmeta["finalize_ocr_trigger_type"] = "leave_scene"
-                                        tmeta["finalize_ocr_submitted_at"] = time.time()
-                                        finalize_now = False
-                                        self.logger.info(f"[FINALIZE-DELAYED] camera={camera_id} track={tid} waiting for leave_scene OCR result")
-                                    else:
-                                        self.logger.warning(f"[FINALIZE-FALLBACK] camera={camera_id} track={tid} OCR submit failed; finalizing without it")
-                                else:
-                                    finalize_now = True
-
-                        if finalize_now:
-                            self._finalize_or_drop_track(camera_id, tid, tmeta)
-
-                    waiting_to_finalize = [
-                        (tid, tmeta) for tid, tmeta in list(cam["track_meta"].items())
-                        if tmeta.get("finalize_waiting_for_ocr", False)
-                    ]
-                    for tid, tmeta in waiting_to_finalize:
-                        expected_stage = tmeta.get("finalize_ocr_trigger_type", "leave_scene")
-                        submitted_at = float(tmeta.get("finalize_ocr_submitted_at", 0.0))
-                        waited = time.time() - submitted_at
-                        existing_ocr = cam.get("track_ocr", {}).get(tid, {})
-                        stage_result = existing_ocr.get(expected_stage)
-
-                        if stage_result is not None:
-                            self.logger.info(f"[FINALIZE-RESUME] camera={camera_id} track={tid} stage={expected_stage} result arrived; finalizing")
-                            tmeta.pop("finalize_waiting_for_ocr", None)
-                            tmeta.pop("finalize_ocr_trigger_type", None)
-                            tmeta.pop("finalize_ocr_submitted_at", None)
-                            self._finalize_or_drop_track(camera_id, tid, tmeta)
-                            continue
-
-                        if waited >= config.OCR_FINALIZE_TIMEOUT_SEC:
-                            self.logger.warning(
-                                f"[FINALIZE-TIMEOUT] camera={camera_id} track={tid} waited={waited:.2f}s "
-                                f"stage={expected_stage} (limit {config.OCR_FINALIZE_TIMEOUT_SEC:g}s); finalizing without OCR"
-                            )
-                            self._dbg_log(camera_id, "TIMEOUT",
-                                          f"#{tid} waited {waited:.1f}s for {expected_stage} OCR "
-                                          f"(limit {config.OCR_FINALIZE_TIMEOUT_SEC:g}s) - finalizing without it",
+                            self._dbg_log(camera_id, "FINALIZE", f"#{tid} absent > {self.ABSENT_N} frames -> leaving scene",
                                           track_id=tid)
-                            tmeta.pop("finalize_waiting_for_ocr", None)
-                            tmeta.pop("finalize_ocr_trigger_type", None)
-                            tmeta.pop("finalize_ocr_submitted_at", None)
-                            self._finalize_or_drop_track(camera_id, tid, tmeta)
+                            self._end_track(camera_id, tid, tmeta, reason="absent")
 
                     rec = cam.get("debug")
                     if rec is not None and rec.enabled:
@@ -1292,8 +1095,8 @@ class Engine:
 
     def cleanup(self):
         for camera_id in list(self.cameras.keys()):
-            self.remove_camera(camera_id)
-        self.ocr_client.stop()
+            self.remove_camera(camera_id, reason="engine_stopped")
+        self.hub.stop()
 
 
 def _engine_process_main(

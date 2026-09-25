@@ -1,6 +1,11 @@
 """
 worker.py (ocr_service)
 --------------------------------------------------------------------
+CONTROL HUB (2026-09): results for detector tasks go to the control
+hub's results stream (`plate:internal:hub:results`, keyed by the
+task's `track_uid`) instead of back to the detector engine — see
+`_emit_result`.
+
 `OcrWorker` replaces the reference `OCRWorker(mp.Process)`
 (ocr_worker.py). Same job — pull a task, decode crops, run the
 car/motorcycle PaddleOCR pipeline, majority-vote across crops, validate
@@ -484,6 +489,21 @@ class OcrWorker(mp.Process):
         result = self._build_result(task, **kwargs)
         if result is None:
             return False
+        # Current detectors tag every task with the track's global uid:
+        # the answer goes to the control hub, which owns the track's OCR
+        # state (votes across stages, decides what Django sees). A task
+        # without one comes from a pre-hub detector (rolling upgrade) and
+        # is answered the old way, on its engine's own result list.
+        if task.get("track_uid"):
+            result["uid"] = task["track_uid"]
+            result["stage"] = task.get("stage") or task.get("trigger_type")
+            try:
+                self.bus.hub_push_result(result)
+            except Exception:
+                self.logger.exception("[OCR-%s] failed to push hub result for task %s",
+                                      self.worker_id, task.get("task_id"))
+                return False
+            return True
         engine_id = task.get("engine_id")
         if engine_id is None:
             self.logger.warning("[OCR-%s] task %s carried no engine_id — cannot route result",
@@ -732,7 +752,10 @@ class OcrWorker(mp.Process):
                 continue
             try:
                 self._process_task(task)
-            except Exception:
+            except Exception as e:
                 self.logger.exception("[OCR-%s] unhandled error processing task", self.worker_id)
+                # never leave the hub waiting for an answer that won't come
+                if isinstance(task, dict):
+                    self._emit_result(task, status="error", description="unhandled OCR error", error=str(e))
 
         self.logger.info("[OCR-%s] Stopped.", self.worker_id)

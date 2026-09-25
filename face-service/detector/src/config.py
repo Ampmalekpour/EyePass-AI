@@ -193,10 +193,29 @@ STOP_MIN_SAMPLES = _int("STOP_MIN_SAMPLES", 15)
 STOP_TIME_SECONDS = _float("STOP_TIME_SECONDS", 3.0)
 STOP_VELOCITY_THRESHOLD = _float("STOP_VELOCITY_THRESHOLD", 1.5)
 
-PERIODIC_MODE = os.getenv("PERIODIC_MODE", "frame")
-PERIODIC_FRAME_INTERVAL = _int("PERIODIC_FRAME_INTERVAL", 60)
-PERIODIC_TIME_INTERVAL = _float("PERIODIC_TIME_INTERVAL", 3.0)
-PERIODIC_RECOG_CONF_THRESH = _float("PERIODIC_RECOG_CONF_THRESH", 0.70)
+# ---- recognition dispatch (control hub era) ---------------------------
+# WHEN to publish, WHAT identity to publish, periodic cadence and the
+# "good enough, stop asking" threshold all live in the control hub now
+# (FACE_* variables in control-hub). The detector only decides whether
+# it may send a crop right now — see facecore/hub.py.
+#
+# How long a submitted task blocks the next submission for the same
+# track if the hub never acks its result (previously a hard-coded 1.0s,
+# which caused duplicate submissions whenever the recognizer was busy).
+SUBMIT_TIMEOUT_SEC = _float("SUBMIT_TIMEOUT_SEC", 5.0)
+# Low-rate per-track heartbeat to the hub (seen frames, liveness).
+TRACK_UPDATE_INTERVAL_SEC = _float("TRACK_UPDATE_INTERVAL_SEC", 5.0)
+# A crop is only worth sending when its landmarks are this confident —
+# the recognizer drops anything below LANDMARK_CONF_THRESHOLD (0.60)
+# anyway, so sending it only burns a worker slot. Now also applied to
+# the finalize pass, which previously sent landmark-less crops that the
+# recognizer then rejected wholesale.
+MIN_LANDMARK_CONF_FOR_SUBMIT = _float("MIN_LANDMARK_CONF_FOR_SUBMIT", 0.6)
+# Attach the best full frame to mid-track tasks too (not only finalize),
+# so every published result carries a camera image.
+SEND_BEST_FRAME_MIDTRACK = _bool("SEND_BEST_FRAME_MIDTRACK", "true")
+# 1 = finalize pass sends the single best crop; >1 = every eligible crop
+# (the recognizer then aggregates across them).
 FINALIZE_MAX_CROPS = _int("FINALIZE_MAX_CROPS", 1)
 
 # ============================================================================

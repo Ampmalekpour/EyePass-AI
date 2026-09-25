@@ -39,6 +39,8 @@ import redis
 from .keys import RedisKeys
 from .logging_setup import setup_logger
 
+_HUB_STREAM_MAXLEN = int(os.environ.get("HUB_STREAM_MAXLEN", "200000"))
+
 logger = setup_logger("facecore.bus")
 
 
@@ -342,3 +344,49 @@ class RedisBus:
             self.rt.publish(self.keys.gallery_updated, json.dumps(payload, ensure_ascii=False))
         except Exception:
             logger.exception("failed to publish gallery:updated")
+
+    # ================================================================
+    # INTERNAL — control hub (streams in, per-engine ctl list out).
+    # JSON, not pickle: the hub is a separate service and these entries
+    # are meant to be readable in RedisInsight while debugging.
+    # ================================================================
+    def hub_emit(self, kind: str, data: dict):
+        """detector engine -> hub:events"""
+        self.rt.xadd(self.keys.hub_events,
+                     {"kind": kind, "data": json.dumps(data, cls=_HubEncoder, ensure_ascii=False)},
+                     maxlen=_HUB_STREAM_MAXLEN, approximate=True)
+
+    def hub_push_result(self, data: dict):
+        """recognizer / OCR worker -> hub:results"""
+        self.rt.xadd(self.keys.hub_results,
+                     {"kind": "result", "data": json.dumps(data, cls=_HubEncoder, ensure_ascii=False)},
+                     maxlen=_HUB_STREAM_MAXLEN, approximate=True)
+
+    def pop_hub_ctl(self, engine_id, timeout: int = 1) -> Optional[dict]:
+        """hub -> this engine. BRPOP (the hub LPUSHes, so this is FIFO)."""
+        item = self.rt.brpop(self.keys.hub_ctl(engine_id), timeout=timeout)
+        if not item:
+            return None
+        _, raw = item
+        try:
+            return json.loads(raw)
+        except Exception:
+            logger.warning("bad json on %s: %r", self.keys.hub_ctl(engine_id), raw)
+            return None
+
+
+class _HubEncoder(json.JSONEncoder):
+    """JSON for hub stream entries: datetimes as ISO strings, numpy
+    scalars/arrays as plain numbers/lists (a numpy int in a liveness
+    field must never crash the detector loop), raw bytes dropped."""
+
+    def default(self, obj):
+        if hasattr(obj, "isoformat"):
+            return obj.isoformat()
+        if isinstance(obj, (bytes, bytearray)):
+            return None
+        if hasattr(obj, "tolist"):      # numpy array / scalar
+            return obj.tolist()
+        if hasattr(obj, "item"):
+            return obj.item()
+        return super().default(obj)

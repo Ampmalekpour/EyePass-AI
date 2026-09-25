@@ -278,7 +278,9 @@ def watch_camera_events(seconds=60.0):
 def watch_results(seconds=60.0):
     """Blocks on vehicle:results (BRPOP) and prints each result as it's
     published — the fastest way to see the full detector -> ocr ->
-    detector -> vehicle:results round trip live."""
+    control hub -> vehicle:results round trip live. DESTRUCTIVE (pops
+    what Django would read) — for a read-only look use
+    `python ../control-hub/hub_tools.py results --module plate`."""
     print(f"Watching {RESULTS_KEY} for {seconds:.0f}s (Ctrl+C to stop)...")
     deadline = time.time() + seconds
     try:
@@ -287,9 +289,12 @@ def watch_results(seconds=60.0):
             if item:
                 _, raw = item
                 data = json.loads(raw)
+                res = data.get("resolved") or {}
                 print(f"[{time.strftime('%H:%M:%S')}] cam={data.get('camera_id')} "
-                      f"track={data.get('track_id')} status={data.get('status')} "
-                      f"plate={data.get('plate_text')} conf={data.get('confidence')}")
+                      f"track={data.get('track_id')} update={data.get('update_type')} "
+                      f"final={data.get('is_final')} plate={res.get('plate_text')} "
+                      f"conf={res.get('confidence')} valid={res.get('is_valid')} "
+                      f"via={(data.get('meta') or {}).get('resolution')}")
     except KeyboardInterrupt:
         pass
 
