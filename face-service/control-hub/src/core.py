@@ -129,9 +129,13 @@ class HubCore:
 
         st = self.tracks.get(uid)
         if st is None:
-            if kind in (P.K_TRACK_UPDATE, P.K_TRACK_ENDED, P.K_SUBMITTED, P.K_TRIGGER) and \
-                    not data.get("camera_id"):
-                self.log.debug("%s for unknown uid=%s — creating orphan state", kind, uid)
+            if kind == P.K_RESULT:
+                # result for a track this hub has no record of: its
+                # track_started was lost/trimmed, or it closed more than
+                # late_result_grace_sec ago. Kept as an orphan so it is
+                # still published (the stale timer closes it).
+                self.log.warning("result %s for unknown uid=%s — keeping as orphan track",
+                                 data.get("task_id"), uid)
             st = self.tracks[uid] = new_state(uid, now)
         st["last_event_ts"] = now
         self._absorb_identity(st, data)
@@ -208,6 +212,13 @@ class HubCore:
         tid = data.get("task_id")
         if tid and tid not in st["completed_tasks"]:
             st["in_flight"][tid] = {"stage": data.get("stage"), "ts": now}
+            # a trigger that fired before any crop could be sent now
+            # waits for THIS task (the detector sends it as soon as a
+            # usable crop exists) instead of the first unrelated answer
+            for ev in st["events"].values():
+                if ev.get("status") == "deferred" and not ev.get("awaiting"):
+                    ev["awaiting"] = tid
+                    ev["awaiting_done"] = False
         self._absorb_stats(st, data)
         return Effects()
 
@@ -282,10 +293,7 @@ class HubCore:
             st["in_flight"].pop(tid, None)
 
         if st["closed"]:
-            self.stats["late_results"] += 1
-            self.log.warning("uid=%s: result %s (%s) arrived %.1fs after the track was closed — dropped",
-                             st["uid"], tid, data.get("stage"), now - (st.get("closed_ts") or now))
-            return fx
+            return self._on_late_result(st, data, now)
 
         st["results"].append(self.policy.summarize(data, now))
         if len(st["results"]) > self.cfg.max_results_per_track:
@@ -313,6 +321,47 @@ class HubCore:
             fx.merge(self._maybe_close(st, now))
         return fx
 
+    def _on_late_result(self, st, data, now) -> Effects:
+        """A result for a track whose final was already sent (its task sat
+        in a backlogged queue longer than finalize_timeout_sec).
+
+        republish_if_changed (default): if it changes the answer — e.g.
+        the final went out with no plate / unknown face and this is the
+        plate / identity — publish the final AGAIN with revision+1, so the
+        backend (upserting on track_uid) ends up with the right answer
+        instead of an empty record. drop: log only.
+        """
+        fx = Effects()
+        self.stats["late_results"] += 1
+        late_by = now - (st.get("closed_ts") or now)
+        if self.cfg.late_result_policy != "republish_if_changed" or not st.get("final_published"):
+            self.log.warning("uid=%s: result %s (%s) arrived %.1fs after the track was closed — dropped",
+                             st["uid"], data.get("task_id"), data.get("stage"), late_by)
+            return fx
+        before = self.policy.answer_key(self.policy.resolve(st))
+        st["results"].append(self.policy.summarize(data, now))
+        st["results"] = st["results"][-self.cfg.max_results_per_track:]
+        after = self.policy.answer_key(self.policy.resolve(st))
+        if after == before:
+            self.log.info("uid=%s: late result %s (+%.1fs) does not change the answer %s",
+                          st["uid"], data.get("task_id"), late_by, after)
+            return fx
+        st["revision"] = int(st.get("revision") or 1) + 1
+        st["missing_tasks"] = [t for t in st.get("missing_tasks") or [] if t != data.get("task_id")]
+        fx.publish.append(self._final(st, now, "late_result"))
+        self.log.warning("uid=%s: late result %s (+%.1fs) changed the answer %s -> %s — final re-published "
+                         "as revision %d", st["uid"], data.get("task_id"), late_by, before, after, st["revision"])
+        return fx
+
+    def _final(self, st, now, resolution: str) -> Dict[str, Any]:
+        payload = self.policy.final_payload(st, now)
+        payload["revision"] = int(st.get("revision") or 1)
+        payload["complete"] = not st.get("missing_tasks")
+        payload["missing_tasks"] = list(st.get("missing_tasks") or [])
+        if resolution != "track_ended":
+            payload.setdefault("meta", {})["resolution"] = resolution
+        return payload
+
     # ================================================================
     # Timers
     # ================================================================
@@ -336,9 +385,14 @@ class HubCore:
                 fx.save.add(uid)
                 continue
             # deferred triggers past their deadline
+            # (its own task is queued -> wait longer, so a backlogged
+            # recognizer/OCR delays the event instead of emptying it)
             for name, ev in st["events"].items():
-                if ev.get("status") == "deferred" and \
-                        now - ev.get("received_ts", now) >= self.cfg.trigger_max_wait_sec:
+                if ev.get("status") != "deferred":
+                    continue
+                queued = bool(ev.get("awaiting")) and ev["awaiting"] in st["in_flight"]
+                limit = self.cfg.trigger_task_wait_sec if queued else self.cfg.trigger_max_wait_sec
+                if now - ev.get("received_ts", now) >= limit:
                     fx.merge(self._publish_event(st, name, "timeout", now))
                     fx.save.add(uid)
             # periodic re-query
@@ -410,8 +464,10 @@ class HubCore:
         if st["in_flight"] and waited < self.cfg.finalize_timeout_sec:
             return fx
         if st["in_flight"]:
-            self.log.warning("uid=%s: finalize timeout after %.1fs, still waiting on %s — closing without them",
+            self.log.warning("uid=%s: finalize timeout after %.1fs, still waiting on %s — closing without them "
+                             "(a late answer re-publishes the final if it changes it)",
                              st["uid"], waited, list(st["in_flight"]))
+            st["missing_tasks"] = list(st["in_flight"])
             st["in_flight"] = {}
 
         for name, ev in st["events"].items():
@@ -421,7 +477,7 @@ class HubCore:
         gate_ok = int(st.get("seen_frames") or 0) >= self.cfg.final_min_seen_frames and \
             int(st.get("n_crops") or 0) >= self.cfg.final_min_crops
         if gate_ok or st["published_any"]:
-            fx.publish.append(self.policy.final_payload(st, now))
+            fx.publish.append(self._final(st, now, "track_ended"))
             st["final_published"] = True
             self.stats["published_finals"] += 1
             decision = self.policy.resolve(st)

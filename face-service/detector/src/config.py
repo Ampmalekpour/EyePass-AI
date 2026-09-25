@@ -202,7 +202,7 @@ STOP_VELOCITY_THRESHOLD = _float("STOP_VELOCITY_THRESHOLD", 1.5)
 # How long a submitted task blocks the next submission for the same
 # track if the hub never acks its result (previously a hard-coded 1.0s,
 # which caused duplicate submissions whenever the recognizer was busy).
-SUBMIT_TIMEOUT_SEC = _float("SUBMIT_TIMEOUT_SEC", 5.0)
+SUBMIT_TIMEOUT_SEC = _float("SUBMIT_TIMEOUT_SEC", 15.0)
 # Low-rate per-track heartbeat to the hub (seen frames, liveness).
 TRACK_UPDATE_INTERVAL_SEC = _float("TRACK_UPDATE_INTERVAL_SEC", 5.0)
 # A crop is only worth sending when its landmarks are this confident —

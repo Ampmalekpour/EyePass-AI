@@ -5,17 +5,20 @@ deployable Docker Compose stack that talks to the backend only through
 Redis (commands and results) and MinIO (images).
 
 ```
-face-service/        face detection + tracking + liveness -> AdaFace recognition
-plate-service/       vehicle/plate detection + tracking -> PaddleOCR
-control-hub/         owns every face/plate track's recognition state; decides what the backend receives
+face-service/        face detection + tracking + liveness -> AdaFace recognition  (+ its own control-hub/)
+plate-service/       vehicle/plate detection + tracking -> PaddleOCR             (+ its own control-hub/)
 heatmap-service/     people heatmaps
 fire-smoke-service/  fire / smoke detection
 ```
 
-Face and plate each run as four processes: `camera_stream` + `mediamtx`
-(the RTSP relay), `*_detector` (GPU), `face_recognizer` / `plate_ocr`, and
-`control_hub`. See [`control-hub/README.md`](control-hub/README.md) for
-how a track moves between them.
+Face and plate are fully independent. Each folder has everything it
+needs, and each runs `mediamtx` + `camera_stream` (the RTSP relay),
+`*_detector` (GPU), `face_recognizer` / `plate_ocr`, and its **own**
+`control_hub`, which owns that module's per-track recognition state and
+decides what the backend receives. See
+[`face-service/control-hub/README.md`](face-service/control-hub/README.md)
+and [`plate-service/control-hub/README.md`](plate-service/control-hub/README.md)
+for the step-by-step flow and how every failure case is handled.
 
 
 ## Set it up on your laptop
@@ -142,10 +145,9 @@ cd ../plate-service
 python3 redis_tools.py set-camera --id 1 --address "rtsp://..." --roi 0 0 1 1 --line 100 400 900 400
 python3 redis_tools.py activate --id 1
 
-cd ../control-hub                         # read-only views of the hub
-python3 hub_tools.py tracks --module face
-python3 hub_tools.py tail   --module plate
-python3 hub_tools.py results --module face -n 3
+python3 control-hub/hub_tools.py tracks     # read-only views of this module's hub
+python3 control-hub/hub_tools.py tail
+python3 control-hub/hub_tools.py results -n 3
 ```
 
 Annotated debug videos land in `face-service/debug/` and
@@ -157,15 +159,15 @@ satisfied.
 
 ```bash
 pip install redis numpy opencv-python-headless scipy pillow
-python3 control-hub/tests/run_all.py            # hub core + end-to-end against redis-server if installed
-(cd face-service  && python3 tests/run_all.py)
-(cd plate-service && python3 tests/run_all.py)
+for m in face-service plate-service; do
+  (cd $m && python3 tests/run_all.py && python3 control-hub/tests/run_all.py)
+done   # hub end-to-end tests run against redis-server if it is installed, else skip
 ```
 
 
 ## Updating a running deployment
 
-- Rebuild and restart **all three** of the module's services together
+- Rebuild and restart the module's detector, worker and control hub together
   (`docker compose up -d --build`). The detector and the worker must
   agree on the new task/result routing. A worker that receives a task
   from an old detector (no `track_uid`) still answers it the old way,
@@ -176,4 +178,4 @@ python3 control-hub/tests/run_all.py            # hub core + end-to-end against 
   `PERIODIC_MODE`, `PERIODIC_FRAME_INTERVAL`, `PERIODIC_TIME_INTERVAL`,
   `PERIODIC_RECOG_CONF_THRESH`; plate `OCR_CONF_SKIP_THRESHOLD`,
   `OCR_FINALIZE_TIMEOUT_SEC`. The replacements are `FACE_*` / `PLATE_*`
-  in the control-hub section of `.env.example`.
+  in the control-hub section of each module's `.env.example`.

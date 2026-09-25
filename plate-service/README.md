@@ -37,8 +37,8 @@ is safe to deploy in place).
 
 The detector no longer merges OCR results, holds triggers or builds
 the final record. A third service, **`control_hub`** (source in
-[`../control-hub`](../control-hub/README.md), started by this folder's
-`compose.yaml`), owns every track's state:
+[`./control-hub`](control-hub/README.md), part of this module and
+started by this folder's `compose.yaml`), owns every track's state:
 
 ```
 plate_detector  --track events-->  control_hub  --> plate:vehicle:results
@@ -59,7 +59,7 @@ plate_ocr  ------------------------------+
 
 The backend key and payload shape are unchanged; new fields are
 additive. The inconsistencies this fixed are listed in
-[`../control-hub/README.md`](../control-hub/README.md#what-changed-and-why).
+[`control-hub/README.md`](control-hub/README.md).
 
 
 ## Contents
@@ -382,7 +382,7 @@ torch/CUDA base image at all).
 contract on the real Engine methods: crop submission and its gates
 (in flight / satisfied / unchanged crop), hub ctl handling, the
 track-end finalize pass, and ending live tracks on camera removal. The
-hub itself has its own suite (`../control-hub/tests`), including an
+hub itself has its own suite (`control-hub/tests`, `python3 control-hub/tests/run_all.py`), including an
 end-to-end run against a real `redis-server`.
 
 Run it yourself:

@@ -2,16 +2,16 @@
 End-to-end wire test against a REAL redis-server (skipped when the
 binary or the redis-py package is missing):
 
-    facecore/platecore HubClient + RedisBus  (the detector side, real code)
+    facecore HubClient + RedisBus  (the detector side, real code)
         -> {m}:internal:hub:events stream
     a fake worker popping the real task queue
         -> {m}:internal:hub:results stream   (bus.hub_push_result, real code)
     ModuleRunner (real hub service: consumer group, lease, checkpoints)
         -> {m} backend results list  +  {m}:internal:hub:ctl:{engine}
 
-Also proves crash recovery: a runner killed with a deferred trigger in
-memory is replaced by a fresh one that restores the checkpoint and
-still publishes the trigger.
+Also proves crash recovery (a runner killed with a deferred trigger in
+memory is replaced by a fresh one that restores the checkpoint and still
+publishes it) and that the detector's outbox survives a Redis outage.
 """
 
 import json
@@ -25,7 +25,7 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
+MODULE_DIR = os.path.dirname(os.path.dirname(HERE))      # face-service/
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 
 try:
@@ -113,7 +113,7 @@ class HubEndToEnd(unittest.TestCase):
     def _import_core(self, module):
         """Import facecore / platecore fresh (both are named differently,
         so they can coexist)."""
-        common = os.path.join(ROOT, f"{module}-service", "common")
+        common = os.path.join(MODULE_DIR, "common")
         if common not in sys.path:
             sys.path.insert(0, common)
         pkg = "facecore" if module == "face" else "platecore"
@@ -227,36 +227,51 @@ class HubEndToEnd(unittest.TestCase):
         self.assertTrue(a.is_leader)
         self.assertFalse(b.is_leader)
 
-    def test_plate_flow_uses_plate_vocabulary_and_list(self):
-        self._runner("plate")
-        bus, hub, _ = self._import_core("plate")
-        client = hub.HubClient(bus, engine_id=5)
-        uid = hub.new_track_uid("gate", 5)
-        client.emit(hub.K_TRACK_STARTED, {"uid": uid, "camera_id": "gate", "track_id": 9,
-                                          "triggers": {"cross_line": True, "stop_roi": True,
-                                                       "leave_scene": True, "periodic": False}})
-        tid = hub.new_task_id(uid, "cross_line")
-        client.emit(hub.K_SUBMITTED, {"uid": uid, "task_id": tid, "stage": "cross_line"})
-        client.emit(hub.K_TRIGGER, {"uid": uid, "event": "cross_line", "task_id": tid,
-                                    "detail": {"direction": "negative_to_positive"}})
-        bus.hub_push_result({"uid": uid, "task_id": tid, "stage": "cross_line", "trigger_type": "cross_line",
-                             "camera_id": "gate", "track_id": 9, "status": "ok", "plate_text": "12B34567",
-                             "confidence": 0.93, "is_valid": True, "voted_class": 0,
-                             "payload": {"plate_image": "vp.png", "frame_image": "vf.png", "plate_type": 1}})
-        pub = _wait(lambda: self._results("plate:vehicle:results"))
-        self.assertEqual(pub[0]["update_type"], "cross_line")
-        self.assertEqual(pub[0]["resolved"]["plate_text"], "12B34567")
-        # satisfied -> stop_roi published immediately, no OCR
-        client.emit(hub.K_TRIGGER, {"uid": uid, "event": "stop_roi", "task_id": None, "detail": {"duration": 3.4}})
-        pub = _wait(lambda: len(self._results("plate:vehicle:results")) >= 2 and self._results("plate:vehicle:results"))
-        self.assertEqual(pub[1]["update_type"], "stop_roi")
-        self.assertEqual(pub[1]["meta"]["resolution"], "immediate")
-        client.emit(hub.K_TRACK_ENDED, {"uid": uid, "reason": "absent", "seen_frames": 30, "n_crops": 4})
-        pub = _wait(lambda: len(self._results("plate:vehicle:results")) >= 3 and self._results("plate:vehicle:results"))
-        self.assertTrue(pub[2]["is_final"])
-        self.assertEqual(pub[2]["update_type"], "leave_scene")
-        self.assertIn("leave_scene", pub[2]["events"])
-        client.stop()
+@unittest.skipUnless(REDIS_BIN and HAVE_REDIS_PY, "needs redis-server and redis-py")
+class DetectorOutboxSurvivesRedisOutage(unittest.TestCase):
+    """The detector keeps emitting while Redis is DOWN; every event is
+    delivered, in order, once Redis is back — nothing blocks, nothing lost."""
+
+    def test_outage(self):
+        port = _free_port()
+        tmp = tempfile.mkdtemp()
+        args = [REDIS_BIN, "--port", str(port), "--save", "", "--appendonly", "no", "--dir", tmp]
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            import redis as _r
+            url = f"redis://127.0.0.1:{port}/0"
+            r = _r.Redis.from_url(url, decode_responses=True)
+            _wait(lambda: HubEndToEnd._ping(r))
+            common = os.path.join(MODULE_DIR, "common")
+            if common not in sys.path:
+                sys.path.insert(0, common)
+            from facecore.bus import RedisBus
+            from facecore import hub
+            bus = RedisBus(module="face", url=url)
+            client = hub.HubClient(bus, engine_id=7)
+            _wait(lambda: r.xlen("face:internal:hub:events") >= 1)      # engine_started
+
+            proc.terminate(); proc.wait(5)                                # Redis goes down
+            t0 = time.time()
+            for i in range(50):
+                client.emit(hub.K_TRACK_UPDATE, {"uid": f"u{i}", "seq": i})
+            client.submit({"task_id": "t-during-outage", "track_uid": "u0"})
+            self.assertLess(time.time() - t0, 0.5, "emit/submit must never block the frame loop")
+            time.sleep(1.0)
+            self.assertGreater(client.pending(), 0)
+
+            proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # back up
+            _wait(lambda: HubEndToEnd._ping(r))
+            _wait(lambda: client.pending() == 0, timeout=20)
+            entries = r.xrange("face:internal:hub:events")
+            seqs = [json.loads(f["data"]).get("seq") for _, f in entries if f["kind"] == "track_update"]
+            self.assertEqual(seqs, list(range(50)))                      # all of them, in order
+            self.assertEqual(r.llen(bus.keys.rec_tasks), 1)
+            client.stop()
+        finally:
+            proc.terminate()
+            proc.wait(5)
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,15 +1,12 @@
 """
-Unit tests for the control hub's pure core (core.py + policy.py).
-
-Every case from the recognition-flow analysis is pinned here, for both
-modules, with a fake clock — no Redis, no threads:
+Unit tests for the FACE control hub's pure core (core.py + policy.py),
+with a fake clock — no Redis, no threads:
 
   face  A  trigger with a satisfied identity      -> published at once
   face  B  trigger without one                    -> held for ITS result
   face  C  trigger whose crop never gets sent     -> published on timeout
   face  D  periodic re-query                      -> only when enabled, unsatisfied, idle
   face  E  track end                              -> waits for finalize result, gated final
-  plate    same state machine, plate vocabulary + the three plate fixes
 """
 
 import os
@@ -21,20 +18,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import protocol as P  # noqa: E402
 from config import ModuleConfig  # noqa: E402
 from core import HubCore  # noqa: E402
-from policy import FacePolicy, PlatePolicy  # noqa: E402
+from policy import FacePolicy  # noqa: E402
 
 FACE_TRIGGERS = {"periodic": True, "line_cross": True, "stopped_roi": True, "leave_scene": True}
-PLATE_TRIGGERS = {"periodic": False, "cross_line": True, "stop_roi": True, "leave_scene": True}
 
 
 def face_core(**kw):
     cfg = ModuleConfig(module="face", **kw)
     return HubCore(cfg, FacePolicy(cfg))
-
-
-def plate_core(**kw):
-    cfg = ModuleConfig(module="plate", **{"satisfied_conf": 0.85, **kw})
-    return HubCore(cfg, PlatePolicy(cfg))
 
 
 def start(core, uid="u1", t=0.0, triggers=None, engine=1):
@@ -51,15 +42,6 @@ def face_result(uid, task_id, stage, pid, conf, valid=True, t=0.0, core=None):
         "status": "ok", "is_valid": valid, "confidence": conf, "personnelid": pid if valid else "0",
         "first_name": "Ali" if valid else "Unknown", "last_name": "R" if valid else "Unknown",
         "face_image": f"dynamics/KnownFaceImage/{task_id}.png", "camera_image": f"frame/{task_id}.png",
-    }, t)
-
-
-def plate_result(core, uid, task_id, stage, text, conf, valid=True, t=0.0):
-    return core.handle(P.K_RESULT, {
-        "uid": uid, "task_id": task_id, "stage": stage, "trigger_type": stage, "camera_id": "cam1",
-        "track_id": 7, "status": "ok" if valid else "invalid", "plate_text": text, "confidence": conf,
-        "is_valid": valid, "voted_class": 0,
-        "payload": {"plate_image": f"vp/{task_id}.png", "frame_image": f"vf/{task_id}.png", "plate_type": 1},
     }, t)
 
 
@@ -211,7 +193,7 @@ class FaceCases(unittest.TestCase):
                          [("line_cross", False), ("finalize", True)])
         self.assertEqual(fx.publish[0]["meta"]["resolution"], "track_ended")
 
-    def test_late_and_duplicate_results(self):
+    def test_duplicate_result_ignored_and_state_expires(self):
         c = face_core(late_result_grace_sec=30)
         start(c)
         face_result("u1", "t0", "periodic", "42", 0.9, core=c, t=1)
@@ -219,12 +201,92 @@ class FaceCases(unittest.TestCase):
         self.assertEqual(face_result("u1", "t0", "periodic", "42", 0.9, core=c, t=1.1).ctl, [])
         self.assertEqual(len(c.tracks["u1"]["results"]), n_before)
         c.handle(P.K_TRACK_ENDED, {"uid": "u1", "seen_frames": 20, "n_crops": 2}, 2)
-        fx = face_result("u1", "t9", "periodic", "43", 0.99, core=c, t=3)
-        self.assertEqual(fx.publish, [])
-        self.assertEqual(c.stats["late_results"], 1)
         fx = c.tick(40)
         self.assertIn("u1", fx.delete)
         self.assertNotIn("u1", c.tracks)
+
+    def test_late_result_that_changes_answer_republishes_final(self):
+        c = face_core(finalize_timeout_sec=10)
+        start(c)
+        c.handle(P.K_TRACK_ENDED, {"uid": "u1", "seen_frames": 30, "n_crops": 3, "finalize_task_id": "tf"}, 1)
+        fx = c.tick(11)                                    # backlog: timed out without it
+        first = fx.publish[-1]
+        self.assertEqual(first["meta"]["identified_as"], "0")
+        self.assertFalse(first["complete"])
+        self.assertEqual(first["missing_tasks"], ["tf"])
+        self.assertEqual(first["revision"], 1)
+        fx = face_result("u1", "tf", "finalize", "42", 0.8, core=c, t=15)
+        self.assertEqual(len(fx.publish), 1)
+        again = fx.publish[0]
+        self.assertTrue(again["is_final"])
+        self.assertEqual(again["revision"], 2)
+        self.assertTrue(again["complete"])
+        self.assertEqual(again["meta"]["identified_as"], "42")
+        self.assertEqual(again["meta"]["resolution"], "late_result")
+        self.assertEqual(again["track_uid"], "u1")
+
+    def test_late_result_same_answer_not_republished(self):
+        c = face_core(finalize_timeout_sec=10)
+        start(c)
+        face_result("u1", "t0", "periodic", "42", 0.6, core=c, t=0.5)
+        c.handle(P.K_TRACK_ENDED, {"uid": "u1", "seen_frames": 30, "n_crops": 3, "finalize_task_id": "tf"}, 1)
+        c.tick(11)
+        self.assertEqual(face_result("u1", "tf", "finalize", "42", 0.8, core=c, t=15).publish, [])
+
+    def test_late_result_drop_policy(self):
+        c = face_core(finalize_timeout_sec=10, late_result_policy="drop")
+        start(c)
+        c.handle(P.K_TRACK_ENDED, {"uid": "u1", "seen_frames": 30, "n_crops": 3, "finalize_task_id": "tf"}, 1)
+        c.tick(11)
+        self.assertEqual(face_result("u1", "tf", "finalize", "42", 0.8, core=c, t=15).publish, [])
+        self.assertEqual(c.stats["late_results"], 1)
+
+    def test_trigger_waits_longer_while_its_task_is_queued(self):
+        c = face_core(trigger_max_wait_sec=3, trigger_task_wait_sec=15)
+        start(c)
+        c.handle(P.K_SUBMITTED, {"uid": "u1", "task_id": "tl", "stage": "line_cross"}, 1)
+        c.handle(P.K_TRIGGER, {"uid": "u1", "event": "line_cross", "detail": {}, "task_id": "tl"}, 1)
+        self.assertEqual(c.tick(10).publish, [])            # busy recognizer: still waiting
+        fx = face_result("u1", "tl", "line_cross", "42", 0.9, core=c, t=12)
+        self.assertEqual(fx.publish[0]["meta"]["identified_as"], "42")
+
+    def test_trigger_adopts_task_submitted_after_it_not_an_older_one(self):
+        c = face_core(trigger_max_wait_sec=3, trigger_task_wait_sec=15)
+        start(c)
+        c.handle(P.K_SUBMITTED, {"uid": "u1", "task_id": "tp", "stage": "periodic"}, 0.5)
+        # crop not usable at trigger time -> no task of its own yet
+        c.handle(P.K_TRIGGER, {"uid": "u1", "event": "line_cross", "detail": {}, "task_id": None}, 1)
+        # a usable crop arrives and the detector sends it for the trigger
+        c.handle(P.K_SUBMITTED, {"uid": "u1", "task_id": "tl", "stage": "line_cross"}, 1.5)
+        self.assertEqual(c.tracks["u1"]["events"]["line_cross"]["awaiting"], "tl")
+        # the older periodic answer does not release it...
+        self.assertEqual(face_result("u1", "tp", "periodic", "42", 0.4, core=c, t=2).publish, [])
+        # ...its own task does
+        fx = face_result("u1", "tl", "line_cross", "42", 0.6, core=c, t=2.5)
+        self.assertEqual([p["event_type"] for p in fx.publish], ["line_cross"])
+        self.assertEqual(fx.publish[0]["meta"]["votes"], 2)
+
+    def test_trigger_without_any_task_adopts_the_next_one(self):
+        c = face_core(trigger_max_wait_sec=3, trigger_task_wait_sec=15)
+        start(c)
+        c.handle(P.K_TRIGGER, {"uid": "u1", "event": "line_cross", "detail": {}, "task_id": None}, 1)
+        c.handle(P.K_SUBMITTED, {"uid": "u1", "task_id": "tl", "stage": "line_cross"}, 2)
+        self.assertEqual(c.tracks["u1"]["events"]["line_cross"]["awaiting"], "tl")
+        self.assertEqual(c.tick(10).publish, [])            # waiting for tl, not timed out at 3s
+        fx = face_result("u1", "tl", "line_cross", "42", 0.9, core=c, t=11)
+        self.assertEqual(fx.publish[0]["meta"]["resolution"], "after_recognition")
+
+    def test_missing_face_image_filled_from_same_person(self):
+        c = face_core()
+        start(c)
+        face_result("u1", "a", "periodic", "42", 0.5, core=c, t=1)
+        c.handle(P.K_RESULT, {"uid": "u1", "task_id": "b", "stage": "periodic", "status": "ok", "is_valid": True,
+                              "confidence": 0.9, "personnelid": "42", "first_name": "Ali", "last_name": "R",
+                              "face_image": None, "camera_image": None}, 2)   # its uploads failed
+        d = c.policy.resolve(c.tracks["u1"])
+        self.assertAlmostEqual(d["confidence"], 0.9)
+        self.assertEqual(d["face_image"], "dynamics/KnownFaceImage/a.png")
+        self.assertEqual(d["camera_image"], "frame/a.png")
 
     def test_vote_prefers_repeated_identity_over_single_spike(self):
         c = face_core(satisfied_conf=0.95, consensus_min=0)
@@ -315,66 +377,6 @@ class FaceCases(unittest.TestCase):
         fx = c2.tick(10)
         self.assertEqual(fx.publish[0]["event_type"], "line_cross")
         self.assertEqual(fx.publish[0]["meta"]["event"]["direction"], "x")
-
-
-class PlateCases(unittest.TestCase):
-    def test_both_triggers_publish_immediately_when_satisfied(self):
-        # previously cross_line published NOTHING here while stop_roi did
-        c = plate_core()
-        start(c, triggers=PLATE_TRIGGERS)
-        plate_result(c, "u1", "t0", "cross_line", "12B34567", 0.95, t=1)
-        for ev in ("cross_line", "stop_roi"):
-            fx = c.handle(P.K_TRIGGER, {"uid": "u1", "event": ev, "detail": {"direction": "a_to_b"}}, 2)
-            self.assertEqual(len(fx.publish), 1, ev)
-            p = fx.publish[0]
-            self.assertEqual(p["update_type"], ev)
-            self.assertFalse(p["is_final"])
-            self.assertEqual(p["resolved"]["plate_text"], "12B34567")
-            self.assertEqual(p["meta"]["event"]["direction"], "a_to_b")
-
-    def test_invalid_high_confidence_read_does_not_stop_ocr(self):
-        # previously a 0.9 INVALID read skipped every later OCR stage
-        c = plate_core()
-        start(c, triggers=PLATE_TRIGGERS)
-        plate_result(c, "u1", "t0", "cross_line", "1234", 0.93, valid=False, t=1)
-        self.assertFalse(c.tracks["u1"]["satisfied"])
-        plate_result(c, "u1", "t1", "stop_roi", "12B34567", 0.9, t=2)
-        self.assertTrue(c.tracks["u1"]["satisfied"])
-
-    def test_final_payload_keeps_previous_shape_and_adds_resolved(self):
-        c = plate_core()
-        start(c, triggers=PLATE_TRIGGERS)
-        c.handle(P.K_SUBMITTED, {"uid": "u1", "task_id": "t0", "stage": "cross_line"}, 0.9)
-        c.handle(P.K_TRIGGER, {"uid": "u1", "event": "cross_line", "detail": {}, "task_id": "t0"}, 1)
-        fx = plate_result(c, "u1", "t0", "cross_line", "12B34567", 0.7, t=1.5)
-        self.assertEqual(fx.publish[0]["update_type"], "cross_line")
-        c.handle(P.K_TRACK_ENDED, {"uid": "u1", "seen_frames": 20, "n_crops": 5, "finalize_task_id": "tf"}, 3)
-        fx = plate_result(c, "u1", "tf", "leave_scene", "12B34567", 0.8, t=4)
-        final = fx.publish[-1]
-        self.assertTrue(final["is_final"])
-        self.assertEqual(final["update_type"], "leave_scene")
-        self.assertEqual(set(final["ocr_results"]), {"cross_line", "leave_scene"})
-        self.assertEqual(set(final["events"]), {"cross_line", "leave_scene"})
-        self.assertEqual(final["track_paths"]["leave_scene"]["plate_path"], "vp/tf.png")
-        self.assertEqual(final["resolved"]["plate_text"], "12B34567")
-        self.assertEqual(final["resolved"]["votes"], 2)
-        self.assertEqual(final["stream_idx"], "cam1")
-        self.assertEqual(final["process_id"], 1)
-
-    def test_plate_periodic_now_implemented(self):
-        c = plate_core(periodic_first_delay_sec=0.5)
-        start(c, triggers={**PLATE_TRIGGERS, "periodic": True})
-        self.assertEqual(ctl_actions(c.tick(0.6)), [("request", None, "periodic")])
-
-    def test_lost_task_does_not_block_forever(self):
-        c = plate_core(finalize_timeout_sec=10, periodic_first_delay_sec=0.5, periodic_interval_sec=3,
-                       track_stale_sec=1000)
-        start(c, triggers={**PLATE_TRIGGERS, "periodic": True})
-        c.handle(P.K_SUBMITTED, {"uid": "u1", "task_id": "lost", "stage": "cross_line"}, 0.1)
-        self.assertEqual(ctl_actions(c.tick(1)), [])  # blocked by in-flight
-        c.tick(31)                                    # 3 x finalize timeout -> freed
-        c.handle(P.K_TRACK_UPDATE, {"uid": "u1"}, 33.9)
-        self.assertEqual(ctl_actions(c.tick(34.1)), [("request", None, "periodic")])
 
 
 if __name__ == "__main__":

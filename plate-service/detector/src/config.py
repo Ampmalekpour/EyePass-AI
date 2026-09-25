@@ -179,7 +179,7 @@ STOP_MIN_SAMPLES = _int("STOP_MIN_SAMPLES", 10)
 # How long a submitted task blocks the next submission for the same
 # track if the hub never acks its result (previously: forever — a lost
 # OCR result blocked every later trigger on that track).
-SUBMIT_TIMEOUT_SEC = _float("SUBMIT_TIMEOUT_SEC", 5.0)
+SUBMIT_TIMEOUT_SEC = _float("SUBMIT_TIMEOUT_SEC", 15.0)
 # Low-rate per-track heartbeat to the hub.
 TRACK_UPDATE_INTERVAL_SEC = _float("TRACK_UPDATE_INTERVAL_SEC", 5.0)
 

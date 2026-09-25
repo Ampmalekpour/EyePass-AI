@@ -280,7 +280,7 @@ def watch_results(seconds=60.0):
     published — the fastest way to see the full detector -> ocr ->
     control hub -> vehicle:results round trip live. DESTRUCTIVE (pops
     what Django would read) — for a read-only look use
-    `python ../control-hub/hub_tools.py results --module plate`."""
+    `python control-hub/hub_tools.py results`."""
     print(f"Watching {RESULTS_KEY} for {seconds:.0f}s (Ctrl+C to stop)...")
     deadline = time.time() + seconds
     try:

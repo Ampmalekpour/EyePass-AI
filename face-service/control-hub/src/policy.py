@@ -1,5 +1,5 @@
 """
-policy.py (control hub)
+policy.py (face control hub)
 --------------------------------------------------------------------
 Module-specific knowledge the generic hub core (core.py) delegates to:
 
@@ -102,6 +102,10 @@ class BasePolicy:
     def display(self, st: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
 
+    def answer_key(self, decision: Dict[str, Any]) -> Tuple:
+        """What counts as 'the answer changed' for a late result."""
+        raise NotImplementedError
+
     # ---- payloads -------------------------------------------------------
     def event_payload(self, st, event: str, resolution: str, now: float) -> Dict[str, Any]:
         raise NotImplementedError
@@ -171,14 +175,20 @@ class FacePolicy(BasePolicy):
             best = winner["best"]
             raw = best["raw"]
             pid, conf = winner["key"], float(winner["max"])
-            # camera frame: the winner's own, else the newest one that
-            # belongs to the same person, else any.
+            # images: the winner's own; if its upload failed, the newest
+            # ones that belong to the same person — never an empty field
+            # while another result for the same answer has one.
+            face_image = raw.get("face_image") or next(
+                (r["raw"].get("face_image") for r in reversed(results)
+                 if r.get("key") == pid and r["raw"].get("face_image")), None)
             camera_image = raw.get("camera_image") or next(
                 (r["raw"].get("camera_image") for r in reversed(results)
                  if r.get("key") == pid and r["raw"].get("camera_image")), None)
         else:
             raw = latest["raw"] if latest else {}
             pid, conf = "0", 0.0
+            face_image = next((r["raw"].get("face_image") for r in reversed(results)
+                               if r["raw"].get("face_image")), None)
             camera_image = next((r["raw"].get("camera_image") for r in reversed(results)
                                  if r["raw"].get("camera_image")), None)
 
@@ -190,7 +200,7 @@ class FacePolicy(BasePolicy):
             "last_name": raw.get("last_name", "Unknown") if pid != "0" else "Unknown",
             "national_code": raw.get("national_code", "0") if pid != "0" else "0",
             "department": raw.get("department", "0") if pid != "0" else "0",
-            "face_image": raw.get("face_image"),
+            "face_image": face_image,
             "camera_image": camera_image,
             "votes": winner["count"] if winner else 0,
             "candidates": n,
@@ -203,6 +213,9 @@ class FacePolicy(BasePolicy):
         if decision.get("spoof_rejected"):
             return True  # nothing more to learn from a spoof
         return super().satisfied(st, decision)
+
+    def answer_key(self, decision):
+        return (decision["personnelid"], bool(decision.get("spoof_rejected")))
 
     def display(self, st, decision):
         pid = decision["personnelid"]
@@ -284,6 +297,7 @@ class FacePolicy(BasePolicy):
         rec["national_code"] = decision["national_code"]
         rec["department"] = decision["department"]
         rec["detection_score"] = decision["confidence"]
+        rec["face_image"] = decision["face_image"]
         rec["camera_image"] = decision["camera_image"]
         return rec
 
@@ -299,120 +313,7 @@ class FacePolicy(BasePolicy):
         return self._payload(st, self.final_event, True, "track_ended", now, event_detail=detail)
 
 
-# ====================================================================
-# PLATE
-# ====================================================================
-class PlatePolicy(BasePolicy):
-    module = "plate"
-    trigger_events = ("cross_line", "stop_roi")
-    final_event = "leave_scene"
-    trigger_flags = {"cross_line": "cross_line", "stop_roi": "stop_roi"}
-
-    def summarize(self, raw, now):
-        text = str(raw.get("plate_text") or "")
-        valid = bool(raw.get("is_valid")) and text not in ("", "0")
-        return {
-            "task_id": raw.get("task_id"),
-            "stage": raw.get("stage") or raw.get("trigger_type"),
-            "ts": now,
-            "status": raw.get("status", "ok"),
-            "valid": valid,
-            "key": text if valid else "0",
-            "confidence": float(raw.get("confidence") or 0.0),
-            "raw": raw,
-        }
-
-    def resolve(self, st):
-        results = st.get("results") or []
-        winner, n = vote(results)
-        latest = results[-1] if results else None
-        chosen = winner["best"] if winner else latest
-        raw = chosen["raw"] if chosen else {}
-        payload = raw.get("payload") or {}
-        return {
-            "_winner": winner,
-            "plate_text": winner["key"] if winner else "0",
-            "confidence": float(winner["max"]) if winner else 0.0,
-            "is_valid": bool(winner),
-            "voted_class": raw.get("voted_class"),
-            "plate_type": payload.get("plate_type"),
-            "stage": chosen.get("stage") if chosen else None,
-            "plate_image": payload.get("plate_image"),
-            "frame_image": payload.get("frame_image"),
-            "votes": winner["count"] if winner else 0,
-            "candidates": n,
-            "description": raw.get("description"),
-        }
-
-    def display(self, st, decision):
-        rows = []
-        for stage, raw in self._latest_by_stage(st).items():
-            conf = float(raw.get("confidence") or 0.0)
-            rows.append([stage, f"{str(raw.get('plate_text'))[:12]:<12} {conf:.2f} "
-                                f"{'OK' if raw.get('is_valid') else 'INVALID'}"])
-        return {"label": decision["plate_text"] if decision["is_valid"] else "no valid plate",
-                "confidence": round(decision["confidence"], 3), "votes": decision["votes"],
-                "rows": rows}
-
-    @staticmethod
-    def _latest_by_stage(st) -> Dict[str, Dict[str, Any]]:
-        out: Dict[str, Dict[str, Any]] = {}
-        for r in st.get("results") or []:
-            out[r.get("stage") or "unknown"] = r["raw"]
-        return out
-
-    def _common(self, st, update_type, is_final, resolution, now, event_detail=None):
-        decision = self.resolve(st)
-        by_stage = self._latest_by_stage(st)
-        events_detail = self._events_detail(st)
-        public_decision = {k: v for k, v in decision.items() if not k.startswith("_")}
-        meta = {
-            "track_uid": st["uid"],
-            "seen_frames": st.get("seen_frames", 0),
-            "duration": st.get("duration_frames", 0),
-            "first_seen_ts": st.get("started_ts"),
-            "resolution": resolution,
-        }
-        if event_detail is not None:
-            meta["event"] = event_detail
-        return {
-            "process_id": st.get("engine_id"),
-            "stream_idx": st.get("camera_id"),
-            "camera_id": st.get("camera_id"),
-            "video_source": st.get("video_source"),
-            "track_id": st.get("track_id"),
-            "track_uid": st["uid"],
-            "update_type": update_type,
-            "is_final": is_final,
-            "timestamp": now,
-            "meta": meta,
-            # previous shape: {event_name: iso timestamp}
-            "events": {name: ev["at"] for name, ev in events_detail.items()},
-            "events_detail": events_detail,
-            # previous shape: {stage: full OCR result dict}
-            "ocr_results": by_stage,
-            "track_paths": {
-                stage: {"plate_path": (raw.get("payload") or {}).get("plate_image"),
-                        "frame_path": (raw.get("payload") or {}).get("frame_image")}
-                for stage, raw in by_stage.items()
-            },
-            # NEW — the hub's single answer for this track
-            "resolved": public_decision,
-        }
-
-    def event_payload(self, st, event, resolution, now):
-        ev = (st.get("events") or {}).get(event) or {}
-        detail = dict(ev.get("detail") or {})
-        detail["ts"] = ev.get("ts")
-        return self._common(st, event, False, resolution, now, event_detail=detail)
-
-    def final_payload(self, st, now):
-        end = st.get("end") or {}
-        return self._common(st, self.final_event, True, "track_ended", now,
-                            event_detail={"reason": end.get("reason"), "ts": st.get("ended_ts")})
-
-
-POLICIES = {"face": FacePolicy, "plate": PlatePolicy}
+POLICIES = {"face": FacePolicy}
 
 
 def make_policy(cfg: ModuleConfig) -> BasePolicy:

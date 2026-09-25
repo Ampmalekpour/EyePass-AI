@@ -33,7 +33,7 @@ import protocol as P
 
 # Where each module's backend already reads its results from. Override
 # with HUB_RESULTS_KEY_<MODULE> if a deployment renamed it.
-DEFAULT_RESULTS_KEYS = {"face": "face:ai:results", "plate": "plate:vehicle:results"}
+DEFAULT_RESULTS_KEYS = {"plate": "plate:vehicle:results"}
 
 _RENEW_LUA = """
 if redis.call('get', KEYS[1]) == ARGV[1] then

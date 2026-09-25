@@ -356,11 +356,25 @@ class RedisBus:
                      {"kind": kind, "data": json.dumps(data, cls=_HubEncoder, ensure_ascii=False)},
                      maxlen=_HUB_STREAM_MAXLEN, approximate=True)
 
-    def hub_push_result(self, data: dict):
-        """recognizer / OCR worker -> hub:results"""
-        self.rt.xadd(self.keys.hub_results,
-                     {"kind": "result", "data": json.dumps(data, cls=_HubEncoder, ensure_ascii=False)},
-                     maxlen=_HUB_STREAM_MAXLEN, approximate=True)
+    def hub_push_result(self, data: dict, attempts: int = 8):
+        """recognizer / OCR worker -> hub:results.
+
+        Retries with backoff (~25s total) before giving up: a result the
+        worker already computed must not be lost to a Redis blip — the
+        hub would otherwise wait out its timeout and publish without it.
+        Raises after the last attempt so the caller logs it."""
+        body = {"kind": "result", "data": json.dumps(data, cls=_HubEncoder, ensure_ascii=False)}
+        delay = 0.2
+        for i in range(attempts):
+            try:
+                self.rt.xadd(self.keys.hub_results, body, maxlen=_HUB_STREAM_MAXLEN, approximate=True)
+                return
+            except Exception as e:
+                if i == attempts - 1:
+                    raise
+                logger.warning("hub result push failed (%s) — retry %d/%d in %.1fs", e, i + 1, attempts - 1, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, 5.0)
 
     def pop_hub_ctl(self, engine_id, timeout: int = 1) -> Optional[dict]:
         """hub -> this engine. BRPOP (the hub LPUSHes, so this is FIFO)."""

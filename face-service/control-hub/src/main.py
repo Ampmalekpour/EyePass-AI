@@ -1,20 +1,20 @@
 """
 main.py (control hub)
 --------------------------------------------------------------------
-Entry point. Starts one ModuleRunner per module in HUB_MODULES
-(default "face,plate") and a tiny HTTP server:
+Entry point of the face control hub. Starts the ModuleRunner for this
+module (REDIS_MODULE, default "face") and a tiny HTTP server:
 
     GET /health            200 if every runner thread is alive and
                            looping (leader or healthy standby), 503
                            otherwise — per-module summary as JSON
-    GET /tracks?module=face  live/ending/closed tracks the hub holds,
+    GET /tracks            live/ending/closed tracks the hub holds,
                            with their current resolved answer — the
                            first place to look when "why was X not
                            published / published as unknown?"
 
-Run one hub per module per Redis. A second container for the same
-module is safe (it stands by on the leader lease) but pointless unless
-you want a hot standby.
+One hub per module per Redis. A second container for the same module
+is safe (it stands by on the leader lease) — useful only as a hot
+standby.
 --------------------------------------------------------------------
 """
 

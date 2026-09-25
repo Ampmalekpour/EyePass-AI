@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-hub_tools.py — look inside the control hub from your own machine.
+hub_tools.py — look inside the plate control hub from your own machine.
 
     pip install redis
     export REDIS_URL=redis://localhost:6379/0
 
-    python hub_tools.py status  --module face    # heartbeat, leader, stream lag, ctl queues
-    python hub_tools.py tracks  --module plate   # every track checkpoint the hub holds
-    python hub_tools.py track   --module face --uid cam1-0-ab12cd34ef
-    python hub_tools.py tail    --module face    # live: every event/result entering the hub
-    python hub_tools.py results --module face -n 5   # last N records sent to the backend (non-destructive)
+    python hub_tools.py status          # heartbeat, leader, stream lag, ctl queues
+    python hub_tools.py tracks          # every track checkpoint the hub holds
+    python hub_tools.py track --uid cam1-0-ab12cd34ef
+    python hub_tools.py tail            # live: every event/result entering the hub
+    python hub_tools.py results -n 5    # last N records sent to the backend (non-destructive)
+
+--module defaults to REDIS_MODULE, else "plate".
 
 Read-only: nothing here consumes, acks or deletes anything.
 """
@@ -21,7 +23,7 @@ import time
 
 import redis
 
-BACKEND_KEYS = {"face": "face:ai:results", "plate": "plate:vehicle:results"}
+BACKEND_KEYS = {"plate": "plate:vehicle:results"}
 
 
 def r():
@@ -101,7 +103,7 @@ def results(m, n):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["status", "tracks", "track", "tail", "results"])
-    ap.add_argument("--module", default="face", choices=["face", "plate"])
+    ap.add_argument("--module", default=os.environ.get("REDIS_MODULE", "plate"))
     ap.add_argument("--uid")
     ap.add_argument("-n", type=int, default=3)
     a = ap.parse_args()
