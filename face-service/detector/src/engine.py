@@ -38,6 +38,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from datetime import datetime
+
 import cv2
 import numpy as np
 import torch
@@ -163,6 +165,10 @@ class Engine:
         self.hub = HubClient(self.bus, self.engine_id)
         # uid -> (camera_id, track_id), to route hub ctl messages
         self._uid_index: Dict[str, Tuple[str, int]] = {}
+
+        # occupancy heatmap (heatmap.py) — created on first use, so an
+        # engine whose cameras all have it off never touches MinIO
+        self._heatmap = None
 
         # ---- liveness (anti-spoof) + annotated debug video -------------
         # Both are per-camera objects created in add_camera(); these are
@@ -401,9 +407,11 @@ class Engine:
             stop_roi_p3_x: Optional[int] = None,
             stop_roi_p3_y: Optional[int] = None,
             stop_roi_p4_x: Optional[int] = None,
-            stop_roi_p4_y: Optional[int] = None
+            stop_roi_p4_y: Optional[int] = None,
+            heatmap_trig: Optional[bool] = None,
     ):
         camera_id = str(camera_id)
+        heatmap_on = config.HEATMAP_ENABLED if heatmap_trig is None else bool(heatmap_trig)
 
         if line_p1_x is not None and line_p1_y is not None and line_p2_x is not None and line_p2_y is not None:
             line_coords = ((int(line_p1_x), int(line_p1_y)), (int(line_p2_x), int(line_p2_y)))
@@ -431,6 +439,9 @@ class Engine:
             self.cameras[camera_id]["leave_scene_enabled"] = bool(leave_scene_trig)
             self.cameras[camera_id]["line_points"] = line_coords
             self.cameras[camera_id]["stop_roi"] = stop_roi_coords
+            if self.cameras[camera_id].get("heatmap_enabled") and not heatmap_on and self._heatmap is not None:
+                threading.Thread(target=self._heatmap.flush, args=(camera_id,), daemon=True).start()
+            self.cameras[camera_id]["heatmap_enabled"] = heatmap_on
             return
 
         self.logger.info("add_camera(%s): step 1/5 — starting RTSP reader thread", camera_id)
@@ -467,6 +478,8 @@ class Engine:
             "leave_scene_enabled": bool(leave_scene_trig),
             "line_points": line_coords,
             "stop_roi": stop_roi_coords,
+            "heatmap_enabled": heatmap_on,
+            "frame_wh": (0, 0),
             # anti-spoof analyzer + annotated debug recorder, per camera
             "liveness": LivenessAnalyzer(camera_id, self.liveness_cfg, self.logger)
             if self.liveness_cfg.enabled else None,
@@ -493,6 +506,11 @@ class Engine:
             except Exception:
                 self.logger.exception("cam=%s track=%s: ending on removal failed", camera_id, tid)
         self.cameras.pop(camera_id, None)
+        if cam.get("heatmap_enabled") and self._heatmap is not None:
+            # off the frame loop: a slow MinIO must not stall the other
+            # cameras on this engine (shutdown flushes synchronously)
+            threading.Thread(target=self._heatmap.flush, args=(camera_id, True),
+                             daemon=True, name=f"HeatmapFlush-{camera_id}").start()
         try:
             cam["reader"].stop()
         except Exception:
@@ -592,6 +610,7 @@ class Engine:
                         stop_roi_p3_y=cmd.get("stop_roi_p3_y"),
                         stop_roi_p4_x=cmd.get("stop_roi_p4_x"),
                         stop_roi_p4_y=cmd.get("stop_roi_p4_y"),
+                        heatmap_trig=cmd.get("heatmap_trig"),
                     )
                 except Exception:
                     self.logger.exception("add_camera FAILED for camera %s", cmd.get("camera_id"))
@@ -767,6 +786,7 @@ class Engine:
                 cam["fid"] += 1
                 cam["frames_processed"] += 1
                 cam["last_frame_ts"] = time.time()
+                cam["frame_wh"] = (frame.shape[1], frame.shape[0])
 
                 roi_frame, (rx1, ry1, rx2, ry2) = self._apply_roi(frame, cam["roi"])
                 frames.append(roi_frame)
@@ -839,6 +859,9 @@ class Engine:
 
                 fid = cam["fid"]
                 rx1, ry1, rx2, ry2 = roi_offsets[idx]
+
+                if cam.get("heatmap_enabled") and fid % config.HEATMAP_SAMPLE_EVERY_N_FRAMES == 0:
+                    self._sample_heatmap(camera_id, cam, online_targets, (rx1, ry1))
 
                 # ---- diagnostics: throttled per-camera pipeline summary ----
                 now = time.time()
@@ -1121,6 +1144,34 @@ class Engine:
         self.cleanup()
 
     # ============================================================================
+    # Occupancy heatmap
+    # ============================================================================
+    def _heatmap_store(self):
+        if self._heatmap is None:
+            from heatmap import FaceHeatmap
+            self._heatmap = FaceHeatmap(self.bus, self.engine_id)
+        return self._heatmap
+
+    def _sample_heatmap(self, camera_id: str, cam: Dict[str, Any], online_targets, roi_offset):
+        """One point per live head track, in full-frame pixels. Memory
+        only — never blocks the frame loop, never raises into it."""
+        try:
+            fw, fh = cam.get("frame_wh") or (0, 0)
+            if not fw or not online_targets:
+                return
+            hm = self._heatmap_store()
+            rx1, ry1 = roi_offset
+            now = datetime.now()
+            for track in online_targets:
+                if track.detbb is None:
+                    continue
+                x1, y1, x2, y2 = map(float, track.detbb)
+                px, py = hm.point((x1 + rx1, y1 + ry1, x2 + rx1, y2 + ry1))
+                hm.sample(camera_id, px, py, fw, fh, now)
+        except Exception:
+            self.logger.exception("cam=%s heatmap sampling failed (detection unaffected)", camera_id)
+
+    # ============================================================================
     # Control hub — what the engine tells it, and the crops it sends
     # ============================================================================
     @staticmethod
@@ -1365,6 +1416,8 @@ class Engine:
         for camera_id in list(self.cameras.keys()):
             self.remove_camera(camera_id, reason="engine_stopped")
 
+        if self._heatmap is not None:
+            self._heatmap.stop()
         self.hub.stop()
 
         for w in list(self.writers.values()):

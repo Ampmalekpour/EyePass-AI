@@ -207,6 +207,7 @@ class EngineManager:
                     line_p1_x=None, line_p1_y=None, line_p2_x=None, line_p2_y=None,
                     stop_roi_p1_x=None, stop_roi_p1_y=None, stop_roi_p2_x=None, stop_roi_p2_y=None,
                     stop_roi_p3_x=None, stop_roi_p3_y=None, stop_roi_p4_x=None, stop_roi_p4_y=None,
+                    heatmap_trig: Optional[bool] = None,
                     ) -> Dict[str, Any]:
         camera_id = str(camera_id)
         url = str(url)
@@ -220,6 +221,7 @@ class EngineManager:
             "stop_roi_p2_x": stop_roi_p2_x, "stop_roi_p2_y": stop_roi_p2_y,
             "stop_roi_p3_x": stop_roi_p3_x, "stop_roi_p3_y": stop_roi_p3_y,
             "stop_roi_p4_x": stop_roi_p4_x, "stop_roi_p4_y": stop_roi_p4_y,
+            "heatmap_trig": heatmap_trig,
         }
 
         with self._lock:

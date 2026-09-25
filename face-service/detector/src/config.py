@@ -218,6 +218,20 @@ SEND_BEST_FRAME_MIDTRACK = _bool("SEND_BEST_FRAME_MIDTRACK", "true")
 # (the recognizer then aggregates across them).
 FINALIZE_MAX_CROPS = _int("FINALIZE_MAX_CROPS", 1)
 
+# ---- occupancy heatmap from the head tracks (see heatmap.py) ----------
+# Global switch; a camera's config may override it with "heatmap": true/false.
+HEATMAP_ENABLED = _bool("HEATMAP_ENABLED", "false")
+HEATMAP_GRID_WIDTH = _int("HEATMAP_GRID_WIDTH", 128)          # same defaults as heatmap-service
+HEATMAP_GRID_HEIGHT = _int("HEATMAP_GRID_HEIGHT", 72)
+# Minutes per time slot. 5 => 288 slots/day. Changing it changes the cube
+# shape; a mid-day change writes to a sibling object instead of corrupting.
+HEATMAP_TIME_RESOLUTION_MINUTES = _int("HEATMAP_TIME_RESOLUTION_MINUTES", 5)
+# Every N frames each live head track adds one point (dwell-weighted).
+HEATMAP_SAMPLE_EVERY_N_FRAMES = max(1, _int("HEATMAP_SAMPLE_EVERY_N_FRAMES", 10))
+HEATMAP_POINT_MODE = os.getenv("HEATMAP_POINT_MODE", "center").strip().lower()   # center | bottom_center
+HEATMAP_SAVE_INTERVAL_SEC = max(5.0, _float("HEATMAP_SAVE_INTERVAL_SEC", 60.0))
+HEATMAP_MINIO_BUCKET = os.getenv("HEATMAP_MINIO_BUCKET", "face-heatmap")
+
 # ============================================================================
 # 8. QUALITY GATES & HEAD POSE (verbatim from the reference config.py)
 # ============================================================================

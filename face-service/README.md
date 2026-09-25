@@ -239,10 +239,58 @@ exact 10-camera/5-per-engine scenario, verified.
 | | Where | Why |
 |---|---|---|
 | Gallery images + `brieface.db`, recognized/unrecognized face crops & camera frames sent to the backend | **MinIO** (`facecore/minio_store.py`) | pipeline data — durable, shared, what the backend resolves into URLs |
+| Occupancy heatmap cubes (`<camera>/<date>.npy`), when the heatmap is on | **MinIO**, bucket `FACE_HEATMAP_MINIO_BUCKET` (detector) | pipeline data, same format as heatmap-service |
 | Landmarked-crop debug images, aligned-face dumps, detector debug videos | **local bind-mounted volume** (`detector_data` / `recognizer_data`, `DEBUG_*` env vars) | debugging only — never uploaded, never read by anything outside the container that wrote it |
 
-The recognizer is the only service that touches MinIO at all — the
-detector never does (see `detector/requirements.txt`).
+The recognizer writes the recognition artifacts. The detector touches
+MinIO only for the optional heatmap below; with it off, it never does.
+
+
+## Occupancy heatmap (optional, from the head tracks)
+
+The detector can also build a crowd/occupancy heatmap from the head
+tracks it already has. It needs no second model and no separate
+heatmap service for these cameras.
+
+**Turning it on and off**
+- **Every camera:** set `FACE_HEATMAP_ENABLED=true|false` in `.env`
+  (compose passes it to the detector as `HEATMAP_ENABLED`).
+- **One camera:** add `"heatmap": true` or `false` to that camera's
+  `face:cameras:config` entry. Leaving it out follows the global switch.
+  The backend can change it without a redeploy; the new setting applies
+  the next time the camera is activated.
+
+**What it records**
+- Every `HEATMAP_SAMPLE_EVERY_N_FRAMES` frames, each live head track
+  adds one point: the head centre, or `bottom_center`. That makes it
+  dwell-weighted occupancy, the same as heatmap-service.
+- The points go into one cube per camera per day: a
+  `uint32 (288, 72, 128)` array of 5-minute slots × grid rows × grid
+  columns.
+- It's stored in MinIO as `<bucket>/<camera_id>/<YYYY-MM-DD>.npy`. That
+  is the same format and key layout as heatmap-service, so the same
+  backend code reads both.
+
+**Saving and announcing**
+- Each flush (every `HEATMAP_SAVE_INTERVAL_SEC`, on camera removal, and
+  on shutdown) is announced on the Redis list `face:heatmap:results`:
+  `{"event": "matrix_sync", camera_id, date, bucket, object_key, samples_added}`.
+- When a camera stops, a `{"event": "processing_finished"}` follows.
+
+**How it holds up**
+- The frame loop only increments an in-memory delta, so detection never
+  waits on MinIO.
+- A background flush adds that delta to the stored cube (download, add,
+  upload) instead of overwriting it. A restarted engine, or a camera
+  moved to another engine, keeps counting where the stored cube left off.
+- If MinIO is down, the delta is kept and saved by the next successful
+  flush.
+- Changing the grid or time resolution mid-day writes a sibling object
+  (`<date>.<shape>.npy`) instead of corrupting the existing cube.
+- Only an unclean kill (OOM, power loss) loses anything: at most one
+  save interval of samples.
+
+Tests: `tests/test_heatmap.py`.
 
 
 ## Camera frames — always via the MediaMTX relay

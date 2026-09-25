@@ -265,6 +265,24 @@ services:
       SEND_BEST_FRAME_MIDTRACK: ${SEND_BEST_FRAME_MIDTRACK:-true}
       FINALIZE_MAX_CROPS: ${FINALIZE_MAX_CROPS:-1}
 
+      # ---- occupancy heatmap from the head tracks (detector/src/heatmap.py)
+      # Global on/off; a camera's config can override with "heatmap": true/false.
+      # Same cube format as heatmap-service: <bucket>/<camera>/<date>.npy,
+      # flushes announced on face:heatmap:results.
+      HEATMAP_ENABLED: ${FACE_HEATMAP_ENABLED:-true}
+      HEATMAP_GRID_WIDTH: ${HEATMAP_GRID_WIDTH:-128}
+      HEATMAP_GRID_HEIGHT: ${HEATMAP_GRID_HEIGHT:-72}
+      HEATMAP_TIME_RESOLUTION_MINUTES: ${HEATMAP_TIME_RESOLUTION_MINUTES:-5}
+      HEATMAP_SAMPLE_EVERY_N_FRAMES: ${HEATMAP_SAMPLE_EVERY_N_FRAMES:-10}
+      HEATMAP_POINT_MODE: ${HEATMAP_POINT_MODE:-center}
+      HEATMAP_SAVE_INTERVAL_SEC: ${HEATMAP_SAVE_INTERVAL_SEC:-60}
+      HEATMAP_MINIO_BUCKET: ${FACE_HEATMAP_MINIO_BUCKET:-face-heatmap}
+      # MinIO — used only by the heatmap
+      AWS_S3_ENDPOINT_URL: ${MINIO_ENDPOINT}
+      AWS_ACCESS_KEY_ID_FULL: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY_FULL: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_USE_SSL: ${MINIO_SECURE:-False}
+
       API_PORT: "8010"
     volumes:
       # Model weights, mounted rather than baked so swapping the model

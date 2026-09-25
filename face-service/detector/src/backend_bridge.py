@@ -61,6 +61,8 @@ class CameraJob:
     cross_line_trig: bool
     stop_roi_trig: bool
     leave_scene_trig: bool
+    # None = follow HEATMAP_ENABLED; True/False = this camera's override
+    heatmap_trig: Optional[bool] = None
 
 
 def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
@@ -84,6 +86,7 @@ def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
         cross_line_trig=bool(cfg.get("cross_line")),
         stop_roi_trig=bool(cfg.get("stop_roi")),
         leave_scene_trig=True,
+        heatmap_trig=(None if cfg.get("heatmap") is None else bool(cfg.get("heatmap"))),
     )
 
 
@@ -131,6 +134,7 @@ class DetectorBridge:
             camera_id=job.camera_id, url=job.video_path, roi=job.roi,
             cond_per_trig=job.cond_per_trig, cross_line_trig=job.cross_line_trig,
             stop_roi_trig=job.stop_roi_trig, leave_scene_trig=job.leave_scene_trig,
+            heatmap_trig=job.heatmap_trig,
             line_p1_x=job.line_p1[0], line_p1_y=job.line_p1[1],
             line_p2_x=job.line_p2[0], line_p2_y=job.line_p2[1],
             stop_roi_p1_x=job.stop_roi[0][0], stop_roi_p1_y=job.stop_roi[0][1],

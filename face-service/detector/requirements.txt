@@ -12,8 +12,9 @@
 # version already installed, but pin exact versions in production once
 # you've confirmed what the base image actually ships).
 #
-# The detector never talks to MinIO directly (see the README's storage
-# split — pipeline data is uploaded by the recognizer only, debug
-# output goes to the local bind volume), so boto3 is not needed here.
+# boto3: only used by the optional occupancy heatmap (HEATMAP_ENABLED /
+# per-camera "heatmap"), which stores its per-day cubes in MinIO. With
+# the heatmap off the detector still never talks to MinIO.
 # --------------------------------------------------------------------
 redis==5.0.8
+boto3>=1.28
