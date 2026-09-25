@@ -70,8 +70,8 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "") or None
 REDIS_URL = os.getenv("REDIS_URL", "")
 MODULE_KEY = os.getenv("REDIS_MODULE", "plate")
 
-DETECTOR_API = os.getenv("DETECTOR_API", "http://localhost:8010")
-OCR_API = os.getenv("OCR_API", "http://localhost:8011")
+DETECTOR_API = os.getenv("DETECTOR_API", "http://localhost:8110")
+OCR_API = os.getenv("OCR_API", "http://localhost:8111")
 
 # ---- backend contract (fixed spelling — see README "Redis contract") --
 CFG_HASH = f"{MODULE_KEY}:cameras:config"

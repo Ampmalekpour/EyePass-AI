@@ -1,5 +1,14 @@
 # Plate module — detector + OCR
 
+> **EyePass suite (`develop-suite` branch).** This module runs as part
+> of the suite: start it from the repository root (`docker compose up -d`
+> with `plate` in `COMPOSE_PROFILES`). Redis, MinIO, the MediaMTX relay and
+> the camera manager (`camera-service/`) are shared and defined in the
+> root `compose.yaml`. This module no longer ships its own copies or a
+> `compose.infra.yaml`. Frames are read from the relay path
+> `cam_<sha1(camera address)>`. Parts of the text below describe the
+> standalone layout. See the root `README.md` for the suite setup.
+
 Two independently deployable, self-healing services that replace the
 original single-process ALPR pipeline (`alpr_api.py` + `video_processor.py`
 + `ocr_worker.py`). Same detection/tracking/trigger/OCR **behaviour**

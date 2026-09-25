@@ -1,54 +1,27 @@
 # =====================================================================
-# PLATE MODULE — plate_detector + plate_ocr
+# PLATE MODULE — part of the EyePass suite (plate_detector, plate_ocr, plate_control_hub)
 # ---------------------------------------------------------------------
-#   docker compose up -d --build
+# Not run on its own: the suite's root compose.yaml includes this file.
+# Enable/disable the whole module with its profile in the root .env:
+#     COMPOSE_PROFILES=face,plate,heatmap,fire     (drop "plate" to turn it off)
 #
-# One file. Dev vs prod is not a different file, it's different values
-# in .env (LOG_LEVEL, engine/worker counts, memory limits, GPU on/off).
+# Shared with every other module (defined in the root compose.yaml):
+#   redis, minio (+ minio_init), mediamtx (ONE relay), camera_stream (ONE
+#   camera manager for all modules), autoheal (--profile watchdog)
 #
-# Unlike the face module's own compose.yaml, this file does NOT include
-# a mediamtx/camera_stream service: the plate module already has its
-# own eyepass-camera-stream + MediaMTX deployment running in production
-# (that's what plate:camera:events — singular "camera" — is; see
-# common/platecore/keys.py). Point REDIS_* / MTX_RTSP_BASE_URL below at
-# that existing stack. If you genuinely need a standalone dev relay +
-# camera_stream (no existing deployment to point at), copy the two
-# service blocks from face_service's own compose.yaml as a starting
-# point, or run the reference project's docker-compose.standalone.yml
-# instead — both are drop-in compatible with the Redis contract this
-# module reads (`{module}:cameras:config` / `:details` / `:camera:events`).
+# Settings: ./.env (this module) with the root ../.env layered on top,
+# so shared values (Redis, MinIO, relay URL, base image) live in one
+# place. Relay paths come from the suite-wide rule in common/*/relay.py.
 #
-# Redis and MinIO are external dependencies (compose.infra.yaml, or
-# whatever the platform already runs). No depends_on reaches across
-# that boundary on purpose — both services here must survive Redis or
-# MinIO vanishing at ANY time, not just at startup: each reconnects on
-# its own (platecore.bus.RedisBus.wait_until_available) and self-heals
-# back to its last known phase/count on restart.
-#
-# Two services, independently deployable, talking to each other only
-# through Redis (platecore.keys / platecore.codec) — no shared queue,
-# no shared process, no HTTP between them:
-#   plate_detector   reads camera frames from the MediaMTX relay,
-#                    detects + tracks vehicles, evaluates line/ROI
-#                    triggers, dispatches OCR tasks. Never touches
-#                    MinIO — its debug output (annotated overlay video)
-#                    is local bind volume only.
-#   plate_ocr        pulls OCR tasks, runs the car/motorcycle PaddleOCR
-#                    pipeline, validates + votes, uploads plate/vehicle
-#                    crops to MinIO, pushes results back to the owning
-#                    detector engine (plate:vehicle:results).
-#
-# GPU is baked into plate_detector below (delete the `deploy:` block if
-# you run on a host with no GPU — plate_ocr runs CPU-only by default
-# regardless, see ocr_service/requirements.txt).
+#   plate_detector    frames from the shared relay -> YOLO -> BYTETrack ->
+#                   triggers, best crops -> OCR tasks
+#   plate_ocr         PaddleOCR car/motorcycle pipeline -> results to the hub
+#   plate_control_hub owns each track's OCR state -> plate:vehicle:results
 # =====================================================================
 
-name: eyeplate-plate
-
 x-common: &common
-  env_file: [.env]
+  env_file: [.env, ../.env]
   restart: unless-stopped
-  networks: [platform]
   logging:
     driver: json-file
     options:
@@ -56,157 +29,9 @@ x-common: &common
       max-file: "5"
 
 services:
-  # -------------------------------------------------------------------
-  # Detection + tracking + trigger/OCR-dispatch. Self-healing: reads
-  # its last known phase + engine_count from Redis on boot and restores
-  # itself, without waiting for the backend to resend anything.
-  # -------------------------------------------------------------------
-
-  mediamtx:
-    <<: *common
-    image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
-    container_name: plate_mediamtx
-    environment:
-      TZ: ${TZ:-UTC}
-      MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
-    volumes:
-      - ./camera-service/config/mediamtx.yml:/mediamtx.yml:ro
-    ports:
-      - "${RTSP_PORT:-8554}:8554/tcp"
-      - "${WEBRTC_PORT:-8889}:8889/tcp"
-      - "${WEBRTC_ICE_UDP_PORT:-8189}:8189/udp"
-      - "${HLS_PORT:-8888}:8888/tcp"
-      - "${MTX_API_PORT:-9997}:9997"
-      - "${RTMP_PORT:-1935}:1935"
-    healthcheck:
-      test: [ "CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  camera_stream:
-    <<: *common
-    build:
-      context: ./camera-service
-    image: eyeplate/camera-stream:${IMAGE_TAG:-dev}
-    container_name: plate_camera_stream
-    init: true
-    labels:
-      autoheal: "true"
-    environment:
-      TZ: ${TZ:-UTC}
-      PYTHONUNBUFFERED: "1"
-      REDIS_URL: redis://${REDIS_HOST}:${REDIS_PORT}/${REDIS_DB:-0}
-      MTX_HOST: mediamtx
-      MTX_PORT: "9997"
-      STREAM_BASE_URL: ${STREAM_BASE_URL:-localhost:8889}
-      CAMERA_STREAM_DEBUG: ${CAMERA_STREAM_DEBUG:-false}
-      LOG_FORMAT: ${LOG_FORMAT:-text}
-
-      # ---- camera health / timing (previously bare literals) ---------
-      OFFLINE_HOLD_SECONDS: ${OFFLINE_HOLD_SECONDS:-10}
-      TRUST_MTX_ONLY: ${TRUST_MTX_ONLY:-true}
-      CAMERA_RTSP_PORT: ${CAMERA_RTSP_PORT:-554}
-      CAMERA_PING_TIMEOUT_SEC: ${CAMERA_PING_TIMEOUT_SEC:-0.2}
-      MTX_POLL_INTERVAL_SEC: ${MTX_POLL_INTERVAL_SEC:-0.5}
-      MTX_API_TIMEOUT_SEC: ${MTX_API_TIMEOUT_SEC:-1.5}
-      MONITOR_LOOP_INTERVAL_SEC: ${MONITOR_LOOP_INTERVAL_SEC:-0.3}
-      MONITOR_IDLE_SLEEP_SEC: ${MONITOR_IDLE_SLEEP_SEC:-1.0}
-      REGISTER_CAMERA_TIMEOUT_SEC: ${REGISTER_CAMERA_TIMEOUT_SEC:-1.0}
-      REMOVE_FROM_MTX_TIMEOUT_SEC: ${REMOVE_FROM_MTX_TIMEOUT_SEC:-1.0}
-
-      # ---- debug output (local bind volume — never MinIO) -------------
-      DEBUG_ROOT_DIR: /debug
-      CAMERA_SNAPSHOT_DEBUG_ENABLED: ${CAMERA_SNAPSHOT_DEBUG_ENABLED:-false}
-      CAMERA_SNAPSHOT_INTERVAL_SEC: ${CAMERA_SNAPSHOT_INTERVAL_SEC:-60}
-      CAMERA_SNAPSHOT_TIMEOUT_SEC: ${CAMERA_SNAPSHOT_TIMEOUT_SEC:-5}
-    volumes:
-      - ${CAMERA_DEBUG_HOST_DIR:-./debug_camera}:/debug
-    depends_on:
-      mediamtx:
-        condition: service_started
-
-
-  video_publisher:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: plate_video_publisher_1
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/1
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  plate_video_publisher_2:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: plate_video_publisher_2
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/2
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  plate_video_publisher_3:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: plate_video_publisher_3
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/3
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  plate_video_publisher_4:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: plate_video_publisher_4
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/4
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  plate_video_publisher_5:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: plate_video_publisher_5
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/5
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  plate_video_publisher_6:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: plate_video_publisher_6
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/6
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
 
   plate_detector:
+    profiles: [plate]
     <<: *common
     build:
       context: .
@@ -385,7 +210,7 @@ services:
       # straight off your own disk.
       - ${DEBUG_VIDEO_HOST_DIR:-./debug_video}:/debug
     ports:
-      - "${DETECTOR_API_PORT:-8010}:8010"
+      - "${DETECTOR_API_PORT:-8110}:8010"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3).status==200 else 1)"]
       interval: 15s
@@ -412,6 +237,7 @@ services:
   # ocr_service/requirements.txt / OCR_USE_GPU).
   # -------------------------------------------------------------------
   plate_ocr:
+    profiles: [plate]
     <<: *common
     build:
       context: .
@@ -490,7 +316,7 @@ services:
       # storage-split rule as the detector's debug video).
       - ${OCR_DEBUG_HOST_DIR:-./debug_ocr}:/debug
     ports:
-      - "${OCR_API_PORT:-8011}:8011"
+      - "${OCR_API_PORT:-8111}:8011"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=3).status==200 else 1)"]
       interval: 15s
@@ -509,7 +335,8 @@ services:
   # exactly ONE per module per Redis (a second copy just stands by on
   # the leader lease). See ./control-hub/README.md.
   # -------------------------------------------------------------------
-  control_hub:
+  plate_control_hub:
+    profiles: [plate]
     <<: *common
     build:
       context: ./control-hub
@@ -548,27 +375,3 @@ services:
       - "${HUB_API_PORT:-8021}:8020"      # /health, /tracks
     stop_grace_period: 15s
 
-  # -------------------------------------------------------------------
-  # `restart: unless-stopped` only covers a process that EXITED. It does
-  # nothing for a process that is alive and wedged (a hung CUDA call, a
-  # deadlocked thread). autoheal watches healthchecks and restarts
-  # anything labelled autoheal=true that goes unhealthy. Off by default:
-  #   docker compose --profile watchdog up -d
-  # -------------------------------------------------------------------
-  autoheal:
-    image: willfarrell/autoheal:latest
-    container_name: plate_autoheal
-    profiles: [watchdog]
-    environment:
-      AUTOHEAL_CONTAINER_LABEL: autoheal
-      AUTOHEAL_INTERVAL: "30"
-      AUTOHEAL_START_PERIOD: "180"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-    networks: [platform]
-
-networks:
-  platform:
-    external: true
-    name: ${SHARED_NETWORK:-eyeplate_net}

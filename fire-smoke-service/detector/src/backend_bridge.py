@@ -29,15 +29,21 @@ import config
 from firecore.active_state import ActiveCameraState
 from firecore.bus import RedisBus
 from firecore.logging_setup import setup_logger
+from firecore.relay import relay_path_for
 
 logger = setup_logger("backend_bridge")
 
 
-def rtsp_url(camera_id: str) -> str:
-    """Frames always come from the relay, never from the camera directly —
-    camera_stream (eyepass-camera-stream) owns the single real connection
-    to each camera and re-serves it to any number of consumers."""
-    return f"{config.MTX_RTSP_BASE_URL.rstrip('/')}/{camera_id}"
+def rtsp_url(camera_id: str, info: Optional[dict] = None) -> str:
+    """Frames always come from the suite's shared MediaMTX relay, never
+    from the camera directly. The relay path is the one camera_stream
+    registered for this camera: `relay_path` from cameras:details when
+    known, else derived from the camera's address with the same rule
+    (firecore/relay.py) — one path per physical camera, shared by every
+    module that uses it."""
+    info = info or {}
+    path = info.get("relay_path") or relay_path_for(camera_id, info.get("address"))
+    return f"{config.MTX_RTSP_BASE_URL.rstrip('/')}/{path}"
 
 
 @dataclass
@@ -55,7 +61,7 @@ def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
     roi_d = cfg.get("roi") or {}
     return CameraJob(
         camera_id=str(camera_id),
-        video_path=rtsp_url(camera_id),
+        video_path=rtsp_url(camera_id, cfg),
         roi=(
             float(roi_d.get("x", 0)), float(roi_d.get("y", 0)),
             float(roi_d.get("w", 1)), float(roi_d.get("h", 1)),

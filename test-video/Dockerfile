@@ -1,4 +1,4 @@
-# Dockerfile.publisher
+# test-video/Dockerfile
 # --------------------------------------------------------------------
 # Tiny ffmpeg image that loops a local video file into mediamtx over
 # RTSP, so the rest of the stack sees it exactly like a live camera.

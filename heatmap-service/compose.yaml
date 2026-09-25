@@ -1,44 +1,25 @@
 # =====================================================================
-# HEATMAP MODULE — ai_service
+# HEATMAP MODULE — part of the EyePass suite (ai_service)
 # ---------------------------------------------------------------------
-#   docker compose up -d --build
+# Not run on its own: the suite's root compose.yaml includes this file.
+# Enable/disable the whole module with its profile in the root .env:
+#     COMPOSE_PROFILES=face,plate,heatmap,fire     (drop "heatmap" to turn it off)
 #
-# One file. Dev vs prod is not a different file, it's different values
-# in .env (LOG_LEVEL, SAVE_OUTPUT, DETECTION_DEVICE, memory limits) —
-# same convention the plate/face/fire modules use.
+# Shared with every other module (defined in the root compose.yaml):
+#   redis, minio (+ minio_init), mediamtx (ONE relay), camera_stream (ONE
+#   camera manager for all modules), autoheal (--profile watchdog)
 #
-# Single service, like fire/smoke's detector: crowd-density heatmap
-# accumulation IS the result (a flushed cube per camera per day), so
-# there is nothing downstream to scale independently.
+# Settings: ./.env (this module) with the root ../.env layered on top,
+# so shared values (Redis, MinIO, relay URL, base image) live in one
+# place. Relay paths come from the suite-wide rule in common/*/relay.py.
 #
-# Redis and MinIO are external dependencies — the SAME Redis/MinIO the
-# plate/face/fire modules point at, not a private copy (the pre-existing
-# standalone build of this module ran its own compose.infra.yaml with
-# its own Redis+MinIO; that's been dropped here in favor of pointing at
-# the platform's shared instance, matching every other module). No
-# depends_on reaches across that boundary on purpose — ai_service must
-# survive Redis or MinIO vanishing at ANY time, not just at startup: it
-# reconnects on its own (heatmapcore.bus.RedisBus.wait_until_available)
-# and self-heals back to its last known phase/engine-count on restart.
-#
-# This module DOES bundle its own mediamtx + camera_stream — the exact
-# same camera-service the plate/face/fire modules run, on ports offset
-# from theirs so all four modules can run side by side on one host
-# without a port collision. Point MTX_RTSP_BASE_URL at an EXISTING
-# relay instead and delete these two services if this deployment
-# already has one running for every module to share.
-#
-# GPU is baked into ai_service below (delete the `deploy:` block if you
-# run on a host with no GPU — DETECTION_DEVICE=auto falls back to CPU
-# on its own either way).
+#   ai_service  frames from the shared relay -> person detection ->
+#               per-camera daily occupancy cubes in MinIO -> heatmap:ai:results
 # =====================================================================
 
-name: eyeplate-heatmap
-
 x-common: &common
-  env_file: [.env]
+  env_file: [.env, ../.env]
   restart: unless-stopped
-  networks: [platform]
   logging:
     driver: json-file
     options:
@@ -46,121 +27,6 @@ x-common: &common
       max-file: "5"
 
 services:
-  # -------------------------------------------------------------------
-  # This module's own MediaMTX relay + camera_stream, same shape as
-  # the plate/face/fire modules'. Point MTX_RTSP_BASE_URL at an
-  # EXISTING relay instead and delete these two services if this
-  # deployment already has one running for every module to share.
-  # -------------------------------------------------------------------
-  mediamtx:
-    <<: *common
-    image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
-    container_name: heatmap_mediamtx
-    environment:
-      TZ: ${TZ:-UTC}
-      MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
-    volumes:
-      - ./camera-service/config/mediamtx.yml:/mediamtx.yml:ro
-    ports:
-      - "${RTSP_PORT:-8574}:8554/tcp"
-      - "${WEBRTC_PORT:-8909}:8889/tcp"
-      - "${WEBRTC_ICE_UDP_PORT:-8209}:8189/udp"
-      - "${HLS_PORT:-8908}:8888/tcp"
-      - "${MTX_API_PORT:-9977}:9997"
-      - "${RTMP_PORT:-1955}:1935"
-    healthcheck:
-      test: [ "CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  camera_stream:
-    <<: *common
-    build:
-      context: ./camera-service
-    image: eyeplate/heatmap-camera-stream:${IMAGE_TAG:-dev}
-    container_name: heatmap_camera_stream
-    init: true
-    labels:
-      autoheal: "true"
-    environment:
-      TZ: ${TZ:-UTC}
-      PYTHONUNBUFFERED: "1"
-      REDIS_URL: redis://${REDIS_HOST}:${REDIS_PORT}/${REDIS_DB:-0}
-      MTX_HOST: mediamtx
-      MTX_PORT: "9997"
-      STREAM_BASE_URL: ${STREAM_BASE_URL:-localhost:8909}
-      CAMERA_STREAM_DEBUG: ${CAMERA_STREAM_DEBUG:-false}
-      LOG_FORMAT: ${LOG_FORMAT:-text}
-
-      OFFLINE_HOLD_SECONDS: ${OFFLINE_HOLD_SECONDS:-10}
-      TRUST_MTX_ONLY: ${TRUST_MTX_ONLY:-true}
-      CAMERA_RTSP_PORT: ${CAMERA_RTSP_PORT:-554}
-      CAMERA_PING_TIMEOUT_SEC: ${CAMERA_PING_TIMEOUT_SEC:-0.2}
-      MTX_POLL_INTERVAL_SEC: ${MTX_POLL_INTERVAL_SEC:-0.5}
-      MTX_API_TIMEOUT_SEC: ${MTX_API_TIMEOUT_SEC:-1.5}
-      MONITOR_LOOP_INTERVAL_SEC: ${MONITOR_LOOP_INTERVAL_SEC:-0.3}
-      MONITOR_IDLE_SLEEP_SEC: ${MONITOR_IDLE_SLEEP_SEC:-1.0}
-      REGISTER_CAMERA_TIMEOUT_SEC: ${REGISTER_CAMERA_TIMEOUT_SEC:-1.0}
-      REMOVE_FROM_MTX_TIMEOUT_SEC: ${REMOVE_FROM_MTX_TIMEOUT_SEC:-1.0}
-
-      DEBUG_ROOT_DIR: /debug
-      CAMERA_SNAPSHOT_DEBUG_ENABLED: ${CAMERA_SNAPSHOT_DEBUG_ENABLED:-false}
-      CAMERA_SNAPSHOT_INTERVAL_SEC: ${CAMERA_SNAPSHOT_INTERVAL_SEC:-60}
-      CAMERA_SNAPSHOT_TIMEOUT_SEC: ${CAMERA_SNAPSHOT_TIMEOUT_SEC:-5}
-    volumes:
-      - ${CAMERA_DEBUG_HOST_DIR:-./debug_camera}:/debug
-    depends_on:
-      mediamtx:
-        condition: service_started
-
-  # -------------------------------------------------------------------
-  # Test-only: loops a local video file into mediamtx over RTSP so the
-  # rest of the stack sees it exactly like a live camera. Off by
-  # default — only starts with `docker compose --profile test-video up`.
-  # One publisher per camera id; add more blocks the same way if you
-  # need more than 3 test cameras. See README "Testing without real
-  # cameras".
-  # -------------------------------------------------------------------
-  video_publisher_1:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: heatmap_video_publisher_1
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/1
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  video_publisher_2:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: heatmap_video_publisher_2
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/2
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
-
-  video_publisher_3:
-    build: { context: ., dockerfile: Dockerfile.publisher }
-    container_name: heatmap_video_publisher_3
-    profiles: [ test-video ]
-    environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/3
-      VIDEO_FILE: /media/video.mp4
-    volumes:
-      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
-    restart: unless-stopped
-    networks: [ platform ]
 
   # -------------------------------------------------------------------
   # Detection + heatmap-cube accumulation + periodic MinIO flush.
@@ -170,6 +36,7 @@ services:
   # anything (see README "Self-healing" / "Redis contract").
   # -------------------------------------------------------------------
   ai_service:
+    profiles: [heatmap]
     <<: *common
     build:
       context: .
@@ -290,34 +157,6 @@ services:
             - driver: nvidia
               count: ${GPU_COUNT:-1}
               capabilities: [gpu]
-
-  # -------------------------------------------------------------------
-  # `restart: unless-stopped` only covers a process that EXITED. It does
-  # nothing for a process that is alive and wedged (a hung CUDA call, a
-  # deadlocked thread). autoheal watches healthchecks and restarts
-  # anything labelled autoheal=true that goes unhealthy. Off by default:
-  #   docker compose --profile watchdog up -d
-  # -------------------------------------------------------------------
-  autoheal:
-    image: willfarrell/autoheal:latest
-    container_name: heatmap_autoheal
-    profiles: [watchdog]
-    environment:
-      AUTOHEAL_CONTAINER_LABEL: autoheal
-      AUTOHEAL_INTERVAL: "30"
-      AUTOHEAL_START_PERIOD: "180"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-    networks: [platform]
-
-networks:
-  platform:
-    external: true
-    name: ${SHARED_NETWORK:-eyeplate_net}
-
-volumes:
-  ai_data:
 
 volumes:
   ai_data:

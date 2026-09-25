@@ -38,17 +38,21 @@ import config
 from facecore.bus import RedisBus
 from facecore.codec import decode_task, encode_task
 from facecore.logging_setup import setup_logger
+from facecore.relay import relay_path_for
 
 logger = setup_logger("recognizer.enroll")
 
 
-def rtsp_url(camera_id: str) -> str:
-    """Frames always come from the relay, never the camera directly —
-    identical convention to detector/src/backend_bridge.py::rtsp_url."""
-    return f"{config.MTX_RTSP_BASE_URL.rstrip('/')}/{camera_id}"
+def rtsp_url(camera_id: str, info: Optional[dict] = None) -> str:
+    """Frames always come from the shared relay, never the camera
+    directly — identical rule to detector/src/backend_bridge.py::rtsp_url
+    (facecore/relay.py)."""
+    info = info or {}
+    path = info.get("relay_path") or relay_path_for(camera_id, info.get("address"))
+    return f"{config.MTX_RTSP_BASE_URL.rstrip('/')}/{path}"
 
 
-def _grab_camera_snapshot(camera_id: str) -> bytes:
+def _grab_camera_snapshot(camera_id: str, info: Optional[dict] = None) -> bytes:
     """One-shot RTSP grab: open, read a frame, close. Deliberately NOT
     a persistent connection or a shared frame buffer — enrollment is
     infrequent enough that paying connection setup cost per call is
@@ -56,7 +60,7 @@ def _grab_camera_snapshot(camera_id: str) -> bytes:
     warm for something this rare. Mirrors the reference's
     `capture_snapshot_with_retry`, minus the buffer-first fast path
     that no longer has anything to be a fast path in front of."""
-    url = rtsp_url(camera_id)
+    url = rtsp_url(camera_id, info)
     last_error = None
     for attempt in range(config.ENROLL_SNAPSHOT_RETRIES):
         cap = cv2.VideoCapture(url)
@@ -132,7 +136,7 @@ class EnrollCoordinator:
         camera_id = cmd.get("camera_id")
         if image_bytes is None and camera_id is not None:
             try:
-                image_bytes = _grab_camera_snapshot(str(camera_id))
+                image_bytes = _grab_camera_snapshot(str(camera_id), self.bus.get_camera_details(str(camera_id)))
             except Exception as e:
                 return {"status": "error", "message": str(e)}
         if image_bytes is None:

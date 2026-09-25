@@ -1,0 +1,253 @@
+# =====================================================================
+# EyePass AI suite — every module, one shared infrastructure
+# ---------------------------------------------------------------------
+#   cp .env.example .env                          # shared settings + which modules run
+#   for m in face plate heatmap fire-smoke; do cp $m-service/.env.example $m-service/.env; done
+#   docker compose up -d --build
+#
+# Turning modules on and off: COMPOSE_PROFILES in .env
+#   COMPOSE_PROFILES=face,plate,heatmap,fire     every module
+#   COMPOSE_PROFILES=face                        face only
+#   (or per command: docker compose --profile plate up -d)
+# The shared services below have no profile, so they always run; a
+# module's own services (detector, worker, control hub, ...) start only
+# when its profile is enabled. Add ,watchdog / ,tools / ,test-video for
+# the optional extras.
+#
+# Shared, exactly one of each:
+#   redis          every module's commands, state, queues, results
+#   minio          every module's images, galleries and heatmap cubes
+#   mediamtx       the one RTSP relay — a camera is pulled ONCE, however
+#                  many modules watch it
+#   camera_stream  the one camera manager: reads every module's
+#                  <module>:cameras:config, registers relay paths, reports
+#                  online/offline to each module
+# Each module's services come from its own compose.yaml via `include`,
+# with the module's .env and this root .env layered on top of it.
+# Requires Docker Compose v2.20+ (include with env_file).
+# =====================================================================
+
+name: eyepass
+
+include:
+  - path: face-service/compose.yaml
+    env_file: [face-service/.env, .env]
+  - path: plate-service/compose.yaml
+    env_file: [plate-service/.env, .env]
+  - path: heatmap-service/compose.yaml
+    env_file: [heatmap-service/.env, .env]
+  - path: fire-smoke-service/compose.yaml
+    env_file: [fire-smoke-service/.env, .env]
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  # -------------------------------------------------------------------
+  # Redis — appendonly/everysec: at most ~1s of writes lost on an
+  # unclean kill. Every module's self-healing checkpoints, desired-state
+  # ledgers, task queues and control-hub streams live here.
+  # -------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: eyepass_redis
+    command: redis-server --appendonly yes --appendfsync everysec --dir /data
+    ports:
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging: *logging
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: eyepass_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "${MINIO_API_PUBLISH_PORT:-9000}:9000"      # S3 API
+      - "${MINIO_CONSOLE_PUBLISH_PORT:-9001}:9001"  # web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    logging: *logging
+
+  # One-shot: creates every module's buckets (MINIO_BUCKETS). Idempotent.
+  minio_init:
+    image: quay.io/minio/mc:latest
+    container_name: eyepass_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 '${MINIO_ROOT_USER}' '${MINIO_ROOT_PASSWORD}' &&
+      for b in $$(echo '${MINIO_BUCKETS:-face-private-bucket,face-public-bucket,face-heatmap,eyepass-private-bucket,eyepass-public-bucket,heatmap-data}' | tr ',' ' '); do
+        mc mb --ignore-existing local/$$b;
+      done;
+      exit 0
+      "
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # The ONE RTSP relay. Every detector reads frames from here, never
+  # from a camera; camera_stream registers one path per physical camera.
+  # -------------------------------------------------------------------
+  mediamtx:
+    image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
+    container_name: eyepass_mediamtx
+    environment:
+      TZ: ${TZ:-UTC}
+      MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
+    volumes:
+      - ./camera-service/config/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "${RTSP_PORT:-8554}:8554/tcp"
+      - "${WEBRTC_PORT:-8889}:8889/tcp"
+      - "${WEBRTC_ICE_UDP_PORT:-8189}:8189/udp"
+      - "${HLS_PORT:-8888}:8888/tcp"
+      - "${MTX_API_PORT:-9997}:9997"     # curl localhost:9997/v3/paths/list
+      - "${RTMP_PORT:-1935}:1935"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    logging: *logging
+
+  # -------------------------------------------------------------------
+  # The ONE camera manager for every module (camera-service/src/main.py).
+  # Stateless: rebuilds everything from <module>:cameras:config on start.
+  # -------------------------------------------------------------------
+  camera_stream:
+    build:
+      context: ./camera-service
+    image: eyepass/camera-stream:${IMAGE_TAG:-dev}
+    container_name: eyepass_camera_stream
+    init: true
+    labels:
+      autoheal: "true"
+    environment:
+      TZ: ${TZ:-UTC}
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MTX_HOST: mediamtx
+      MTX_PORT: "9997"
+      STREAM_BASE_URL: ${STREAM_BASE_URL:-}
+      RELAY_PATH_MODE: ${RELAY_PATH_MODE:-source}
+      # Serve these modules even before the backend writes their first
+      # camera; anything else found as <module>:cameras:config is served too.
+      CAMERA_MODULES: ${CAMERA_MODULES:-face,plate,heatmap,fire}
+      CAMERA_EVENTS_CHANNEL_FACE: face:cameras:events
+      OFFLINE_HOLD_SECONDS: ${OFFLINE_HOLD_SECONDS:-10}
+      TRUST_MTX_ONLY: ${TRUST_MTX_ONLY:-true}
+      CAMERA_RTSP_PORT: ${CAMERA_RTSP_PORT:-554}
+      CONFIG_RESYNC_SEC: ${CONFIG_RESYNC_SEC:-30}
+      CAMERA_STREAM_DEBUG: ${CAMERA_STREAM_DEBUG:-false}
+      CAMERA_SNAPSHOT_DEBUG_ENABLED: ${CAMERA_SNAPSHOT_DEBUG_ENABLED:-false}
+      DEBUG_ROOT_DIR: /debug
+    volumes:
+      - ./camera-service/src:/app/src
+      - ${DEBUG_ROOT_HOST_DIR:-./debug}:/debug
+    depends_on:
+      redis:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+    restart: unless-stopped
+    logging: *logging
+
+  # -------------------------------------------------------------------
+  # Optional extras
+  # -------------------------------------------------------------------
+  # --profile test-video: loop a local clip into the relay as if it were
+  # a camera. Point a camera's address at rtsp://mediamtx:8554/test1..3.
+  test_video_1:
+    build: { context: ./test-video }
+    image: eyepass/test-video:${IMAGE_TAG:-dev}
+    container_name: eyepass_test_video_1
+    profiles: [test-video]
+    environment: { MTX_RTSP_URL: "rtsp://mediamtx:8554/test1", VIDEO_FILE: /media/video.mp4 }
+    volumes: ["${TEST_VIDEO_FILE_1:-./test-video/video1.mp4}:/media/video.mp4:ro"]
+    depends_on: { mediamtx: { condition: service_started } }
+    restart: unless-stopped
+  test_video_2:
+    image: eyepass/test-video:${IMAGE_TAG:-dev}
+    container_name: eyepass_test_video_2
+    profiles: [test-video]
+    environment: { MTX_RTSP_URL: "rtsp://mediamtx:8554/test2", VIDEO_FILE: /media/video.mp4 }
+    volumes: ["${TEST_VIDEO_FILE_2:-./test-video/video1.mp4}:/media/video.mp4:ro"]
+    depends_on: { test_video_1: { condition: service_started } }
+    restart: unless-stopped
+  test_video_3:
+    image: eyepass/test-video:${IMAGE_TAG:-dev}
+    container_name: eyepass_test_video_3
+    profiles: [test-video]
+    environment: { MTX_RTSP_URL: "rtsp://mediamtx:8554/test3", VIDEO_FILE: /media/video.mp4 }
+    volumes: ["${TEST_VIDEO_FILE_3:-./test-video/video1.mp4}:/media/video.mp4:ro"]
+    depends_on: { test_video_1: { condition: service_started } }
+    restart: unless-stopped
+
+  # --profile tools: Redis inspection UIs
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: eyepass_redisinsight
+    profiles: [tools]
+    ports: ["${REDISINSIGHT_PORT:-8001}:5540"]
+    environment: { RI_REDIS_HOST: redis, RI_REDIS_PORT: "6379", RI_REDIS_ALIAS: eyepass }
+    volumes: [redisinsight_data:/data]
+    depends_on: { redis: { condition: service_healthy } }
+    restart: unless-stopped
+  redis_commander:
+    image: rediscommander/redis-commander:latest
+    container_name: eyepass_redis_commander
+    profiles: [tools]
+    ports: ["${REDIS_COMMANDER_PORT:-8081}:8081"]
+    environment: { REDIS_HOSTS: "local:redis:6379" }
+    depends_on: { redis: { condition: service_healthy } }
+    restart: unless-stopped
+
+  # --profile watchdog: restarts any container labelled autoheal=true
+  # whose healthcheck turns unhealthy (alive but wedged).
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: eyepass_autoheal
+    profiles: [watchdog]
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "30"
+      AUTOHEAL_START_PERIOD: "180"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+# One network for the whole suite. The backend joins it as external
+# (name below) to reach redis/minio by name.
+networks:
+  default:
+    name: ${SHARED_NETWORK:-eyeplate_net}
+
+volumes:
+  redis_data:
+  minio_data:
+  redisinsight_data:

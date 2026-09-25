@@ -1,181 +1,164 @@
-# EyePass AI
+# EyePass AI — suite
 
-AI modules for the EyePass platform. Each module is an independently
-deployable Docker Compose stack that talks to the backend only through
-Redis (commands and results) and MinIO (images).
+All EyePass AI modules run as **one Docker Compose project** with a single
+shared infrastructure. Turn each module on or off with a compose profile.
+This is the `develop-suite` branch. On `develop-standalone`, each module
+runs on its own.
 
 ```
-face-service/        face detection + tracking + liveness -> AdaFace recognition  (+ its own control-hub/)
-plate-service/       vehicle/plate detection + tracking -> PaddleOCR             (+ its own control-hub/)
-heatmap-service/     people heatmaps
-fire-smoke-service/  fire / smoke detection
+                         ┌──────────────── shared, always on ────────────────┐
+ cameras ──RTSP──►  mediamtx (ONE relay)  ◄── camera_stream (ONE camera manager)
+                         │   one path per physical camera       │  reads <m>:cameras:config,
+                         │   (cam_<sha1(address)>)              │  writes <m>:cameras:details,
+                         ▼                                      │  publishes online/offline per module
+      ┌──────────── face ────────────┐ ┌──────── plate ────────┐ ┌─ heatmap ─┐ ┌── fire ───┐
+      face_detector  face_recognizer   plate_detector plate_ocr   ai_service    fire_detector
+      face_control_hub  gallery_seed   plate_control_hub
+      └──────────────────────────────── redis (ONE) · minio (ONE) ─────────────────────────┘
 ```
 
-Face and plate are fully independent. Each folder has everything it
-needs, and each runs `mediamtx` + `camera_stream` (the RTSP relay),
-`*_detector` (GPU), `face_recognizer` / `plate_ocr`, and its **own**
-`control_hub`, which owns that module's per-track recognition state and
-decides what the backend receives. See
-[`face-service/control-hub/README.md`](face-service/control-hub/README.md)
-and [`plate-service/control-hub/README.md`](plate-service/control-hub/README.md)
-for the step-by-step flow and how every failure case is handled.
+| Folder | What |
+|---|---|
+| `compose.yaml` | The suite: redis, minio, mediamtx, camera_stream, plus optional extras. It includes each module's `compose.yaml` |
+| `.env.example` | Shared settings and **which modules run** (`COMPOSE_PROFILES`) |
+| `camera-service/` | The single camera manager used by every module (with tests) |
+| `face-service/` | Face detection, tracking and liveness → AdaFace recognition, control hub, optional occupancy heatmap |
+| `plate-service/` | Vehicle/plate detection and tracking → PaddleOCR, control hub |
+| `heatmap-service/` | People-occupancy heatmaps |
+| `fire-smoke-service/` | Fire/smoke detection |
+| `test-video/` | Loops a local clip into the relay as a fake camera (`test-video` profile) |
 
+## Choosing what runs
 
-## Set it up on your laptop
+Set this in the root `.env`:
 
-### 0. Prerequisites
+```
+COMPOSE_PROFILES=face,plate,heatmap,fire     # any combination
+```
 
-- Docker Engine + Compose v2 (`docker compose version`).
-- For GPU: an NVIDIA driver + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
-  **No GPU?** Delete the `deploy:` block under `face_detector` /
-  `plate_detector` in each `compose.yaml`, and set
-  `DETECTION_DEVICE=cpu` in `.env`.
-- Your prepared **base images**, which already contain
-  torch/ultralytics/OpenCV (and PaddleOCR for plate):
-  `base_image:latest` (face) and `base_image_gpu:latest` (plate). If
-  you have them as tar files, run `docker load -i base_image.tar`. If
-  they're named differently, set `AI_BASE_IMAGE` in each module's `.env`.
-- Python 3.10+ on the host, only for the helper scripts (`pip install redis requests`).
+| Profile | Starts |
+|---|---|
+| `face` | face_detector, face_recognizer, face_control_hub, gallery_seed |
+| `plate` | plate_detector, plate_ocr, plate_control_hub |
+| `heatmap` | ai_service |
+| `fire` | fire_detector |
+| `watchdog` | autoheal (restarts containers whose healthcheck turns unhealthy) |
+| `tools` | RedisInsight (:8001), Redis Commander (:8081) |
+| `test-video` | 3 looping fake cameras at `rtsp://mediamtx:8554/test1..3` |
 
-### 1. Get the code
+redis, minio, mediamtx and camera_stream have no profile, so they always
+run. You can also override for one command, for example
+`docker compose --profile face up -d`. A module that is off keeps its
+data in Redis and MinIO; turning it back on resumes where it was, via
+each service's self-healing checkpoint.
 
+## What is shared, and how the modules stay apart
+
+- **Redis:** every key is prefixed with its module (`face:*`, `plate:*`,
+  `heatmap:*`, `fire:*`), so modules never read each other's keys.
+- **MinIO:** each module keeps its own buckets. `minio_init` creates all
+  of them (`MINIO_BUCKETS`).
+- **Camera relay:** camera_stream registers **one MediaMTX path per
+  physical camera**, `cam_<sha1(address)>`.
+  - When face and heatmap watch the same camera, it is pulled from the
+    camera once.
+  - Camera IDs can't collide: face camera `1` and plate camera `1` are
+    different cameras with different addresses, so they get different paths.
+  - Detectors compute the same path from the camera's address, using the
+    same rule in `common/*/relay.py`. camera_stream also writes it into
+    `<module>:cameras:details` as `relay_path` and `stream_url`.
+  - A path is removed from MediaMTX only when no module uses that camera any more.
+- **Camera events:** each module gets online/offline events on the
+  channel it already listens to: `face:cameras:events`,
+  `plate:camera:events`, `heatmap:camera:events`, `fire:camera:events`.
+- **Settings:** each module's `.env` holds its own tuning. The root `.env`
+  is layered on top, so shared values (Redis, MinIO, relay URL, TZ,
+  logging) live in one place and always win.
+- **Host ports:** every host port is unique across the suite:
+
+  | Service | Port |
+  |---|---|
+  | face detector | 8010 |
+  | face recognizer | 8011 |
+  | face hub | 8020 |
+  | plate detector | 8110 |
+  | plate OCR | 8111 |
+  | plate hub | 8021 |
+  | heatmap | 8002 |
+  | fire | 8012 |
+  | Redis | 6379 |
+  | MinIO | 9000 / 9001 |
+  | RTSP | 8554 |
+  | WebRTC | 8889 |
+  | MediaMTX API | 9997 |
+
+## Set it up
+
+**0. Prerequisites**
+- Docker with **Compose v2.20 or later**: `docker compose version`. Earlier versions lack `include`.
+- For GPU: an NVIDIA driver and nvidia-container-toolkit. Without a GPU,
+  delete the `deploy:` blocks in the module compose files and set
+  `DETECTION_DEVICE=cpu`.
+- Your prepared base images, as each module's `AI_BASE_IMAGE` expects:
+  `base_image:latest` for face, `base_image_gpu:latest` for the others.
+
+**1. Get the code**
 ```bash
 git clone https://github.com/Ampmalekpour/EyePass-AI.git
-cd EyePass-AI
-git checkout claude/eloquent-volta-6hg9mi     # this branch, until it's merged
+cd EyePass-AI && git checkout develop-suite
 ```
 
-Already cloned? Update with
-`git fetch origin && git checkout claude/eloquent-volta-6hg9mi && git pull`.
+**2. Create the env files** (all five must exist, even for modules you don't run)
+```bash
+cp .env.example .env
+for m in face plate heatmap fire-smoke; do cp $m-service/.env.example $m-service/.env; done
+```
+Then edit the root `.env`: `COMPOSE_PROFILES`, `MINIO_ROOT_PASSWORD`, and `STREAM_BASE_URL`.
 
-### 2. Put the models and data in place
+**3. Put models and data in place** (none of this is in git)
 
-Nothing below is in git. Weights and the face gallery are
-bind-mounted, so replacing a file only needs a container restart, not a
-rebuild.
-
-**Face** (`face-service/`)
-
-| Put this | Here | Used by |
+| Module | Put this | Here |
 |---|---|---|
-| `best1.pt`, the YOLO head + 14-landmark model | `face-service/models/detection/best1.pt` | face_detector |
-| `adaface_ir50_cpu.onnx` | `face-service/models/recognition/adaface_ir50_cpu.onnx` | face_recognizer (primary) |
-| `adaface_ir50_ms1mv2.ckpt` (PyTorch fallback, optional when USE_ONNX=true) | `face-service/recognizer/pretrained/adaface_ir50_ms1mv2.ckpt` (next to the `warmup.jpg` already there) | face_recognizer |
-| MTCNN weights `pnet.npy`, `rnet.npy`, `onet.npy` | `face-service/recognizer/face_alignment/mtcnn_pytorch/src/weights/` | alignment + enrollment |
-| The gallery: `brieface.db` + the reference images `c1.jpg, c2.jpg, …` (+ `representations_ir_50.pkl` if you have one), all in **one flat folder** | `face-service/recognizer/gallery/` | `gallery_seed` uploads it to MinIO; every recognizer worker downloads it from there |
+| face | `best1.pt` | `face-service/models/detection/` |
+| face | `adaface_ir50_cpu.onnx` | `face-service/models/recognition/` |
+| face | `adaface_ir50_ms1mv2.ckpt` (optional fallback) | `face-service/recognizer/pretrained/` |
+| face | MTCNN `pnet.npy`, `rnet.npy`, `onet.npy` | `face-service/recognizer/face_alignment/mtcnn_pytorch/src/weights/` |
+| face | gallery: `brieface.db` + `c*.jpg`, one flat folder | `face-service/recognizer/gallery/` |
+| plate | `best.pt` | `plate-service/models/detection/` |
+| plate | contents of your `PadOcr/` folder (names unchanged) | `plate-service/models/ocr/` |
+| heatmap | person or head model, e.g. `yolov8n.pt` | `heatmap-service/models/detection/` |
+| fire | `best.pt` | `fire-smoke-service/models/detection/` |
+| test-video | a clip | `test-video/video1.mp4` |
 
-**Plate** (`plate-service/`)
-
-| Put this | Here | Used by |
-|---|---|---|
-| `best.pt`, the YOLO vehicle/plate model | `plate-service/models/detection/best.pt` | plate_detector |
-| Your whole `PadOcr/` folder's **contents**, names unchanged: `en_PP-OCRv3_det_infer/`, `rec_svrt_fa_final_1/`, `ch_ppocr_mobile_v2.0_cls_infer/`, `rec_svrt_motor/`, `Final_Dict.txt` | `plate-service/models/ocr/` | plate_ocr |
-| *(optional)* a test clip for `--profile test-video` | `plate-service/test_video.mp4` | video_publisher |
-
-Different location? Point `DETECTION_MODELS_DIR`,
-`RECOGNITION_MODELS_DIR`, `RECOGNITION_GALLERY_DIR` or `OCR_MODELS_DIR`
-in the module's `.env` at it.
-
-The control hub needs no models or files.
-
-### 3. Configure
-
+**4. Start**
 ```bash
-cp face-service/.env.example  face-service/.env
-cp plate-service/.env.example plate-service/.env
+docker compose up -d --build          # the modules in COMPOSE_PROFILES + shared services
+docker compose ps
 ```
 
-Edit at least these:
-
-- `AI_BASE_IMAGE`: your base image tag.
-- `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`: **must be identical in
-  both `.env` files** if both modules share the one MinIO from step 4.
-  The two examples ship different defaults.
-- `DETECTION_DEVICE`: `auto`, `cpu` or `cuda:0`.
-
-### 4. Start (the shared network and Redis/MinIO once, then the modules)
-
+**5. Check it**
 ```bash
-docker network create eyeplate_net                                  # once, ever
-
-cd face-service
-docker compose -f compose.infra.yaml up -d                          # redis + minio (shared by all modules)
-docker compose up -d --build                                        # mediamtx, camera_stream, face_detector,
-                                                                     # gallery_seed, face_recognizer, control_hub
-cd ../plate-service
-docker compose up -d --build                                        # ..., plate_detector, plate_ocr, control_hub
+curl localhost:8010/health     # face detector       (plate: 8110, heatmap: 8002, fire: 8012)
+curl localhost:8020/health     # face control hub    (plate: 8021)
+curl localhost:9997/v3/paths/list    # relay paths — one per physical camera
+docker compose logs -f camera_stream
 ```
+Each module's `redis_tools.py` still stands in for the backend. For
+example, `cd plate-service && python3 redis_tools.py set-camera ...` and
+then `activate`.
 
-`compose.infra.yaml` is the same stack in both folders, so start it
-from only one of them. If the platform already runs Redis/MinIO, skip
-it and point `REDIS_*` / `MINIO_*` in `.env` at those instead.
-
-**Running face and plate on the same laptop.** Both stacks publish the
-same host ports by default. In `plate-service/.env`, move them:
-
-```
-RTSP_PORT=8654
-WEBRTC_PORT=8989
-WEBRTC_ICE_UDP_PORT=8289
-HLS_PORT=8988
-MTX_API_PORT=9998
-RTMP_PORT=2935
-DETECTOR_API_PORT=8110
-OCR_API_PORT=8111
-# HUB_API_PORT is already 8021 for plate, vs 8020 for face
-```
-
-### 5. Check it's alive
-
+## Tests (no GPU or models needed)
 ```bash
-docker compose ps                       # everything "running"/"healthy" (detector/recognizer take ~2 min to warm up)
-curl localhost:8010/health              # detector
-curl localhost:8011/health              # recognizer / OCR
-curl localhost:8020/health              # face control hub   (plate: 8021)
+pip install redis httpx numpy opencv-python-headless scipy pillow
+python3 camera-service/tests/test_camera_stream.py      # needs redis-server; else skipped
+for m in face-service plate-service; do (cd $m && python3 tests/run_all.py && python3 control-hub/tests/run_all.py); done
 ```
 
-Point a camera at it and watch the results:
-
-```bash
-cd face-service
-python3 -c "import redis_tools as rt; rt.ensure_camera_active('1', 'rtsp://user:pass@CAMERA_IP:554/...')"
-python3 -c "import redis_tools as rt; rt.watch_results(120)"      # destructive: pops what the backend would read
-
-cd ../plate-service
-python3 redis_tools.py set-camera --id 1 --address "rtsp://..." --roi 0 0 1 1 --line 100 400 900 400
-python3 redis_tools.py activate --id 1
-
-python3 control-hub/hub_tools.py tracks     # read-only views of this module's hub
-python3 control-hub/hub_tools.py tail
-python3 control-hub/hub_tools.py results -n 3
-```
-
-Annotated debug videos land in `face-service/debug/` and
-`plate-service/debug_video/` (see each module's `DEBUGGING.md`). The
-per-track overlay shows the hub's current answer and whether it's
-satisfied.
-
-### 6. Tests (no GPU, no models needed)
-
-```bash
-pip install redis numpy opencv-python-headless scipy pillow
-for m in face-service plate-service; do
-  (cd $m && python3 tests/run_all.py && python3 control-hub/tests/run_all.py)
-done   # hub end-to-end tests run against redis-server if it is installed, else skip
-```
-
-
-## Updating a running deployment
-
-- Rebuild and restart the module's detector, worker and control hub together
-  (`docker compose up -d --build`). The detector and the worker must
-  agree on the new task/result routing. A worker that receives a task
-  from an old detector (no `track_uid`) still answers it the old way,
-  so a short overlap is harmless.
-- The first time the control hub starts, it only processes events
-  created from that moment on.
-- Removed variables (safe to delete from `.env`): face
-  `PERIODIC_MODE`, `PERIODIC_FRAME_INTERVAL`, `PERIODIC_TIME_INTERVAL`,
-  `PERIODIC_RECOG_CONF_THRESH`; plate `OCR_CONF_SKIP_THRESHOLD`,
-  `OCR_FINALIZE_TIMEOUT_SEC`. The replacements are `FACE_*` / `PLATE_*`
-  in the control-hub section of each module's `.env.example`.
+## For the backend
+- **Adding or changing a camera** works as before: write
+  `<module>:cameras:config`, then publish `<module>:camera:config:updated`.
+  camera_stream also rescans every 30 s, so a missed nudge isn't lost.
+- **Live view** uses `stream_url` from `<module>:cameras:details`. It is
+  now `STREAM_BASE_URL/<relay_path>/` instead of `/<camera_id>/`.
+- **Joining the network:** the suite network is `eyeplate_net`
+  (`SHARED_NETWORK`). Attach backend containers to it as an external network.

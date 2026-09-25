@@ -49,6 +49,7 @@ from config import (
 from heatmapcore.bus import RedisBus
 from heatmapcore.active_state import ActiveCameraState
 from heatmapcore.lifecycle import ServiceLifecycle
+from heatmapcore.relay import relay_path_for
 from engine import EngineManager, CameraState
 
 logging.basicConfig(
@@ -266,9 +267,13 @@ def create_app() -> FastAPI:
         logger.info("Stopped camera %s", camera_id)
         return {"camera_id": camera_id, "status": ret.get("status", "stopped")}
 
-    def _rtsp_url(camera_id: str) -> str:
-        """Frames always come from the relay, never from the camera directly."""
-        return f"{MTX_RTSP_BASE_URL.rstrip('/')}/{camera_id}"
+    def _rtsp_url(camera_id: str, info: Optional[dict] = None) -> str:
+        """Frames always come from the suite's shared relay, never from the
+        camera directly. Path = camera_stream's relay_path for the camera
+        (heatmapcore/relay.py): one path per physical camera."""
+        info = info or {}
+        path = info.get("relay_path") or relay_path_for(camera_id, info.get("address"))
+        return f"{MTX_RTSP_BASE_URL.rstrip('/')}/{path}"
 
     # ================================================================
     # Offline grace period
@@ -348,7 +353,7 @@ def create_app() -> FastAPI:
                         bus.send_response(request_id, status="OK")
                         continue
 
-                    _start_camera(camera_id, _rtsp_url(camera_id), _roi_tuple(roi_dict))
+                    _start_camera(camera_id, _rtsp_url(camera_id, details), _roi_tuple(roi_dict))
                     bus.send_response(request_id, status="OK")
 
                 elif action == "deactivated":
@@ -396,7 +401,7 @@ def create_app() -> FastAPI:
                 stored = active_state.all_active().get(camera_id) or {}
                 roi_dict = stored.get("roi") or {}
 
-            _start_camera(camera_id, _rtsp_url(camera_id), _roi_tuple(roi_dict))
+            _start_camera(camera_id, _rtsp_url(camera_id, payload), _roi_tuple(roi_dict))
 
         else:
             if not _is_running(camera_id):
@@ -420,7 +425,7 @@ def create_app() -> FastAPI:
                     logger.info("Camera %s is active but currently offline — waiting for its online event", camera_id)
                     continue
                 roi_dict = entry.get("roi") or details.get("roi") or {}
-                _start_camera(camera_id, _rtsp_url(camera_id), _roi_tuple(roi_dict))
+                _start_camera(camera_id, _rtsp_url(camera_id, details), _roi_tuple(roi_dict))
             except Exception as e:
                 logger.error("Failed to restore camera %s: %s", camera_id, e)
 
@@ -594,7 +599,7 @@ def create_app() -> FastAPI:
         _cancel_pending_offline(camera_id)
         _stop_camera(camera_id)
 
-        video_source = (request.video_path or "").strip() or _rtsp_url(camera_id)
+        video_source = (request.video_path or "").strip() or _rtsp_url(camera_id, bus.get_camera_details(camera_id))
         roi = (float(request.roi_x), float(request.roi_y), float(request.roi_width), float(request.roi_height))
         _validate_source(video_source)
 

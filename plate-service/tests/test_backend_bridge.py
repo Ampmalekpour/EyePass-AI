@@ -68,9 +68,18 @@ class BuildCameraJobTests(unittest.TestCase):
         self.assertEqual(job.stop_roi[2], (650.0, 550.0))  # x+w, y+h corner
         self.assertTrue(job.cross_line_trig)
         self.assertTrue(job.stop_roi_trig)
-        # video_path always the mediamtx relay, never cfg["address"] directly.
-        self.assertIn("/1", job.video_path)
+        # video_path is always the shared relay, never cfg["address"]
+        # directly — on the one relay path per physical camera that the
+        # suite's camera_stream registers (platecore/relay.py).
+        from platecore.relay import relay_path_for
+        self.assertTrue(job.video_path.endswith("/" + relay_path_for("1", "rtsp://cam/1")))
         self.assertTrue(job.video_path.startswith("rtsp://"))
+        self.assertNotIn("rtsp://cam/1", job.video_path)
+
+    def test_relay_path_from_details_wins(self):
+        from backend_bridge import rtsp_url
+        self.assertTrue(rtsp_url("1", {"relay_path": "cam_abc", "address": "rtsp://x"}).endswith("/cam_abc"))
+        self.assertTrue(rtsp_url("1", {}).endswith("/1"))   # nothing known: camera id
 
     def test_missing_optional_fields_default_safely(self):
         job = build_camera_job("2", {"address": "rtsp://cam/2"})
