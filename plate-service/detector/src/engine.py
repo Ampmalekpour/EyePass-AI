@@ -154,6 +154,22 @@ def _apply_roi(frame: np.ndarray, roi: Tuple[float, float, float, float]) -> Tup
     return frame[y1:y2, x1:x2], (x1, y1, x2, y2)
 
 
+def to_frame_pixels(points, W: int, H: int):
+    """Line / polygon points -> full-frame pixel coordinates.
+
+    Accepts fractions of the frame (every coordinate within 0..1) or
+    pixel coordinates (anything larger). Returns (points_px, mode) with
+    mode "fractions" | "pixels" | "invalid". An all-zero shape (trigger
+    not configured) stays all zeros."""
+    try:
+        pts = [(float(p[0]), float(p[1])) for p in points]
+    except Exception:
+        return tuple((0.0, 0.0) for _ in range(len(points) if hasattr(points, "__len__") else 2)), "invalid"
+    if all(0.0 <= v <= 1.0 for pt in pts for v in pt):
+        return tuple((x * W, y * H) for x, y in pts), "fractions"
+    return tuple(pts), "pixels"
+
+
 # --------------------------------------------------------------------
 # Engine process (one per detection worker)
 # --------------------------------------------------------------------
@@ -810,36 +826,26 @@ class Engine:
                         f"tracks={len(cam.get('track_meta', {}))} reconnects={reader_stats['reconnects']}"
                     )
 
-                # NOTE: line_points / stop_roi are treated as NORMALIZED
-                # [0..1] fractions of the frame here, matching the
-                # reference video_processor.py exactly. If the values
-                # your `cameras:config` sends are raw pixel coordinates
-                # (as e.g. redis_tools.py's docstring describes), this
-                # ported-as-is math will scale them a second time. This
-                # mismatch already existed in the reference pipeline —
-                # it is preserved here rather than silently "fixed", so
-                # behavior does not change under this rewrite. Worth a
-                # deliberate look before going live if line-cross/stop-
-                # ROI triggers seem to never fire.
+                # line_points / stop_roi arrive either as fractions of the
+                # frame (0..1, what the reference video_processor.py
+                # assumed) or as pixel coordinates (what redis_tools.py
+                # and the backend send). They used to be ALWAYS scaled by
+                # the frame size, so pixel coordinates landed far outside
+                # the frame and line-cross / stop-ROI never fired.
+                # to_frame_pixels() decides per shape: all values <= 1 ->
+                # fractions, otherwise already pixels.
                 if cam.get("line_points_px") is None or cam.get("stop_roi_px") is None:
                     H, W = frame.shape[:2]
                     if cam.get("line_points_px") is None:
                         lp = cam.get("line_points", ((0, 0), (0, 0)))
-                        try:
-                            cam["line_points_px"] = (
-                                (float(lp[0][0]) * W, float(lp[0][1]) * H),
-                                (float(lp[1][0]) * W, float(lp[1][1]) * H),
-                            )
-                        except Exception:
-                            cam["line_points_px"] = ((0, 0), (0, 0))
-                        self.logger.info(f"Camera {camera_id}: line_points normalized={lp} -> pixel={cam['line_points_px']} (frame {W}x{H})")
+                        cam["line_points_px"], mode = to_frame_pixels(lp, W, H)
+                        self.logger.info(f"Camera {camera_id}: line_points {lp} read as {mode} -> "
+                                         f"pixel={cam['line_points_px']} (frame {W}x{H})")
                     if cam.get("stop_roi_px") is None:
                         sr = cam.get("stop_roi", ((0, 0), (0, 0), (0, 0), (0, 0)))
-                        try:
-                            cam["stop_roi_px"] = tuple((float(p[0]) * W, float(p[1]) * H) for p in sr)
-                        except Exception:
-                            cam["stop_roi_px"] = ((0, 0), (0, 0), (0, 0), (0, 0))
-                        self.logger.info(f"Camera {camera_id}: stop_roi normalized={sr} -> pixel={cam['stop_roi_px']} (frame {W}x{H})")
+                        cam["stop_roi_px"], mode = to_frame_pixels(sr, W, H)
+                        self.logger.info(f"Camera {camera_id}: stop_roi {sr} read as {mode} -> "
+                                         f"pixel={cam['stop_roi_px']} (frame {W}x{H})")
 
                 roi_frame, (rx1, ry1, rx2, ry2) = _apply_roi(frame, cam["roi"])
                 frames.append(roi_frame)

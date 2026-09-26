@@ -168,5 +168,28 @@ class PlateEngineHubTests(unittest.TestCase):
         self.assertEqual(flags, {"periodic": False, "cross_line": True, "stop_roi": True, "leave_scene": True})
 
 
+class FramePixelsTests(unittest.TestCase):
+    """Line / stop-ROI coordinates: fractions and pixels both land on the
+    frame (pixels used to be scaled a second time, so triggers never fired)."""
+
+    def test_pixels_kept(self):
+        pts, mode = engine_mod.to_frame_pixels(((100, 400), (900, 400)), 1920, 1080)
+        self.assertEqual(mode, "pixels")
+        self.assertEqual(pts, ((100.0, 400.0), (900.0, 400.0)))
+
+    def test_fractions_scaled(self):
+        pts, mode = engine_mod.to_frame_pixels(((0.1, 0.5), (0.9, 0.5)), 1920, 1080)
+        self.assertEqual(mode, "fractions")
+        self.assertEqual(pts, ((192.0, 540.0), (1728.0, 540.0)))
+
+    def test_unconfigured_stays_zero(self):
+        pts, _ = engine_mod.to_frame_pixels(((0, 0), (0, 0), (0, 0), (0, 0)), 1920, 1080)
+        self.assertEqual(pts, ((0.0, 0.0),) * 4)
+
+    def test_garbage_is_harmless(self):
+        pts, mode = engine_mod.to_frame_pixels((("a", None), (1, 2)), 1920, 1080)
+        self.assertEqual(mode, "invalid")
+
+
 if __name__ == "__main__":
     unittest.main()

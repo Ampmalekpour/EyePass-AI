@@ -126,9 +126,10 @@ _RESTART_CMDS = {
 
 def set_camera(camera_id, address, title="Camera", usage="plate",
                 roi=(0.0, 0.0, 1.0, 1.0), line=None, stop_roi=None):
-    """roi: (x, y, w, h) normalized 0..1. line: (x1, y1, x2, y2) in pixel
-    coords, or None to disable the cross-line trigger. stop_roi: (x, y,
-    w, h) in pixel coords, or None to disable the stop-ROI trigger."""
+    """roi: (x, y, w, h) normalized 0..1. line: (x1, y1, x2, y2) and
+    stop_roi: (x, y, w, h) either in pixel coords of the camera frame or
+    as fractions 0..1 (the detector tells them apart), or None to
+    disable that trigger."""
     camera_id = str(camera_id)
     cfg = {
         "id": camera_id, "title": title, "address": address, "usage": usage,
@@ -142,6 +143,9 @@ def set_camera(camera_id, address, title="Camera", usage="plate",
         cfg["stop_roi"] = {"x": x, "y": y, "w": w, "h": h}
 
     r.hset(CFG_HASH, camera_id, json.dumps(cfg, ensure_ascii=False))
+    # tell camera_stream, exactly like the backend does, so it picks the
+    # camera up now instead of on its next restart
+    r.publish(f"{MODULE_KEY}:camera:config:updated", camera_id)
     print(f"[set-camera] wrote {CFG_HASH}[{camera_id}] = {json.dumps(cfg)}")
 
 
