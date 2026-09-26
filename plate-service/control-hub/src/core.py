@@ -349,8 +349,12 @@ class HubCore:
         st["revision"] = int(st.get("revision") or 1) + 1
         st["missing_tasks"] = [t for t in st.get("missing_tasks") or [] if t != data.get("task_id")]
         fx.publish.append(self._final(st, now, "late_result"))
-        self.log.warning("uid=%s: late result %s (+%.1fs) changed the answer %s -> %s — final re-published "
-                         "as revision %d", st["uid"], data.get("task_id"), late_by, before, after, st["revision"])
+        self.log.warning(
+            "🧟📤 uid=%s cam=%s track=%s LATE RESULT after track closed (%.1fs ago, end_reason=%s) "
+            "— re-dispatching to plate:vehicle:results | task=%s answer %s -> %s | revision now %d",
+            st["uid"], st.get("camera_id"), st.get("track_id"), late_by, (st.get("end") or {}).get("reason"),
+            data.get("task_id"), before, after, st["revision"],
+        )
         return fx
 
     def _final(self, st, now, resolution: str) -> Dict[str, Any]:
@@ -380,7 +384,13 @@ class HubCore:
                     fx.save.add(uid)
                 continue
             if now - st["last_event_ts"] >= self.cfg.track_stale_sec:
-                self.log.warning("uid=%s: no events for %.0fs — ending as stale", uid, now - st["last_event_ts"])
+                self.log.warning(
+                    "⏱️💀 uid=%s cam=%s track=%s STALE — no events for %.0fs (limit=%.0fs), "
+                    "forcing track end | seen=%s crops=%s in_flight=%s",
+                    uid, st.get("camera_id"), st.get("track_id"),
+                    now - st["last_event_ts"], self.cfg.track_stale_sec,
+                    st.get("seen_frames"), st.get("n_crops"), list(st.get("in_flight") or {}),
+                )
                 fx.merge(self._end(st, {"reason": "stale"}, now))
                 fx.save.add(uid)
                 continue
@@ -481,10 +491,15 @@ class HubCore:
             st["final_published"] = True
             self.stats["published_finals"] += 1
             decision = self.policy.resolve(st)
-            self.log.info("uid=%s cam=%s track=%s -> FINAL (%s) seen=%s crops=%s results=%d display=%s",
-                          st["uid"], st.get("camera_id"), st.get("track_id"),
-                          (st.get("end") or {}).get("reason"), st.get("seen_frames"), st.get("n_crops"),
-                          len(st["results"]), self.policy.display(st, decision))
+            reason = (st.get("end") or {}).get("reason")
+            emoji = "☠️📤" if reason == "stale" else "✅📤"
+            self.log.info(
+                "%s uid=%s cam=%s track=%s -> FINAL DISPATCHED to plate:vehicle:results | reason=%s "
+                "seen=%s crops=%s results=%d display=%s gate_ok=%s published_any=%s",
+                emoji, st["uid"], st.get("camera_id"), st.get("track_id"), reason,
+                st.get("seen_frames"), st.get("n_crops"), len(st["results"]),
+                self.policy.display(st, decision), gate_ok, st.get("published_any"),
+            )
         else:
             self.stats["dropped_tracks"] += 1
             self.log.info("uid=%s cam=%s track=%s DROPPED (seen=%s/%s crops=%s/%s, nothing published)",

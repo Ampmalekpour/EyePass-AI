@@ -344,7 +344,8 @@ class OcrWorker(mp.Process):
         if len(s_compact) != 8:
             return False, f"invalid length ({len(s_compact)}) instead of 8", ""
 
-        letters = "بجلمنیسصقدطعهالف"
+        #letters = "بجلمنیسصقدطعهالف"
+        letters = "ابتثجپدذرزسشصضطظعغفقکگلمنوهیالف"
         if not re.fullmatch(rf"\d{{2}}[{letters}]\d{{3}}\d{{2}}", s_compact):
             return False, "pattern mismatch (expected ##<PersianLetter>### ##)", ""
 
