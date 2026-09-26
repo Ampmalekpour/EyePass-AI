@@ -13,5 +13,9 @@ debug_ocr/
 __pycache__/
 *.pyc
 
+# local test videos fed to video_publisher (test-video profile) — operator
+# supplied, not source; e.g. test_video.mp4, video2.mp4
+*.mp4
+
 # env (keep .env.example, not the real .env with secrets)
 .env
