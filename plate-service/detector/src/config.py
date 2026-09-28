@@ -60,8 +60,15 @@ MTX_RTSP_BASE_URL = os.getenv("MTX_RTSP_BASE_URL", "rtsp://mediamtx:8554")
 # regression from a container-wide OMP_NUM_THREADS=1 leftover from the
 # old per-process model; see git history / the earlier debugging
 # session if you want to revisit OpenVINO later). "auto" tries CUDA
-# first and falls back to CPU; each engine subprocess resolves this
-# independently so the parent process never touches CUDA.
+# first and falls back to CPU. Every engine subprocess resolves this
+# independently for itself (source of truth for what IT runs on);
+# main.py also resolves it once, read-only, in the parent purely to
+# plan engine topology (see cpu_topology.py) before any engine is
+# spawned — spawned children get a fresh interpreter either way (this
+# module uses mp.get_context("spawn"), never fork), so that read-only
+# torch.cuda.is_available() probe in the parent carries none of the
+# fork-time CUDA-context hazards this comment used to warn about. The
+# parent still never builds a model or runs inference itself.
 DETECTION_DEVICE = os.getenv("DETECTION_DEVICE", "auto")
 STRICT_DEVICE = _bool("STRICT_DEVICE", "false")
 # Torch CPU threads PER ENGINE PROCESS. 0 = "cpu_count - 1" (leaves one
@@ -104,6 +111,52 @@ ENGINE_REBALANCE_INTERVAL_SEC = _float("ENGINE_REBALANCE_INTERVAL_SEC", 30.0)
 
 # How long to wait for engine subprocesses to exit cleanly on shutdown.
 ENGINE_SHUTDOWN_TIMEOUT_SEC = _float("ENGINE_SHUTDOWN_TIMEOUT_SEC", 30.0)
+
+# ============================================================================
+# 4b. CPU ENGINE TOPOLOGY (device == "cpu" only -- GPU always uses
+# MAX_CAMERAS_PER_ENGINE/TORCH_NUM_THREADS above, unmodified, since a GPU
+# wants bigger batches, not more processes). See cpu_topology.py for the
+# sizing model this feeds; main.py calls it once at startup, before the
+# EngineManager is constructed, to pick the actual max_cameras_per_engine
+# and TORCH_NUM_THREADS this process will run with.
+# ============================================================================
+# single -- unchanged prior behavior: one engine batches up to
+#           MAX_CAMERAS_PER_ENGINE cameras into one model.predict() call
+#           per loop iteration.
+# multi  -- one engine PROCESS per camera (CPU_MULTI_CAMERAS_PER_ENGINE,
+#           default 1): same Engine code, same DETECT_EVERY_N_FRAMES,
+#           same tracker config -- "recognition" is identical, only the
+#           OS-level scheduling differs (real parallelism across
+#           processes instead of in-process batching). Each engine's
+#           torch thread pool is capped low (CPU_MULTI_TORCH_THREADS)
+#           on purpose, so N concurrent single-camera processes don't
+#           each try to grab (cores-1) threads and oversubscribe.
+# auto   -- compute MAX_CAMERAS_PER_ENGINE for "single"-style batching
+#           from core count + the estimated per-camera cost below,
+#           instead of a hand-set cap.
+CPU_ENGINE_MODE = os.getenv("CPU_ENGINE_MODE", "single").strip().lower()
+
+# "multi" mode only:
+CPU_MULTI_CAMERAS_PER_ENGINE = _int("CPU_MULTI_CAMERAS_PER_ENGINE", 1)
+CPU_MULTI_TORCH_THREADS = _int("CPU_MULTI_TORCH_THREADS", 1)
+
+# "auto" mode only -- capacity-planning inputs:
+# cores held back for OS overhead + the per-camera RTSP capture/decode
+# threads (rtsp_reader.py), never handed to torch's intra-op pool.
+CPU_RESERVE_CORES = _int("CPU_RESERVE_CORES", 1)
+# Measured baseline cost of ONE camera's forward pass at the current
+# DETECTION_IMG_SIZE/model, with a full thread pool available (see the
+# detector's own [STATS] "infer avg" / batch_size in the logs — that's
+# where this number should come from, not a guess). Re-measure after
+# changing DETECTION_IMG_SIZE, the model file, or the CPU itself.
+CPU_MS_PER_CAMERA_FRAME = _float("CPU_MS_PER_CAMERA_FRAME", 28.0)
+# What a camera's real input fps is assumed to be, for turning the ms
+# estimate above into "how many cameras fit in one frame interval."
+CAMERA_ASSUMED_FPS = _float("CAMERA_ASSUMED_FPS", 25.0)
+# Fraction of the frame interval budgeted to inference alone, leaving
+# the rest for tracking/crop-harvesting/debug-video/OCR-submit work in
+# the same loop iteration. Lower = more conservative (fewer cameras/engine).
+CPU_AUTO_SAFETY_MARGIN = _float("CPU_AUTO_SAFETY_MARGIN", 0.7)
 
 # ============================================================================
 # 5. CAMERA HEALTH

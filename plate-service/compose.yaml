@@ -257,6 +257,21 @@ services:
       ENGINE_REBALANCE_INTERVAL_SEC: ${ENGINE_REBALANCE_INTERVAL_SEC:-30}
       ENGINE_SHUTDOWN_TIMEOUT_SEC: ${ENGINE_SHUTDOWN_TIMEOUT_SEC:-30}
 
+      # ---- CPU engine topology (device=="cpu" only; GPU always uses
+      # MAX_CAMERAS_PER_ENGINE above, unmodified) -- see cpu_topology.py.
+      # single = current behavior (one engine batches cameras together).
+      # multi  = one engine PROCESS per camera, same detection/tracker
+      #          settings, real OS-level parallelism instead of batching.
+      # auto   = compute max_cameras_per_engine from core count + the
+      #          measured per-camera cost below.
+      CPU_ENGINE_MODE: ${CPU_ENGINE_MODE:-single}
+      CPU_MULTI_CAMERAS_PER_ENGINE: ${CPU_MULTI_CAMERAS_PER_ENGINE:-1}
+      CPU_MULTI_TORCH_THREADS: ${CPU_MULTI_TORCH_THREADS:-1}
+      CPU_RESERVE_CORES: ${CPU_RESERVE_CORES:-1}
+      CPU_MS_PER_CAMERA_FRAME: ${CPU_MS_PER_CAMERA_FRAME:-28.0}
+      CAMERA_ASSUMED_FPS: ${CAMERA_ASSUMED_FPS:-25.0}
+      CPU_AUTO_SAFETY_MARGIN: ${CPU_AUTO_SAFETY_MARGIN:-0.7}
+
       # ---- camera health --------------------------------------------
       HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}
       CAMERA_OFFLINE_GRACE_SECONDS: ${CAMERA_OFFLINE_GRACE_SECONDS:-10}

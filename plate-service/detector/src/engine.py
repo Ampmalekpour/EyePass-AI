@@ -385,7 +385,18 @@ class Engine:
             return
 
         reader = RTSPStreamReader(url, camera_id).start()
-        tracker = BYTETracker(build_tracker_config())
+        # frame_rate scales BYTETracker's own step-counted lost-track
+        # buffer (track_buffer -> max_time_lost, see tracker.py) into
+        # real time. A tracker "step" only happens on a detect frame
+        # (tracker.update() is skipped entirely on coast frames — see
+        # the run loop), so with DETECT_EVERY_N_FRAMES=N each step now
+        # spans N camera frames of wall-clock time instead of 1; without
+        # this, a lost track would be kept around N times longer in real
+        # seconds than TRACKER_TRACK_BUFFER was tuned for. Passing the
+        # true step rate (camera fps / N) keeps that wall-clock window
+        # the same regardless of N.
+        step_rate = config.CAMERA_ASSUMED_FPS / max(1, config.DETECT_EVERY_N_FRAMES)
+        tracker = BYTETracker(build_tracker_config(), frame_rate=step_rate, name=camera_id)
 
         self.cameras[camera_id] = {
             "camera_id": camera_id, "url": url, "roi": roi,

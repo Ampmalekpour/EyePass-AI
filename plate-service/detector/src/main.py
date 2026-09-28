@@ -15,6 +15,7 @@ answers).
 
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -26,7 +27,9 @@ from platecore.health import serve_health
 from platecore.lifecycle import PHASE_STOPPED, ServiceLifecycle
 from platecore.logging_setup import setup_logger
 
+import cpu_topology
 from backend_bridge import DetectorBridge
+from engine import resolve_device
 from engine_manager import EngineManager
 
 logger = setup_logger("detector.main")
@@ -34,9 +37,34 @@ logger = setup_logger("detector.main")
 
 def main():
     logging.getLogger().setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
+
+    # Resolved once, here, in the parent process, purely to plan engine
+    # topology (a read-only torch.cuda.is_available() probe -- the
+    # parent never builds a model or runs inference itself). Each engine
+    # subprocess still calls resolve_device() again for itself in
+    # Engine.__init__, which remains the source of truth for what
+    # device IT actually runs on -- see config.py's DETECTION_DEVICE
+    # comment for why this is safe with spawn-based children.
+    # See cpu_topology.py: on a GPU box this is a no-op passthrough of
+    # the existing MAX_CAMERAS_PER_ENGINE/TORCH_NUM_THREADS config; on a
+    # CPU box, CPU_ENGINE_MODE (single/multi/auto) decides how many
+    # cameras share one engine process and how many torch threads each
+    # engine asks for.
+    planned_device = resolve_device(config.DETECTION_DEVICE, config.STRICT_DEVICE, logger)
+    topology = cpu_topology.plan(planned_device, logger)
+    max_cameras_per_engine = topology["max_cameras_per_engine"]
+    if topology["torch_num_threads"]:
+        # Engine subprocesses are spawned (mp.get_context("spawn")) after
+        # this point and inherit the parent's environment, so each one's
+        # own `config.TORCH_NUM_THREADS` read in Engine.__init__ picks
+        # this up without any change to the spawn call itself.
+        os.environ["TORCH_NUM_THREADS"] = str(int(topology["torch_num_threads"]))
+
     logger.info(
-        "Starting plate detector | device preference=%s | rtsp base=%s | max_cameras_per_engine=%d",
-        config.DETECTION_DEVICE, config.MTX_RTSP_BASE_URL, config.MAX_CAMERAS_PER_ENGINE,
+        "Starting plate detector | device preference=%s resolved=%s cpu_engine_mode=%s | "
+        "rtsp base=%s | max_cameras_per_engine=%d (was config default %d)",
+        config.DETECTION_DEVICE, planned_device, config.CPU_ENGINE_MODE,
+        config.MTX_RTSP_BASE_URL, max_cameras_per_engine, config.MAX_CAMERAS_PER_ENGINE,
     )
 
     bus = RedisBus(module=config.REDIS_MODULE)
@@ -59,7 +87,7 @@ def main():
         save_output=config.DEBUG_VIDEO_ENABLED,
         output_dir=config.DEBUG_VIDEO_DIR,
         class_labels=config.CLASS_LABELS,
-        max_cameras_per_engine=config.MAX_CAMERAS_PER_ENGINE,
+        max_cameras_per_engine=max_cameras_per_engine,
         on_topology_changed=on_topology_changed,
         engine_shutdown_timeout=config.ENGINE_SHUTDOWN_TIMEOUT_SEC,
     )
