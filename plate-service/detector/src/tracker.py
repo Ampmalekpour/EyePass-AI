@@ -1,97 +1,107 @@
 """
-plate_tracker.py  -  ByteTrack for the plate system  ("plates are not forgotten" edition)
+plate_tracker.py  -  ByteTrack for the plate system  ("plates are not forgotten" edition, v2)
 ====================================================================================
 
 WHY TRACKS WERE BEING LOST  (read this before touching the knobs)
 ------------------------------------------------------------------------------------
-Symptom you reported: a car is detected with good confidence (s0.86), the
-overlay says `dets 1 | tracks 0(+1 ghost)`, the track is `age 2f`, and the
-pipeline then logs `DROPPED: seen 7<8`. The plate is forgotten even though
-YOLO never stopped seeing the car.
+Symptom: a car is detected with good confidence (s0.86), the overlay says
+`dets 1 | tracks 0(+1 ghost)`, the track is `age 2f`, and the pipeline then
+logs `DROPPED: seen 7<8`. The plate is forgotten even though YOLO never
+stopped seeing the car.
 
-Stock ByteTrack has a two-tier track lifecycle:
+Stock ByteTrack has a two-tier lifecycle: a new track is "unconfirmed" and
+must match on the very next step or it is deleted. At ~9 engine fps on a
+25-30 fps stream every tracker step is ~3 camera frames of motion, and stock
+ByteTrack (a) never predicts unconfirmed tracks, (b) gives new tracks zero
+velocity and (c) kills them on the first miss - so fast cars cycle through
+fresh ids and never collect 8 seen frames.
 
-    frame N   : detection with no match  ->  activate() a NEW track
-                but `is_activated = False`  (it is "unconfirmed")
-    frame N+1 : the unconfirmed track must match a detection, or it is
-                `mark_removed()` - killed outright, no second chance.
+A speed bump is the worst case of the same thing. The car brakes before it
+(constant-velocity prediction overshoots), the box jolts up/down and changes
+shape as the car pitches (IoU collapses), and motion blur drops the detector
+confidence below track_thresh or loses the car for a step.
 
-Three things in the stock implementation conspire to kill those unconfirmed
-tracks on exactly the frames where a plate matters most:
-
-  (1) UNCONFIRMED TRACKS WERE NEVER PREDICTED.
-      `STrack.multi_predict(strack_pool)` is called on tracked + lost tracks.
-      `unconfirmed` is NOT in that pool, so a one-frame-old track is compared
-      against the next frame using its ORIGINAL box, with no motion applied at
-      all. At 30 fps a car barely moves in one frame and nobody notices. Your
-      engine loop runs at ~9 fps on a ~25-30 fps stream, so every tracker step
-      is 3 camera frames of real motion - and the comparison box is stale by
-      all 3 of them.
-
-  (2) A BRAND NEW TRACK HAS VELOCITY ZERO.
-      `KalmanFilter.initiate()` sets `mean_vel = zeros`. So even once (1) is
-      fixed, the very first prediction says "the car did not move", which is
-      the worst possible guess for a moving vehicle at a 3-frame step.
-
-  (3) THE UNCONFIRMED GATE IS THE STRICTEST GATE IN THE FILE, AND IT IS FATAL.
-      `linear_assignment(dists, thresh=0.7)` on a fuse_score cost means a match
-      needs `iou * det_score >= 0.30`; at score 0.86 that is `iou >= 0.35`.
-      Miss it once and the track is removed permanently. The next frame the
-      same car starts a fresh track id, which then faces the same gauntlet.
-      A car can cycle through this repeatedly and never accumulate the 8
-      `seen_frames` that `_finalize_or_drop_track()` requires - hence
-      `DROPPED: seen 7<8` on a car that was visible the whole time.
-
-A bump/jolt is simply the worst case of the same mechanism: the box jumps
-further than usual in one step, IoU collapses, and a young track dies.
-
-WHAT THIS VERSION CHANGES
+v1 FIXES  (kept)
 ------------------------------------------------------------------------------------
-  FIX 1  Unconfirmed tracks are predicted with the Kalman filter like every
-         other track.                                     -> predict_unconfirmed
-  FIX 2  Brand-new tracks seed their velocity from the first observed
-         displacement instead of starting at zero, and start with a wider
-         velocity covariance.        -> seed_velocity_on_first_update / vel_std_scale
-  FIX 3  An unconfirmed track that misses gets a grace period instead of being
-         deleted, and its gate is loosened.   -> unconfirmed_max_miss / unconfirmed_thresh
-  FIX 4  Real elapsed time per step. `update(..., dt=N)` tells the filter how
-         many camera frames actually passed, so skipped frames stop corrupting
-         the motion model.                                              -> dt
-  FIX 5  A recovery association pass that does not need IoU overlap at all:
-         expanded-box IoU + centre distance normalised by box height + shape
-         similarity, with a gate that widens the longer a track has been
-         missing. This is what rescues the "box jumped, zero overlap, same car"
-         case.                                                 -> recovery_*
-  FIX 6  Camera-jolt compensation (GMC-lite): the median residual of the tracks
-         that DID match estimates a global image shift, which is applied to the
-         unmatched tracks before the recovery pass. When the camera shakes,
-         every box moves together, and the matched boxes reveal by how much.
-                                                                        -> gmc_*
-  FIX 7  `removed_stracks` no longer grows without bound (stock ByteTrack leaks
-         it forever and re-scans it every frame).           -> max_removed_history
-  FIX 8  Logging and counters, in the same tag style as video_processor.py:
-         [TRK-NEW] [TRK-CONFIRM] [TRK-LOST] [TRK-REFIND] [TRK-REMOVE] [GMC].
-         `[TRK-REMOVE] reason=unconfirmed_expired` is literally a forgotten
-         plate - if you still see those, raise unconfirmed_max_miss.
-         `get_stats()` returns the counters for a periodic summary line.
+  FIX 1  unconfirmed tracks are Kalman-predicted          -> predict_unconfirmed
+  FIX 2  new tracks get a velocity from their first displacement
+                                  -> seed_velocity_on_first_update / new_track_vel_std_scale
+  FIX 3  unconfirmed tracks get a grace period             -> unconfirmed_max_miss
+  FIX 4  real elapsed time per step                        -> update(..., dt=N)
+  FIX 5  overlap-free recovery association                 -> recovery_*
+  FIX 6  camera-jolt compensation from box evidence        -> gmc_*
+  FIX 7  bounded removed_stracks                           -> max_removed_history
+  FIX 8  tagged logging + get_stats()
+
+v2  BUG FIXES
+------------------------------------------------------------------------------------
+  B1  Velocity seeding counted the motion twice. The displacement was ADDED to
+      the velocity and then the Kalman update added its own correction for the
+      same innovation, so a new track left with ~1.7x its real speed and
+      overshot on exactly the step that decides whether it survives.
+      Now the filter updates first and the seed OVERWRITES the velocity.
+  B2  Lost tracks were only ever compared at their *predicted* box, which keeps
+      flying forward at the old speed. Cars slow down for bumps, so the
+      prediction ran away from the car. Recovery now scores both the predicted
+      box and the last box the detector actually saw, and keeps the better.
+  B3  The camera-shake vote counted (track, detection) PAIRS. Two fragments of
+      the SAME car (an old lost track + a new one) produced two agreeing votes
+      and a single moving car was mistaken for a camera jolt. Support is now
+      counted in distinct tracks AND distinct detections. The matched-track
+      estimate also fired on almost every frame (any shift > 1 px, fed by
+      brand-new tracks whose "residual" is just their own motion); it now needs
+      established tracks, agreeing residuals and a shift of >= 8% of a box
+      height.                                            -> gmc_min_shift_ratio
+  B4  Unit mix-up: with dt given in camera frames, the recovery gate grew per
+      camera frame instead of per step (~3x too fast at 9 fps) and
+      reseed_after_gap fired after a single miss. Gates now use tracker steps;
+      only the motion model uses dt.
+  B5  A detection with score exactly == track_thresh was silently discarded
+      (neither high nor low tier).
+  B6  Wide-gate recovery for lost tracks ran BEFORE young tracks got their
+      plain-IoU match, so a lost track could steal a young track's detection.
+      Young tracks now get their IoU match first, and recovery runs once,
+      jointly, for everything that is left.
+
+v2  BUMP ROBUSTNESS
+------------------------------------------------------------------------------------
+  R1  Low-score detections (motion blur on the bump) can now keep young tracks
+      alive, and a strict low-score recovery pass rescues tracked cars whose
+      blurred box also jumped.                              -> low_recovery_*
+  R2  Observation-centric re-update (from OC-SORT). When a track comes back
+      after missing steps its coasted velocity is garbage; the gap is replayed
+      with interpolated observations so the velocity is right immediately.
+                                                                -> oru_enabled
+  R3  Tracks that left the frame are removed instead of lingering for the full
+      buffer with a wide gate, where they could grab the next car arriving at
+      the same edge (this was the main source of ID switches).
+                                                              -> remove_exited
+  R4  Recovery refuses pairs whose size differs by more than 2x.
+                                                     -> recovery_min_size_ratio
+
+LOG TAGS
+------------------------------------------------------------------------------------
+  [TRK-NEW] [TRK-CONFIRM] [TRK-LOST] [TRK-REFIND via=iou|low|recovery|
+  recovery-low|recovery-young] [TRK-COAST] [TRK-REMOVE] [GMC]
+  `[TRK-REMOVE] reason=unconfirmed_expired` is literally a forgotten plate.
 
 TO GO BACK TO STOCK BYTETRACK BEHAVIOUR (for an A/B comparison) set:
     predict_unconfirmed=False, seed_velocity_on_first_update=False,
     new_track_vel_std_scale=1.0, unconfirmed_thresh=0.7, unconfirmed_max_miss=0,
-    recovery_enabled=False, gmc_enabled=False
+    recovery_enabled=False, low_recovery_enabled=False, gmc_enabled=False,
+    oru_enabled=False, remove_exited=False
 ...and call update() without dt.
 
 INTERFACE  (unchanged - drop-in for yolox.tracker.byte_tracker)
 ------------------------------------------------------------------------------------
     BYTETracker(args, frame_rate=30, name=None)
         args needs .track_thresh .match_thresh .track_buffer .mot20
-        (the existing TrackerConfig in video_processor.py already provides
-        these; every new knob is read with getattr() and has a default, so
-        nothing in video_processor.py has to change)
+        every other knob is read with getattr() and has a default
     tracker.update(output_results, img_info, img_size, dt=None) -> list[STrack]
         output_results: Nx6  [x1, y1, x2, y2, score, class_id]
         dt: optional, how many camera frames elapsed since the last update
     each returned STrack exposes .track_id .score .flag_fdf .detbb .tlwh .tlbr
+    `lap` is used when installed; otherwise scipy does the assignment.
 """
 
 import logging
@@ -99,7 +109,12 @@ from collections import OrderedDict, deque
 
 import numpy as np
 import scipy.linalg
-import lap
+from scipy.optimize import linear_sum_assignment as _scipy_lsa
+
+try:
+    import lap as _lap
+except Exception:  # pragma: no cover
+    _lap = None
 
 try:
     from cython_bbox import bbox_overlaps as _bbox_ious_cython
@@ -110,7 +125,7 @@ except Exception:  # pragma: no cover - fallback keeps the file usable anywhere
 logger = logging.getLogger("plate_tracker")
 
 # Cost value used for pairs that a hard gate rejected. Must stay far above any
-# association threshold so lap.lapjv can never pick it.
+# association threshold so the assignment can never pick it.
 _REJECT = 1e5
 
 
@@ -189,37 +204,15 @@ chi2inv95 = {
 
 
 # ====================================================================
-# Kalman filter
-#
-# Same 8-state constant-velocity model as before (x, y, a, h + velocities).
-# Two changes vs the reference implementation:
-#   * predict()/multi_predict() take a real `dt` (in tracker steps) so that
-#     skipped camera frames advance the motion model correctly, and the
-#     process noise grows with dt instead of pretending every step is equal.
-#   * initiate() can widen the initial velocity uncertainty, so a brand new
-#     track does not fight its first real measurement.
+# Kalman filter  (8-state constant velocity: x, y, a, h + velocities)
+# predict()/multi_predict() take a real dt; initiate() can widen the
+# initial velocity uncertainty.
 # ====================================================================
 class KalmanFilter(object):
-    """
-    A simple Kalman filter for tracking bounding boxes in image space.
-
-    The 8-dimensional state space
-
-        x, y, a, h, vx, vy, va, vh
-
-    contains the bounding box center position (x, y), aspect ratio a, height h,
-    and their respective velocities.
-
-    Object motion follows a constant velocity model. The bounding box location
-    (x, y, a, h) is taken as direct observation of the state space (linear
-    observation model).
-    """
-
     def __init__(self):
         ndim, dt = 4, 1.
         self._ndim = ndim
 
-        # Create Kalman filter model matrices.
         self._motion_mat = np.eye(2 * ndim, 2 * ndim)
         for i in range(ndim):
             self._motion_mat[i, ndim + i] = dt
@@ -228,9 +221,6 @@ class KalmanFilter(object):
         # motion matrices for non-unit dt, built on demand and cached
         self._motion_mat_cache = {1.0: self._motion_mat}
 
-        # Motion and observation uncertainty are chosen relative to the current
-        # state estimate. These weights control the amount of uncertainty in
-        # the model. This is a bit hacky.
         self._std_weight_position = 1. / 20
         self._std_weight_velocity = 1. / 160
 
@@ -239,6 +229,8 @@ class KalmanFilter(object):
         dt = float(dt)
         mat = self._motion_mat_cache.get(dt)
         if mat is None:
+            if len(self._motion_mat_cache) > 256:   # dt from timestamps can be anything
+                self._motion_mat_cache = {1.0: self._motion_mat}
             ndim = self._ndim
             mat = np.eye(2 * ndim, 2 * ndim)
             for i in range(ndim):
@@ -247,24 +239,6 @@ class KalmanFilter(object):
         return mat
 
     def initiate(self, measurement, vel_std_scale=1.0):
-        """Create track from unassociated measurement.
-
-        Parameters
-        ----------
-        measurement : ndarray
-            Bounding box coordinates (x, y, a, h) with center position (x, y),
-            aspect ratio a, and height h.
-        vel_std_scale : float
-            Multiplier on the initial velocity uncertainty. > 1 tells the
-            filter "I have no idea how fast this thing is going", which lets
-            the first measurement move the velocity estimate much further.
-            (FIX 2)
-
-        Returns
-        -------
-        (ndarray, ndarray)
-            Mean vector (8 dim) and covariance matrix (8x8) of the new track.
-        """
         mean_pos = measurement
         mean_vel = np.zeros_like(mean_pos)
         mean = np.r_[mean_pos, mean_vel]
@@ -283,7 +257,6 @@ class KalmanFilter(object):
         return mean, covariance
 
     def predict(self, mean, covariance, dt=1.0):
-        """Run Kalman filter prediction step (single track, arbitrary dt)."""
         dt = float(dt)
         std_pos = [
             self._std_weight_position * mean[3],
@@ -295,17 +268,14 @@ class KalmanFilter(object):
             self._std_weight_velocity * mean[3],
             1e-5,
             self._std_weight_velocity * mean[3]]
-        # process noise accumulates with elapsed time (FIX 4)
         motion_cov = np.diag(np.square(np.r_[std_pos, std_vel])) * dt
 
         mm = self.motion_mat(dt)
         mean = np.dot(mean, mm.T)
         covariance = np.linalg.multi_dot((mm, covariance, mm.T)) + motion_cov
-
         return mean, covariance
 
     def project(self, mean, covariance):
-        """Project state distribution to measurement space."""
         std = [
             self._std_weight_position * mean[3],
             self._std_weight_position * mean[3],
@@ -319,7 +289,6 @@ class KalmanFilter(object):
         return mean, covariance + innovation_cov
 
     def multi_predict(self, mean, covariance, dt=1.0):
-        """Run Kalman filter prediction step (vectorized, arbitrary dt)."""
         dt = float(dt)
         std_pos = [
             self._std_weight_position * mean[:, 3],
@@ -333,20 +302,17 @@ class KalmanFilter(object):
             self._std_weight_velocity * mean[:, 3]]
         sqr = np.square(np.r_[std_pos, std_vel]).T * dt
 
-        motion_cov = []
-        for i in range(len(mean)):
-            motion_cov.append(np.diag(sqr[i]))
-        motion_cov = np.asarray(motion_cov)
+        motion_cov = np.zeros((len(mean), 8, 8))
+        idx = np.arange(8)
+        motion_cov[:, idx, idx] = sqr
 
         mm = self.motion_mat(dt)
         mean = np.dot(mean, mm.T)
         left = np.dot(mm, covariance).transpose((1, 0, 2))
         covariance = np.dot(left, mm.T) + motion_cov
-
         return mean, covariance
 
     def update(self, mean, covariance, measurement):
-        """Run Kalman filter correction step."""
         projected_mean, projected_cov = self.project(mean, covariance)
 
         chol_factor, lower = scipy.linalg.cho_factor(
@@ -363,7 +329,6 @@ class KalmanFilter(object):
 
     def gating_distance(self, mean, covariance, measurements,
                         only_position=False, metric='maha'):
-        """Squared Mahalanobis distance between a state and N measurements."""
         mean, covariance = self.project(mean, covariance)
         if only_position:
             mean, covariance = mean[:2], covariance[:2, :2]
@@ -377,8 +342,7 @@ class KalmanFilter(object):
             z = scipy.linalg.solve_triangular(
                 cholesky_factor, d.T, lower=True, check_finite=False,
                 overwrite_b=True)
-            squared_maha = np.sum(z * z, axis=0)
-            return squared_maha
+            return np.sum(z * z, axis=0)
         else:
             raise ValueError('invalid distance metric')
 
@@ -387,18 +351,40 @@ class KalmanFilter(object):
 # Assignment / cost helpers
 # ====================================================================
 def linear_assignment(cost_matrix, thresh):
-    if cost_matrix.size == 0:
+    """
+    Min-cost matching that leaves any pair costing more than `thresh`
+    unmatched (same semantics as lap.lapjv(extend_cost=True, cost_limit=thresh)).
+    """
+    cost_matrix = np.asarray(cost_matrix, dtype=float)
+    if cost_matrix.ndim != 2:
+        cost_matrix = cost_matrix.reshape(0, 0)
+    n, m = cost_matrix.shape
+    if n == 0 or m == 0:
         return (np.empty((0, 2), dtype=int),
-                tuple(range(cost_matrix.shape[0])),
-                tuple(range(cost_matrix.shape[1])))
-    matches, unmatched_a, unmatched_b = [], [], []
-    cost, x, y = lap.lapjv(cost_matrix, extend_cost=True, cost_limit=thresh)
-    for ix, mx in enumerate(x):
-        if mx >= 0:
-            matches.append([ix, mx])
-    unmatched_a = np.where(x < 0)[0]
-    unmatched_b = np.where(y < 0)[0]
-    matches = np.asarray(matches)
+                np.arange(n, dtype=int),
+                np.arange(m, dtype=int))
+
+    if _lap is not None:
+        _, x, y = _lap.lapjv(cost_matrix, extend_cost=True, cost_limit=thresh)
+    else:
+        # augmented square problem: every row/col may go to a dummy at thresh/2
+        half = float(thresh) / 2.0
+        C = np.zeros((n + m, n + m), dtype=float)
+        C[:n, :m] = np.minimum(cost_matrix, float(thresh) + 1.0)
+        C[:n, m:] = half
+        C[n:, :m] = half
+        r, c = _scipy_lsa(C)
+        x = -np.ones(n, dtype=int)
+        y = -np.ones(m, dtype=int)
+        for i, j in zip(r, c):
+            if i < n and j < m and cost_matrix[i, j] <= thresh:
+                x[i] = j
+                y[j] = i
+
+    matches = np.asarray([[i, int(j)] for i, j in enumerate(x) if j >= 0],
+                         dtype=int).reshape(-1, 2)
+    unmatched_a = np.where(np.asarray(x) < 0)[0]
+    unmatched_b = np.where(np.asarray(y) < 0)[0]
     return matches, unmatched_a, unmatched_b
 
 
@@ -410,12 +396,10 @@ def fuse_score(cost_matrix, detections):
     det_scores = np.array([det.score for det in detections])
     det_scores = np.expand_dims(det_scores, axis=0).repeat(cost_matrix.shape[0], axis=0)
     fuse_sim = iou_sim * det_scores
-    fuse_cost = 1 - fuse_sim
-    return fuse_cost
+    return 1 - fuse_sim
 
 
 def _ious_numpy(atlbrs, btlbrs):
-    """Vectorized IoU fallback when cython_bbox is unavailable."""
     a = np.asarray(atlbrs, dtype=float).reshape(-1, 4)
     b = np.asarray(btlbrs, dtype=float).reshape(-1, 4)
     if len(a) == 0 or len(b) == 0:
@@ -431,28 +415,18 @@ def _ious_numpy(atlbrs, btlbrs):
 
 
 def ious(atlbrs, btlbrs):
-    """
-    Compute IoU matrix.
-    :type atlbrs: list[tlbr] | np.ndarray
-    :type btlbrs: list[tlbr] | np.ndarray
-    :rtype ious np.ndarray
-    """
     out = np.zeros((len(atlbrs), len(btlbrs)), dtype=float)
     if out.size == 0:
         return out
-
     if _bbox_ious_cython is not None:
         return _bbox_ious_cython(
             np.ascontiguousarray(atlbrs, dtype=float),
-            np.ascontiguousarray(btlbrs, dtype=float)
-        )
+            np.ascontiguousarray(btlbrs, dtype=float))
     return _ious_numpy(atlbrs, btlbrs)
 
 
 def iou_distance(atracks, btracks):
-    """
-    Cost = 1 - IoU. Accepts either STrack lists or raw Nx4 tlbr arrays.
-    """
+    """Cost = 1 - IoU. Accepts either STrack lists or raw Nx4 tlbr arrays."""
     if (len(atracks) > 0 and isinstance(atracks[0], np.ndarray)) or \
        (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
         atlbrs = atracks
@@ -460,9 +434,7 @@ def iou_distance(atracks, btracks):
     else:
         atlbrs = [track.tlbr for track in atracks]
         btlbrs = [track.tlbr for track in btracks]
-    _ious = ious(atlbrs, btlbrs)
-    cost_matrix = 1 - _ious
-    return cost_matrix
+    return 1 - ious(atlbrs, btlbrs)
 
 
 def iou_distance_boxes(a_boxes, b_boxes):
@@ -484,11 +456,7 @@ def fuse_score_array(cost_matrix, det_scores):
 
 
 def expand_boxes(boxes, ratio):
-    """
-    Grow each box by `ratio` of its own size (half on each side).
-    Used by the recovery pass so that boxes which *nearly* overlap still
-    produce a usable IoU signal. (FIX 5)
-    """
+    """Grow each box by `ratio` of its own size (half on each side)."""
     b = np.asarray(boxes, dtype=float).reshape(-1, 4)
     if ratio <= 0 or len(b) == 0:
         return b.copy()
@@ -512,25 +480,20 @@ def recovery_distance(track_boxes,
                       radius_growth=0.4,
                       max_radius=4.0,
                       shape_weight=0.3,
-                      class_penalty=0.15):
+                      class_penalty=0.15,
+                      min_size_ratio=0.5):
     """
-    Overlap-free association cost, in [0, 1], or _REJECT for gated-out pairs.
+    Overlap-free association cost in [0, 1], or _REJECT for gated-out pairs.
 
-    Built from three signals, none of which require the boxes to overlap:
+      proximity : centre distance in mean box heights, divided by a gate radius
+                  that grows with the number of tracker STEPS the track has
+                  been missing.
+      shape     : width/height similarity.
+      expanded  : IoU after inflating both boxes by `expansion`; wins over the
+      IoU         proximity term when the inflated boxes overlap.
 
-      proximity : centre distance normalised by the mean box height, divided by
-                  a gate radius that GROWS with how long the track has been
-                  missing (an object unseen for 5 steps is allowed to be
-                  further away than one unseen for 1).
-      shape     : how similar the two boxes are in width and height - the same
-                  car after a jolt keeps its size, a different object usually
-                  does not.
-      expanded  : IoU of the boxes after inflating both by `expansion`. If the
-      IoU         inflated boxes overlap that is strong evidence, and it wins
-                  over the proximity term.
-
-    class_penalty adds a soft cost (not a hard veto) when the detector class
-    disagrees, so a car track does not get rescued onto a motorcycle.
+    Pairs whose width or height differ by more than 1/min_size_ratio are
+    rejected outright (v2, R4): a car does not double in size in a few steps.
     """
     tb = np.asarray(track_boxes, dtype=float).reshape(-1, 4)
     db = np.asarray(det_boxes, dtype=float).reshape(-1, 4)
@@ -548,7 +511,6 @@ def recovery_distance(track_boxes,
     dw = np.maximum(db[:, 2] - db[:, 0], 1.0)
     dh = np.maximum(db[:, 3] - db[:, 1], 1.0)
 
-    # --- proximity, in units of "mean box heights" -------------------
     dist = np.sqrt((tcx[:, None] - dcx[None, :]) ** 2 +
                    (tcy[:, None] - dcy[None, :]) ** 2)
     scale = np.maximum(0.5 * (th[:, None] + dh[None, :]), 1.0)
@@ -559,19 +521,16 @@ def recovery_distance(track_boxes,
     radius = np.maximum(radius, 1e-6)
     prox_cost = np.clip(ndist / radius, 0.0, 1.0)
 
-    # --- shape similarity --------------------------------------------
     w_sim = np.minimum(tw[:, None], dw[None, :]) / np.maximum(tw[:, None], dw[None, :])
     h_sim = np.minimum(th[:, None], dh[None, :]) / np.maximum(th[:, None], dh[None, :])
     shape_cost = 1.0 - (w_sim * h_sim)
 
     cost = (1.0 - shape_weight) * prox_cost + shape_weight * shape_cost
 
-    # --- expanded IoU overrides proximity when the boxes do overlap ---
     eiou = ious(expand_boxes(tb, expansion), expand_boxes(db, expansion))
     eiou = np.asarray(eiou, dtype=float).reshape(n, m)
     cost = np.minimum(cost, 1.0 - eiou)
 
-    # --- soft class disagreement penalty ------------------------------
     if class_penalty > 0 and track_classes is not None and det_classes is not None:
         tc = np.asarray(track_classes).reshape(-1, 1)
         dc = np.asarray(det_classes).reshape(1, -1)
@@ -579,30 +538,35 @@ def recovery_distance(track_boxes,
 
     cost = np.clip(cost, 0.0, 1.0)
 
-    # --- hard gate: too far AND no expanded overlap -> not a candidate -
     gate = (ndist > radius) & (eiou <= 0.0)
+    if min_size_ratio > 0:
+        gate |= (w_sim < min_size_ratio) | (h_sim < min_size_ratio)
     cost[gate] = _REJECT
     return cost
 
 
-def estimate_global_shift(residuals, min_pairs=2, max_shift=None):
+def estimate_global_shift(residuals, min_pairs=2, max_shift=None, min_shift=0.0):
     """
-    GMC-lite, evidence from tracks that DID match (FIX 6, part 1).
+    GMC-lite from tracks that DID match: median of (det_centre - predicted
+    centre). Only well-established tracks feed this (see BYTETracker.update),
+    because a young track's residual is its own motion, not the camera's.
 
-    `residuals` are (detection_centre - predicted_track_centre) vectors for the
-    tracks that matched this frame. If the camera jolted, every box in the
-    image moved by roughly the same amount, so the median residual is a cheap,
-    pixel-free estimate of that global shift - no optical flow, no frame data.
-
-    Returns (dx, dy), or None when there is not enough evidence or the estimate
-    is implausibly large (better to give up than to teleport tracks).
+    v2: the residuals must AGREE (spread well below the shift itself) and the
+    shift must exceed `min_shift`. Otherwise ordinary prediction lag of a few
+    cars braking together was being reported as a camera jolt on most frames.
     """
     if residuals is None or len(residuals) < max(1, int(min_pairs)):
         return None
     r = np.asarray(residuals, dtype=float).reshape(-1, 2)
     dx = float(np.median(r[:, 0]))
     dy = float(np.median(r[:, 1]))
-    if max_shift is not None and float(np.hypot(dx, dy)) > max_shift:
+    mag = float(np.hypot(dx, dy))
+    if mag < max(min_shift, 1e-6):
+        return None
+    if max_shift is not None and mag > max_shift:
+        return None
+    spread = float(np.median(np.hypot(r[:, 0] - dx, r[:, 1] - dy)))
+    if spread > 0.5 * mag:
         return None
     return dx, dy
 
@@ -610,27 +574,19 @@ def estimate_global_shift(residuals, min_pairs=2, max_shift=None):
 def vote_global_shift(track_boxes, det_boxes, min_support=2, max_shift=None,
                       size_tol=0.45, cluster_tol_ratio=0.6):
     """
-    GMC-lite, evidence from tracks that did NOT match (FIX 6, part 2).
+    GMC-lite from tracks that did NOT match: every plausible (track, detection)
+    pairing votes for the offset that would align it; a real camera shift moves
+    every object by the same vector.
 
-    The matched-residual estimate above has a chicken-and-egg problem: a jolt
-    big enough to matter is a jolt big enough that NOTHING matches, so there
-    are no residuals to take a median of.
-
-    So vote instead. Every plausible (unmatched track, unmatched detection)
-    pairing proposes the offset that would align it. A real camera shift moves
-    every object by the same vector, so the correct offset collects one vote
-    per object while coincidental pairings scatter. The offset with the most
-    support wins.
-
-    Requires at least `min_support` independent objects to agree - with a
-    single object in frame you genuinely cannot tell "the camera moved" from
-    "the car moved", so this returns None rather than guessing.
+    v2 (B3): support is counted in DISTINCT tracks and DISTINCT detections.
+    Before, two fragments of one car voting for the same detection counted as
+    two objects, and a single driving car looked like a camera jolt.
     """
     tb = np.asarray(track_boxes, dtype=float).reshape(-1, 4)
     db = np.asarray(det_boxes, dtype=float).reshape(-1, 4)
     n, m = len(tb), len(db)
     min_support = max(2, int(min_support))
-    if n == 0 or m == 0 or n * m < min_support:
+    if n < min_support or m < min_support:
         return None
 
     tcx = (tb[:, 0] + tb[:, 2]) * 0.5
@@ -642,37 +598,47 @@ def vote_global_shift(track_boxes, det_boxes, min_support=2, max_shift=None,
     dw = np.maximum(db[:, 2] - db[:, 0], 1.0)
     dh = np.maximum(db[:, 3] - db[:, 1], 1.0)
 
-    # only pair boxes that could plausibly be the same object
     w_sim = np.minimum(tw[:, None], dw[None, :]) / np.maximum(tw[:, None], dw[None, :])
     h_sim = np.minimum(th[:, None], dh[None, :]) / np.maximum(th[:, None], dh[None, :])
     ok = (w_sim >= size_tol) & (h_sim >= size_tol)
     if not ok.any():
         return None
 
-    ox = (dcx[None, :] - tcx[:, None])[ok]
-    oy = (dcy[None, :] - tcy[:, None])[ok]
+    ti, dj = np.nonzero(ok)
+    ox = dcx[dj] - tcx[ti]
+    oy = dcy[dj] - tcy[ti]
     if max_shift is not None:
         keep = np.hypot(ox, oy) <= max_shift
-        ox, oy = ox[keep], oy[keep]
+        ox, oy, ti, dj = ox[keep], oy[keep], ti[keep], dj[keep]
     if len(ox) < min_support:
         return None
-    # keep the vote cheap in busy scenes (the clustering below is O(k^2))
     _MAX_VOTES = 600
     if len(ox) > _MAX_VOTES:
         pick = np.linspace(0, len(ox) - 1, _MAX_VOTES).astype(int)
-        ox, oy = ox[pick], oy[pick]
+        ox, oy, ti, dj = ox[pick], oy[pick], ti[pick], dj[pick]
 
     tol = max(cluster_tol_ratio * float(np.median(np.r_[th, dh])), 4.0)
     offsets = np.stack([ox, oy], axis=1)
     d = np.linalg.norm(offsets[:, None, :] - offsets[None, :, :], axis=2)
     inlier = d <= tol
-    support = inlier.sum(axis=1)
-    best = int(np.argmax(support))
-    if int(support[best]) < min_support:
+
+    best, best_support = -1, 0
+    for k in range(len(offsets)):
+        sel = inlier[k]
+        support = min(len(np.unique(ti[sel])), len(np.unique(dj[sel])))
+        if support > best_support:
+            best, best_support = k, support
+    if best < 0 or best_support < min_support:
         return None
 
     sel = offsets[inlier[best]]
     return float(np.median(sel[:, 0])), float(np.median(sel[:, 1]))
+
+
+def _xyah_to_tlbr(xyah):
+    x, y, a, h = [float(v) for v in xyah[:4]]
+    w = a * h
+    return np.array([x - w * 0.5, y - h * 0.5, x + w * 0.5, y + h * 0.5], dtype=float)
 
 
 # ====================================================================
@@ -682,11 +648,10 @@ class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
 
     def __init__(self, tlwh, score, flag_fdf=0, detbb=None, landmarks=None):
-        # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
         self.flag_fdf = flag_fdf  # class id (0=car, 1=motorcycle in the plate pipeline)
-        self.detbb = np.asarray(detbb, dtype=float) if detbb is not None else None  # original xyxy, used for cropping
-        self.landmarks = np.asarray(landmarks, dtype=float) if landmarks is not None else None  # unused by plates, kept for parity
+        self.detbb = np.asarray(detbb, dtype=float) if detbb is not None else None
+        self.landmarks = np.asarray(landmarks, dtype=float) if landmarks is not None else None
 
         self.kalman_filter = None
         self.mean, self.covariance = None, None
@@ -695,12 +660,17 @@ class STrack(BaseTrack):
         self.score = score
         self.tracklet_len = 0
 
-        # --- lifecycle bookkeeping used by the new logic / logging ---
-        self.hits = 0                 # number of successful measurement updates
-        self.miss_count = 0           # consecutive updates with no match
-        self.dt_since_update = 0.0    # elapsed steps since the last measurement
-        self.recovered = 0            # times rescued by the recovery pass
+        # lifecycle bookkeeping
+        self.hits = 0                 # successful measurement updates
+        self.miss_count = 0           # consecutive steps with no match
+        self.dt_since_update = 0.0    # elapsed dt (camera frames) since last measurement
+        self.recovered = 0            # times rescued by a recovery pass
         self.birth_frame = 0
+
+        # last real observation: recovery from the last-seen box (B2) and ORU (R2)
+        self.last_obs_xyah = None
+        self.last_obs_state = None
+        self.last_obs_frame = 0
 
     # ---------------- prediction ----------------
     def predict(self, dt=1.0):
@@ -726,7 +696,6 @@ class STrack(BaseTrack):
                 stracks[i].dt_since_update += float(dt)
 
     def apply_shift(self, dx, dy):
-        """Shift the predicted centre (used only on copies for GMC scoring)."""
         if self.mean is not None:
             self.mean[0] += dx
             self.mean[1] += dy
@@ -736,8 +705,9 @@ class STrack(BaseTrack):
         """Start a new tracklet"""
         self.kalman_filter = kalman_filter
         self.track_id = self.next_id()
+        xyah = self.tlwh_to_xyah(self._tlwh)
         self.mean, self.covariance = self.kalman_filter.initiate(
-            self.tlwh_to_xyah(self._tlwh), vel_std_scale=vel_std_scale)
+            xyah, vel_std_scale=vel_std_scale)
 
         self.tracklet_len = 0
         self.state = TrackState.Tracked
@@ -750,97 +720,112 @@ class STrack(BaseTrack):
         self.miss_count = 0
         self.dt_since_update = 0.0
 
+        self.last_obs_xyah = np.asarray(xyah, dtype=float).copy()
+        self.last_obs_state = (self.mean.copy(), self.covariance.copy())
+        self.last_obs_frame = frame_id
+
+    @property
+    def last_seen_tlbr(self):
+        """Box of the last real detection (not the coasted prediction)."""
+        if self.last_obs_xyah is None:
+            return self.tlbr
+        return _xyah_to_tlbr(self.last_obs_xyah)
+
     def _seed_velocity(self, new_xyah, max_ratio=1.5):
         """
-        FIX 2: push the observed displacement straight into the velocity state.
-
-        A track created last step has vx = vy = 0, so its prediction says the
-        car stood still - at 9 fps on a 30 fps stream that is 3 frames of real
-        motion thrown away, and it is the single biggest reason young tracks
-        fail to match. The residual between where we predicted the box and
-        where the detector actually found it IS the velocity, so we add it in
-        (for a fresh track the prediction equals the old position, so this is
-        exactly the measured displacement).
-
-        Clamped to `max_ratio` box heights per step so one wild frame cannot
-        send the track flying across the image.
+        FIX 2 / B1: set the velocity of a brand-new track from its first real
+        displacement. Called AFTER the Kalman update and it OVERWRITES the
+        velocity - v1 added it before the update and the filter then added its
+        own correction for the same motion, leaving the track ~1.7x too fast.
         """
-        if self.mean is None:
+        if self.mean is None or self.last_obs_xyah is None:
             return
         elapsed = max(float(self.dt_since_update), 1.0)
-        dx = (float(new_xyah[0]) - float(self.mean[0])) / elapsed
-        dy = (float(new_xyah[1]) - float(self.mean[1])) / elapsed
-        dh = (float(new_xyah[3]) - float(self.mean[3])) / elapsed
+        v = (np.asarray(new_xyah, dtype=float) - self.last_obs_xyah) / elapsed
 
-        limit = max_ratio * max(float(self.mean[3]), 1.0)
-        mag = float(np.hypot(dx, dy))
+        h = max(float(self.mean[3]), 1.0)
+        limit = max_ratio * h
+        mag = float(np.hypot(v[0], v[1]))
         if mag > limit and mag > 1e-9:
-            k = limit / mag
-            dx, dy = dx * k, dy * k
+            v[0] *= limit / mag
+            v[1] *= limit / mag
+        v[3] = float(np.clip(v[3], -0.25 * h, 0.25 * h))
 
-        self.mean[4] += dx
-        self.mean[5] += dy
-        self.mean[7] += dh
+        self.mean[4] = v[0]
+        self.mean[5] = v[1]
+        self.mean[6] = 0.0
+        self.mean[7] = v[3]
 
-    def re_activate(self, new_track, frame_id, new_id=False,
-                    seed_velocity=False, reseed_after_gap=3.0, seed_max_ratio=1.5):
-        new_xyah = self.tlwh_to_xyah(new_track.tlwh)
-
-        if seed_velocity and (self.hits == 0 or self.dt_since_update >= reseed_after_gap):
-            self._seed_velocity(new_xyah, seed_max_ratio)
-
-        self.mean, self.covariance = self.kalman_filter.update(
-            self.mean, self.covariance, new_xyah
-        )
-        self.flag_fdf = new_track.flag_fdf
-        self.detbb = np.asarray(new_track.detbb, dtype=float) if new_track.detbb is not None else None
-        self.landmarks = np.asarray(new_track.landmarks, dtype=float) if new_track.landmarks is not None else None
-
-        self.tracklet_len = 0
-        self.state = TrackState.Tracked
-        self.is_activated = True
-        self.frame_id = frame_id
-        if new_id:
-            self.track_id = self.next_id()
-        self.score = new_track.score
-
-        self.hits += 1
-        self.miss_count = 0
-        self.dt_since_update = 0.0
-
-    def update(self, new_track, frame_id, seed_velocity=False, seed_max_ratio=1.5):
+    def _observation_centric_reupdate(self, new_xyah, gap):
         """
-        Update a matched track
-        :type new_track: STrack
-        :type frame_id: int
+        R2 (OC-SORT's ORU): a track that missed `gap - 1` steps has a velocity
+        that was only ever extrapolated. Rewind to the last real observation and
+        replay the gap with observations interpolated between that box and the
+        new one, so the velocity that comes out matches what the car really did.
         """
-        self.frame_id = frame_id
-        self.tracklet_len += 1
-        self.flag_fdf = new_track.flag_fdf
+        mean, cov = self.last_obs_state
+        mean, cov = mean.copy(), cov.copy()
+        n = int(min(max(gap, 1), 20))
+        total_dt = float(self.dt_since_update) if self.dt_since_update > 0 else float(gap)
+        step = max(total_dt / n, 1e-3)
+        last = self.last_obs_xyah
+        new = np.asarray(new_xyah, dtype=float)
+        try:
+            for k in range(1, n + 1):
+                mean, cov = self.kalman_filter.predict(mean, cov, step)
+                if k < n:
+                    virt = last + (new - last) * (float(k) / n)
+                    mean, cov = self.kalman_filter.update(mean, cov, virt)
+        except (np.linalg.LinAlgError, ValueError):
+            return
+        self.mean, self.covariance = mean, cov
 
-        self.landmarks = np.asarray(new_track.landmarks, dtype=float) if new_track.landmarks is not None else None
-        self.detbb = np.asarray(new_track.detbb, dtype=float) if new_track.detbb is not None else None
-
+    def _measure(self, new_track, frame_id, seed_velocity, seed_max_ratio, oru):
+        """Single path for every real measurement (update and re_activate)."""
         new_xyah = self.tlwh_to_xyah(new_track.tlwh)
+        gap = int(frame_id - self.last_obs_frame)
+        first = bool(seed_velocity) and self.hits == 0 and self.last_obs_xyah is not None
 
-        if seed_velocity and self.hits == 0:
-            self._seed_velocity(new_xyah, seed_max_ratio)
+        if oru and not first and gap >= 2 and self.last_obs_state is not None:
+            self._observation_centric_reupdate(new_xyah, gap)
 
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, new_xyah)
-        self.state = TrackState.Tracked
-        self.is_activated = True
+
+        if first:
+            self._seed_velocity(new_xyah, seed_max_ratio)
+
+        self.flag_fdf = new_track.flag_fdf
+        self.detbb = np.asarray(new_track.detbb, dtype=float) if new_track.detbb is not None else None
+        self.landmarks = np.asarray(new_track.landmarks, dtype=float) if new_track.landmarks is not None else None
         self.score = new_track.score
 
+        self.last_obs_xyah = np.asarray(new_xyah, dtype=float).copy()
+        self.last_obs_state = (self.mean.copy(), self.covariance.copy())
+        self.last_obs_frame = frame_id
+
+        self.state = TrackState.Tracked
+        self.is_activated = True
+        self.frame_id = frame_id
         self.hits += 1
         self.miss_count = 0
         self.dt_since_update = 0.0
+
+    def re_activate(self, new_track, frame_id, new_id=False,
+                    seed_velocity=False, seed_max_ratio=1.5, oru=True, **_unused):
+        self._measure(new_track, frame_id, seed_velocity, seed_max_ratio, oru)
+        self.tracklet_len = 0
+        if new_id:
+            self.track_id = self.next_id()
+
+    def update(self, new_track, frame_id, seed_velocity=False, seed_max_ratio=1.5,
+               oru=True, **_unused):
+        self.tracklet_len += 1
+        self._measure(new_track, frame_id, seed_velocity, seed_max_ratio, oru)
 
     # ---------------- geometry ----------------
     @property
     def tlwh(self):
-        """Get current position in bounding box format `(top left x, top left y,
-                width, height)`."""
         if self.mean is None:
             return self._tlwh.copy()
         ret = self.mean[:4].copy()
@@ -850,7 +835,6 @@ class STrack(BaseTrack):
 
     @property
     def tlbr(self):
-        """Convert bounding box to format `(min x, min y, max x, max y)`."""
         ret = self.tlwh.copy()
         ret[2:] += ret[:2]
         return ret
@@ -862,11 +846,9 @@ class STrack(BaseTrack):
 
     @staticmethod
     def tlwh_to_xyah(tlwh):
-        """Convert bounding box to format `(center x, center y, aspect ratio,
-        height)`, where the aspect ratio is `width / height`."""
-        ret = np.asarray(tlwh).copy()
+        ret = np.asarray(tlwh, dtype=float).copy()
         ret[:2] += ret[2:] / 2
-        ret[2] /= ret[3]
+        ret[2] /= max(ret[3], 1e-6)
         return ret
 
     def to_xyah(self):
@@ -874,13 +856,13 @@ class STrack(BaseTrack):
 
     @staticmethod
     def tlbr_to_tlwh(tlbr):
-        ret = np.asarray(tlbr).copy()
+        ret = np.asarray(tlbr, dtype=float).copy()
         ret[2:] -= ret[:2]
         return ret
 
     @staticmethod
     def tlwh_to_tlbr(tlwh):
-        ret = np.asarray(tlwh).copy()
+        ret = np.asarray(tlwh, dtype=float).copy()
         ret[2:] += ret[:2]
         return ret
 
@@ -892,8 +874,7 @@ class STrack(BaseTrack):
 # Config
 #
 # video_processor.py's existing TrackerConfig keeps working untouched - every
-# knob below is read with getattr(args, name, default). Use this class instead
-# if you want the new knobs in one obvious place.
+# knob below is read with getattr(args, name, default).
 # ====================================================================
 class PlateTrackerConfig(object):
     def __init__(self,
@@ -906,33 +887,45 @@ class PlateTrackerConfig(object):
                  second_thresh=0.5,        # low-score association gate
                  duplicate_thresh=0.15,    # remove_duplicate_stracks IoU cost
 
-                 # ---- FIX 1/3: young-track survival ----
+                 # ---- young-track survival ----
                  predict_unconfirmed=True,
-                 unconfirmed_thresh=0.9,   # was 0.7 - the gate that killed plates
-                 unconfirmed_max_miss=5,   # was 0 - deleted on the first miss
+                 unconfirmed_thresh=0.9,
+                 unconfirmed_max_miss=5,   # in tracker steps
 
-                 # ---- FIX 2: new-track motion ----
+                 # ---- new-track motion ----
                  new_track_vel_std_scale=3.0,
                  seed_velocity_on_first_update=True,
                  seed_max_ratio=1.5,
-                 reseed_after_gap=3.0,
+                 reseed_after_gap=3.0,     # unused since v2 (ORU replaces it), kept for compat
 
-                 # ---- FIX 5: recovery pass ----
+                 # ---- recovery pass ----
                  recovery_enabled=True,
                  recovery_thresh=0.7,
                  recovery_expansion=0.5,
                  recovery_base_radius=1.5,
-                 recovery_radius_growth=0.4,
+                 recovery_radius_growth=0.4,   # per missed tracker step
                  recovery_max_radius=4.0,
                  recovery_shape_weight=0.3,
                  recovery_class_penalty=0.15,
+                 recovery_min_size_ratio=0.5,
+                 young_recovery_bias=0.05,     # established tracks win ties
 
-                 # ---- FIX 6: camera-jolt compensation ----
+                 # ---- low-score (motion blur) recovery ----
+                 low_recovery_enabled=True,
+                 low_recovery_thresh=0.5,
+
+                 # ---- camera-jolt compensation ----
                  gmc_enabled=True,
                  gmc_min_pairs=2,
                  gmc_max_shift_ratio=0.25,  # of frame height
+                 gmc_min_shift_ratio=0.08,  # of median box height; smaller = not a jolt
 
-                 # ---- FIX 7 ----
+                 # ---- motion model ----
+                 oru_enabled=True,
+
+                 # ---- id continuity ----
+                 remove_exited=True,
+
                  max_removed_history=512):
         self.track_thresh = track_thresh
         self.match_thresh = match_thresh
@@ -959,16 +952,24 @@ class PlateTrackerConfig(object):
         self.recovery_max_radius = recovery_max_radius
         self.recovery_shape_weight = recovery_shape_weight
         self.recovery_class_penalty = recovery_class_penalty
+        self.recovery_min_size_ratio = recovery_min_size_ratio
+        self.young_recovery_bias = young_recovery_bias
+
+        self.low_recovery_enabled = low_recovery_enabled
+        self.low_recovery_thresh = low_recovery_thresh
 
         self.gmc_enabled = gmc_enabled
         self.gmc_min_pairs = gmc_min_pairs
         self.gmc_max_shift_ratio = gmc_max_shift_ratio
+        self.gmc_min_shift_ratio = gmc_min_shift_ratio
+
+        self.oru_enabled = oru_enabled
+        self.remove_exited = remove_exited
 
         self.max_removed_history = max_removed_history
 
 
-# Backwards-compatible alias: the old TrackerConfig signature, same defaults
-# as video_processor.py already uses.
+# Backwards-compatible alias
 TrackerConfig = PlateTrackerConfig
 
 
@@ -979,7 +980,6 @@ class BYTETracker(object):
     def __init__(self, args, frame_rate=30, name=None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []     # type: list[STrack]
-        self.removed_stracks = deque(maxlen=512)  # FIX 7: bounded
 
         self.frame_id = 0
         self.args = args
@@ -988,7 +988,6 @@ class BYTETracker(object):
 
         g = lambda k, d: getattr(args, k, d)  # noqa: E731
 
-        # stock knobs
         self.track_thresh = float(g("track_thresh", 0.5))
         self.match_thresh = float(g("match_thresh", 0.99))
         self.track_buffer = int(g("track_buffer", 60))
@@ -996,18 +995,14 @@ class BYTETracker(object):
         self.second_thresh = float(g("second_thresh", 0.5))
         self.duplicate_thresh = float(g("duplicate_thresh", 0.15))
 
-        # FIX 1 / 3
         self.predict_unconfirmed = bool(g("predict_unconfirmed", True))
         self.unconfirmed_thresh = float(g("unconfirmed_thresh", 0.9))
         self.unconfirmed_max_miss = int(g("unconfirmed_max_miss", 5))
 
-        # FIX 2
         self.new_track_vel_std_scale = float(g("new_track_vel_std_scale", 3.0))
         self.seed_velocity = bool(g("seed_velocity_on_first_update", True))
         self.seed_max_ratio = float(g("seed_max_ratio", 1.5))
-        self.reseed_after_gap = float(g("reseed_after_gap", 3.0))
 
-        # FIX 5
         self.recovery_enabled = bool(g("recovery_enabled", True))
         self.recovery_thresh = float(g("recovery_thresh", 0.7))
         self.recovery_expansion = float(g("recovery_expansion", 0.5))
@@ -1016,13 +1011,20 @@ class BYTETracker(object):
         self.recovery_max_radius = float(g("recovery_max_radius", 4.0))
         self.recovery_shape_weight = float(g("recovery_shape_weight", 0.3))
         self.recovery_class_penalty = float(g("recovery_class_penalty", 0.15))
+        self.recovery_min_size_ratio = float(g("recovery_min_size_ratio", 0.5))
+        self.young_recovery_bias = float(g("young_recovery_bias", 0.05))
 
-        # FIX 6
+        self.low_recovery_enabled = bool(g("low_recovery_enabled", True))
+        self.low_recovery_thresh = float(g("low_recovery_thresh", 0.5))
+
         self.gmc_enabled = bool(g("gmc_enabled", True))
         self.gmc_min_pairs = int(g("gmc_min_pairs", 2))
         self.gmc_max_shift_ratio = float(g("gmc_max_shift_ratio", 0.25))
+        self.gmc_min_shift_ratio = float(g("gmc_min_shift_ratio", 0.08))
 
-        # FIX 7
+        self.oru_enabled = bool(g("oru_enabled", True))
+        self.remove_exited = bool(g("remove_exited", True))
+
         self.removed_stracks = deque(maxlen=int(g("max_removed_history", 512)))
 
         self.det_thresh = self.track_thresh + 0.1
@@ -1035,15 +1037,16 @@ class BYTETracker(object):
             "confirmed": 0,
             "lost": 0,
             "refind_iou": 0,
+            "refind_low": 0,
             "refind_recovery": 0,
             "removed_unconfirmed": 0,
             "removed_timeout": 0,
+            "removed_exited": 0,
             "gmc_applied": 0,
         }
 
     # ---------------- public helpers ----------------
     def get_stats(self):
-        """Counters for a periodic summary line in video_processor."""
         s = dict(self.stats)
         s["frame_id"] = self.frame_id
         s["active"] = len([t for t in self.tracked_stracks if t.is_activated])
@@ -1059,27 +1062,80 @@ class BYTETracker(object):
         for k in self.stats:
             self.stats[k] = 0
 
+    # ---------------- internals ----------------
+    def _kw(self):
+        return dict(seed_velocity=self.seed_velocity,
+                    seed_max_ratio=self.seed_max_ratio,
+                    oru=self.oru_enabled)
+
+    def _recovery_cost(self, tracks, pred_boxes, cand_boxes, cand_classes, shift):
+        """min(recovery cost from predicted box, from last-seen box)  (B2)."""
+        pred = np.asarray(pred_boxes, dtype=float).reshape(-1, 4).copy()
+        last = np.array([t.last_seen_tlbr for t in tracks], dtype=float).reshape(-1, 4)
+        if shift is not None:
+            pred[:, [0, 2]] += shift[0]
+            pred[:, [1, 3]] += shift[1]
+            last[:, [0, 2]] += shift[0]
+            last[:, [1, 3]] += shift[1]
+        missing = [max(self.frame_id - t.last_obs_frame, 1) for t in tracks]
+        classes = [int(round(float(t.flag_fdf))) for t in tracks]
+        kw = dict(track_classes=classes, det_classes=cand_classes,
+                  expansion=self.recovery_expansion,
+                  base_radius=self.recovery_base_radius,
+                  radius_growth=self.recovery_radius_growth,
+                  max_radius=self.recovery_max_radius,
+                  shape_weight=self.recovery_shape_weight,
+                  class_penalty=self.recovery_class_penalty,
+                  min_size_ratio=self.recovery_min_size_ratio)
+        c1 = recovery_distance(pred, cand_boxes, missing, **kw)
+        c2 = recovery_distance(last, cand_boxes, missing, **kw)
+        return np.minimum(c1, c2)
+
+    def _exited(self, track, img_w, img_h, margin=0.02, min_visible=0.5):
+        """
+        R3: the car was last seen cut off by a frame border and is not coming
+        back: either it was moving out through that border and has now been
+        missing for 2+ steps, or its prediction is already mostly off-frame.
+        Without this, the lost track sits at the edge with a growing gate for
+        the whole track_buffer and hands its id to the next car arriving there.
+        """
+        lb = track.last_seen_tlbr
+        mx, my = margin * img_w, margin * img_h
+        at_l, at_t = lb[0] <= mx, lb[1] <= my
+        at_r, at_b = lb[2] >= img_w - mx, lb[3] >= img_h - my
+        if not (at_l or at_t or at_r or at_b):
+            return False
+        pb = track.tlbr
+        area = max((pb[2] - pb[0]) * (pb[3] - pb[1]), 1e-6)
+        iw = max(0.0, min(pb[2], img_w) - max(pb[0], 0.0))
+        ih = max(0.0, min(pb[3], img_h) - max(pb[1], 0.0))
+        if (iw * ih) / area < min_visible:
+            return True
+        vx, vy = float(track.mean[4]), float(track.mean[5])
+        outward = (at_l and vx < 0) or (at_r and vx > 0) or \
+                  (at_t and vy < 0) or (at_b and vy > 0)
+        return outward and (self.frame_id - track.last_obs_frame) >= 2
+
     # ---------------- main entry point ----------------
     def update(self, output_results, img_info, img_size, dt=None):
         """
         output_results : Nx6 array [x1, y1, x2, y2, score, class_id]
         img_info       : (h, w) of the frame the boxes came from
         img_size       : (h, w) the boxes should be scaled to
-        dt             : how many camera frames elapsed since the previous
-                         update. Pass the real value (1 + skipped frames) and
-                         the motion model stops being wrong whenever the engine
-                         loop runs slower than the stream. Defaults to 1.
+        dt             : camera frames elapsed since the previous update
+                         (1 + skipped frames). Defaults to 1.
         """
         self.frame_id += 1
+        fid = self.frame_id
         step_dt = 1.0 if dt is None else max(float(dt), 1e-3)
+        kw = self._kw()
 
-        activated_starcks = []
+        activated_stracks = []
         refind_stracks = []
         lost_stracks = []
         removed_stracks = []
-
+        
         # ---------------- parse detections ----------------
-        # (copy: `bboxes /= scale` below must not mutate the caller's array)
         if output_results is None or len(output_results) == 0:
             output_results = np.zeros((0, 6), dtype=np.float64)
         output_results = np.asarray(output_results, dtype=np.float64).copy()
@@ -1087,431 +1143,326 @@ class BYTETracker(object):
             output_results = (output_results.reshape(1, -1)
                               if output_results.size >= 5
                               else np.zeros((0, 6), dtype=np.float64))
-
-        # columns: [x1, y1, x2, y2, score, class_id, (landmarks...)]
-        # exactly what video_processor.py builds with
-        # np.column_stack([boxes, confs, clss])
-        if output_results.shape[1] >= 6:
-            scores = output_results[:, 4]
-            bboxes = output_results[:, :4]
-            flags = output_results[:, 5]
-            landmarks = output_results[:, 6:] if output_results.shape[1] > 6 else None
-        elif output_results.shape[1] == 5:
-            scores = output_results[:, 4]
-            bboxes = output_results[:, :4]
-            flags = np.zeros_like(scores)
-            landmarks = None
-        else:
+        if output_results.shape[1] < 5:
             raise ValueError(f"Unexpected detection shape: {output_results.shape}")
 
-        img_h, img_w = img_info[0], img_info[1]
-        scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
-        bboxes /= scale
+        img_h, img_w = float(img_info[0]), float(img_info[1])
+        scale = min(img_size[0] / img_h, img_size[1] / img_w)
 
-        remain_inds = scores > self.track_thresh
-        inds_low = scores > 0.1
-        inds_high = scores < self.track_thresh
-        inds_second = np.logical_and(inds_low, inds_high)
+        bboxes = output_results[:, :4] / scale
+        scores = output_results[:, 4]
+        flags = output_results[:, 5] if output_results.shape[1] >= 6 else np.zeros_like(scores)
+        landmarks = output_results[:, 6:] if output_results.shape[1] > 6 else None
 
-        dets = bboxes[remain_inds]
-        dets_second = bboxes[inds_second]
-        scores_keep = scores[remain_inds]
-        flags_keep = flags[remain_inds]
+        # finite, non-degenerate boxes only
+        valid = np.isfinite(bboxes).all(axis=1) & np.isfinite(scores) & \
+            (bboxes[:, 2] - bboxes[:, 0] > 1.0) & (bboxes[:, 3] - bboxes[:, 1] > 1.0)
 
-        if landmarks is not None:
-            landmarks_keep = landmarks[remain_inds]
-        else:
-            landmarks_keep = [None] * len(dets)
+        remain_inds = valid & (scores > self.track_thresh)
+        inds_second = valid & (scores > 0.1) & (scores <= self.track_thresh)   # B5
 
-        if len(dets) > 0:
-            detections = [
-                STrack(STrack.tlbr_to_tlwh(tlbr), score, flag, detbb=tlbr, landmarks=lm)
-                for tlbr, score, flag, lm in zip(dets, scores_keep, flags_keep, landmarks_keep)
-            ]
-        else:
-            detections = []
+        def _make(mask):
+            out = []
+            for i in np.nonzero(mask)[0]:
+                tlbr = bboxes[i]
+                lm = landmarks[i] if landmarks is not None else None
+                out.append(STrack(STrack.tlbr_to_tlwh(tlbr), float(scores[i]), flags[i],
+                                  detbb=tlbr, landmarks=lm))
+            return out
+
+        detections = _make(remain_inds)
+        detections_second = _make(inds_second)
 
         # ---------------- split confirmed / unconfirmed ----------------
         unconfirmed = []
-        tracked_stracks = []  # type: list[STrack]
+        tracked = []
         for track in self.tracked_stracks:
-            if not track.is_activated:
-                unconfirmed.append(track)
-            else:
-                tracked_stracks.append(track)
+            (tracked if track.is_activated else unconfirmed).append(track)
 
         # ================================================================
-        # Step 1: predict
-        #
-        # FIX 1: unconfirmed tracks are predicted too. Stock ByteTrack leaves
-        # them frozen at their birth position, which is why one-frame-old
-        # tracks could never survive a fast car at a low engine fps.
+        # Step 1: predict (FIX 1: unconfirmed tracks too)
         # ================================================================
-        strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
+        strack_pool = joint_stracks(tracked, self.lost_stracks)
         if self.predict_unconfirmed and unconfirmed:
             STrack.multi_predict(strack_pool + unconfirmed, step_dt)
         else:
             STrack.multi_predict(strack_pool, step_dt)
 
-        # snapshot predicted geometry before any track gets updated
         pool_boxes = np.array([t.tlbr for t in strack_pool], dtype=float).reshape(-1, 4)
         unc_boxes = np.array([t.tlbr for t in unconfirmed], dtype=float).reshape(-1, 4)
         det_boxes = np.array([d.tlbr for d in detections], dtype=float).reshape(-1, 4)
         det_scores = np.array([d.score for d in detections], dtype=float)
         det_classes = np.array([int(round(float(d.flag_fdf))) for d in detections], dtype=int)
+        sec_boxes = np.array([d.tlbr for d in detections_second], dtype=float).reshape(-1, 4)
+        sec_classes = np.array([int(round(float(d.flag_fdf))) for d in detections_second],
+                               dtype=int)
 
-        gmc_residuals = []   # (det_centre - predicted_track_centre) for matched pairs
+        # only well-established tracks say anything about camera motion
+        reliable = [t.state == TrackState.Tracked and t.hits >= 3 for t in strack_pool]
+        gmc_residuals = []
 
         def _centre(box):
             return np.array([(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5], dtype=float)
 
+        def _apply_pool(track, det, via):
+            if track.state == TrackState.Tracked:
+                track.update(det, fid, **kw)
+                activated_stracks.append(track)
+            else:
+                missed = fid - track.last_obs_frame - 1
+                track.re_activate(det, fid, new_id=False, **kw)
+                refind_stracks.append(track)
+                self.log.debug("[TRK-REFIND] id=%s via=%s missed=%d steps conf=%.2f",
+                               track.track_id, via, missed, float(det.score))
+                return True
+            return False
+
+        def _apply_young(track, det, via):
+            track.update(det, fid, **kw)
+            activated_stracks.append(track)
+            self.stats["confirmed"] += 1
+            self.log.debug("[TRK-CONFIRM] id=%s via=%s after=%df", track.track_id, via,
+                           fid - track.birth_frame)
+
         # ================================================================
-        # Step 2: first association, high-score detections, IoU + fuse_score
+        # Step 2: high-score detections vs confirmed + lost, IoU * score
         # ================================================================
         dists = iou_distance_boxes(pool_boxes, det_boxes)
         if not self.mot20:
             dists = fuse_score_array(dists, det_scores)
-        matches, u_track, u_detection = linear_assignment(dists, thresh=self.match_thresh)
-
-        matched_pool = set()
-        for itracked, idet in matches:
-            track = strack_pool[itracked]
-            det = detections[idet]
-            gmc_residuals.append(_centre(det_boxes[idet]) - _centre(pool_boxes[itracked]))
-            matched_pool.add(int(itracked))
-            if track.state == TrackState.Tracked:
-                track.update(det, self.frame_id,
-                             seed_velocity=self.seed_velocity,
-                             seed_max_ratio=self.seed_max_ratio)
-                activated_starcks.append(track)
-            else:
-                track.re_activate(det, self.frame_id, new_id=False,
-                                  seed_velocity=self.seed_velocity,
-                                  reseed_after_gap=self.reseed_after_gap,
-                                  seed_max_ratio=self.seed_max_ratio)
-                refind_stracks.append(track)
+        matches, u_pool, u_det = linear_assignment(dists, thresh=self.match_thresh)
+        for ip, idd in matches:
+            ip, idd = int(ip), int(idd)
+            if reliable[ip]:
+                gmc_residuals.append(_centre(det_boxes[idd]) - _centre(pool_boxes[ip]))
+            if _apply_pool(strack_pool[ip], detections[idd], "iou"):
                 self.stats["refind_iou"] += 1
-                self.log.debug(
-                    "[TRK-REFIND] id=%s via=iou missed=%.0f steps conf=%.2f",
-                    track.track_id, track.dt_since_update, float(det.score))
+        u_pool = [int(i) for i in u_pool]
+        u_det = [int(i) for i in u_det]
 
         # ================================================================
-        # Step 3: second association, low-score detections, plain IoU
+        # Step 2b (B6): young tracks get their plain IoU match BEFORE any
+        # wide-gate recovery can hand their detection to someone else
         # ================================================================
-        if len(dets_second) > 0:
-            detections_second = []
-            for det in output_results[inds_second]:
-                tlwh = STrack.tlbr_to_tlwh(det[:4])
-                score = det[4]
-                flag = det[5] if det.shape[0] > 5 else 0
-                lm = det[6:] if det.shape[0] > 6 else None
-                detbb = det[:4]
-                detections_second.append(STrack(tlwh, score, flag, detbb=detbb, landmarks=lm))
-        else:
-            detections_second = []
-
-        r_map = [int(i) for i in u_track if strack_pool[int(i)].state == TrackState.Tracked]
-        r_tracked_stracks = [strack_pool[i] for i in r_map]
-        r_boxes = pool_boxes[r_map] if len(r_map) else np.zeros((0, 4))
-        second_boxes = np.array([d.tlbr for d in detections_second], dtype=float).reshape(-1, 4)
-
-        dists = iou_distance_boxes(r_boxes, second_boxes)
-        matches, u_track_second, u_detection_second = linear_assignment(
-            dists, thresh=self.second_thresh)
-        for ir, idet in matches:
-            pool_idx = r_map[int(ir)]
-            track = strack_pool[pool_idx]
-            det = detections_second[idet]
-            gmc_residuals.append(_centre(second_boxes[idet]) - _centre(pool_boxes[pool_idx]))
-            matched_pool.add(pool_idx)
-            if track.state == TrackState.Tracked:
-                track.update(det, self.frame_id,
-                             seed_velocity=self.seed_velocity,
-                             seed_max_ratio=self.seed_max_ratio)
-                activated_starcks.append(track)
-            else:
-                track.re_activate(det, self.frame_id, new_id=False,
-                                  seed_velocity=self.seed_velocity,
-                                  reseed_after_gap=self.reseed_after_gap,
-                                  seed_max_ratio=self.seed_max_ratio)
-                refind_stracks.append(track)
-                self.stats["refind_iou"] += 1
-
-        u_det_high = [int(i) for i in u_detection]
-        still_unmatched_pool = [int(i) for i in u_track if int(i) not in matched_pool]
+        u_unc = list(range(len(unconfirmed)))
+        if unconfirmed and u_det:
+            d = iou_distance_boxes(unc_boxes, det_boxes[u_det])
+            if not self.mot20:
+                d = fuse_score_array(d, det_scores[u_det])
+            m, uu, ud = linear_assignment(d, thresh=self.unconfirmed_thresh)
+            for iu, idd in m:
+                _apply_young(unconfirmed[int(iu)], detections[u_det[int(idd)]], "iou")
+            u_unc = [int(i) for i in uu]
+            u_det = [u_det[int(i)] for i in ud]
 
         # ================================================================
-        # Step 3.5: camera-jolt estimate (FIX 6)
-        #
-        # Two sources of evidence, in order of reliability:
-        #   1. the tracks that DID match - their prediction errors all point
-        #      the same way when the camera moved, so take the median.
-        #   2. if nothing matched (which is exactly what a big jolt causes),
-        #      let the unmatched tracks and detections vote on the offset that
-        #      would align them. Two objects agreeing is a camera shift; one
-        #      object alone is just a car driving, so that returns nothing.
+        # Step 3: low-score detections vs still-tracked + young (plain IoU)
+        # R1: young tracks are included - on a bump the blurred car often
+        # scores under track_thresh, which used to be invisible to them.
+        # ================================================================
+        u_sec = list(range(len(detections_second)))
+        rows = [("p", i) for i in u_pool if strack_pool[i].state == TrackState.Tracked] + \
+               [("u", i) for i in u_unc]
+        if rows and u_sec:
+            rb = np.array([pool_boxes[i] if k == "p" else unc_boxes[i] for k, i in rows],
+                          dtype=float).reshape(-1, 4)
+            d = iou_distance_boxes(rb, sec_boxes)
+            m, _, us = linear_assignment(d, thresh=self.second_thresh)
+            taken_p, taken_u = set(), set()
+            for ir, idd in m:
+                kind, i = rows[int(ir)]
+                det = detections_second[int(idd)]
+                if kind == "p":
+                    if reliable[i]:
+                        gmc_residuals.append(_centre(sec_boxes[int(idd)]) - _centre(pool_boxes[i]))
+                    _apply_pool(strack_pool[i], det, "low")
+                    taken_p.add(i)
+                else:
+                    _apply_young(unconfirmed[i], det, "low")
+                    taken_u.add(i)
+                self.stats["refind_low"] += 1
+            u_pool = [i for i in u_pool if i not in taken_p]
+            u_unc = [i for i in u_unc if i not in taken_u]
+            u_sec = [int(i) for i in us]
+
+        # ================================================================
+        # Step 3.5: camera-jolt estimate (FIX 6, B3)
         # ================================================================
         shift = None
         if self.gmc_enabled:
-            max_shift = self.gmc_max_shift_ratio * float(img_h)
-            shift = estimate_global_shift(gmc_residuals,
-                                          min_pairs=self.gmc_min_pairs,
-                                          max_shift=max_shift)
+            max_shift = self.gmc_max_shift_ratio * img_h
+            hs = [b[3] - b[1] for b in pool_boxes] + [b[3] - b[1] for b in det_boxes]
+            min_shift = max(4.0, self.gmc_min_shift_ratio * (float(np.median(hs)) if hs else 0.0))
+            shift = estimate_global_shift(gmc_residuals, min_pairs=self.gmc_min_pairs,
+                                          max_shift=max_shift, min_shift=min_shift)
             source = "matched"
-            if shift is None and u_det_high:
-                vote_boxes = pool_boxes[still_unmatched_pool] if still_unmatched_pool \
-                    else np.zeros((0, 4))
-                if len(unc_boxes):
-                    vote_boxes = np.vstack([vote_boxes, unc_boxes])
-                shift = vote_global_shift(vote_boxes, det_boxes[u_det_high],
+            if shift is None and u_det and (u_pool or u_unc):
+                vote_boxes = np.vstack([pool_boxes[u_pool].reshape(-1, 4),
+                                        unc_boxes[u_unc].reshape(-1, 4)])
+                shift = vote_global_shift(vote_boxes, det_boxes[u_det],
                                           min_support=self.gmc_min_pairs,
                                           max_shift=max_shift)
                 source = "vote"
-            if shift is not None and (abs(shift[0]) > 1.0 or abs(shift[1]) > 1.0):
+            if shift is not None and float(np.hypot(*shift)) >= min_shift:
                 self.stats["gmc_applied"] += 1
-                self.log.debug("[GMC] shift=(%.1f, %.1f) via=%s",
-                               shift[0], shift[1], source)
+                self.log.debug("[GMC] shift=(%.1f, %.1f) via=%s", shift[0], shift[1], source)
             else:
                 shift = None
 
         # ================================================================
-        # Step 3.6: RECOVERY pass (FIX 5)
-        #
-        # This is the one that stops plates being forgotten. Everything above
-        # needs the predicted box and the detection to physically overlap.
-        # Here we ask a different question: is there an unmatched detection
-        # that is near enough, the right size, and the right class to be the
-        # car we just lost? No overlap required.
+        # Step 4: joint RECOVERY pass (FIX 5, B2, B6) - no overlap needed.
+        # Every leftover track (tracked, lost, young) against every leftover
+        # high-score detection, from both its predicted and last-seen box.
         # ================================================================
-        if self.recovery_enabled and still_unmatched_pool and u_det_high:
-            rec_boxes = pool_boxes[still_unmatched_pool].copy()
-            if shift is not None:
-                rec_boxes[:, [0, 2]] += shift[0]
-                rec_boxes[:, [1, 3]] += shift[1]
+        if self.recovery_enabled and (u_pool or u_unc) and u_det:
+            rows = [("p", i) for i in u_pool] + [("u", i) for i in u_unc]
+            rtracks = [strack_pool[i] if k == "p" else unconfirmed[i] for k, i in rows]
+            rpred = np.array([pool_boxes[i] if k == "p" else unc_boxes[i] for k, i in rows],
+                             dtype=float).reshape(-1, 4)
+            rcost = self._recovery_cost(rtracks, rpred, det_boxes[u_det],
+                                        det_classes[u_det], shift)
+            if self.young_recovery_bias > 0:
+                young_rows = np.array([k == "u" for k, _ in rows])
+                ok = rcost < _REJECT
+                rcost[young_rows[:, None] & ok] += self.young_recovery_bias
 
-            rec_tracks = [strack_pool[i] for i in still_unmatched_pool]
-            rec_missing = [max(t.dt_since_update, 1.0) for t in rec_tracks]
-            rec_classes = [int(round(float(t.flag_fdf))) for t in rec_tracks]
-
-            cand_boxes = det_boxes[u_det_high]
-            cand_classes = det_classes[u_det_high]
-
-            rcost = recovery_distance(
-                rec_boxes, cand_boxes, rec_missing,
-                track_classes=rec_classes, det_classes=cand_classes,
-                expansion=self.recovery_expansion,
-                base_radius=self.recovery_base_radius,
-                radius_growth=self.recovery_radius_growth,
-                max_radius=self.recovery_max_radius,
-                shape_weight=self.recovery_shape_weight,
-                class_penalty=self.recovery_class_penalty)
-
-            rmatches, r_u_track, r_u_det = linear_assignment(rcost, thresh=self.recovery_thresh)
-
-            for ir, idc in rmatches:
-                pool_idx = still_unmatched_pool[int(ir)]
-                det_idx = u_det_high[int(idc)]
-                track = strack_pool[pool_idx]
-                det = detections[det_idx]
+            m, ur, ud = linear_assignment(rcost, thresh=self.recovery_thresh)
+            taken_p, taken_u = set(), set()
+            for ir, idc in m:
+                kind, i = rows[int(ir)]
+                track = rtracks[int(ir)]
+                det = detections[u_det[int(idc)]]
                 cost = float(rcost[int(ir), int(idc)])
-                iou_now = float(1.0 - iou_distance_boxes(
-                    pool_boxes[pool_idx:pool_idx + 1], det_boxes[det_idx:det_idx + 1])[0, 0])
-
-                matched_pool.add(pool_idx)
+                missed = fid - track.last_obs_frame - 1
                 track.recovered += 1
-                was_lost = (track.state != TrackState.Tracked)
-                if was_lost:
-                    track.re_activate(det, self.frame_id, new_id=False,
-                                      seed_velocity=self.seed_velocity,
-                                      reseed_after_gap=self.reseed_after_gap,
-                                      seed_max_ratio=self.seed_max_ratio)
-                    refind_stracks.append(track)
-                else:
-                    track.update(det, self.frame_id,
-                                 seed_velocity=self.seed_velocity,
-                                 seed_max_ratio=self.seed_max_ratio)
-                    activated_starcks.append(track)
-
                 self.stats["refind_recovery"] += 1
-                self.log.info(
-                    "[TRK-REFIND] id=%s via=recovery cost=%.2f iou=%.2f missed=%.0f "
-                    "steps conf=%.2f%s",
-                    track.track_id, cost, iou_now,
-                    max(track.dt_since_update, 0.0), float(det.score),
-                    "" if shift is None else " gmc=(%.0f,%.0f)" % shift)
+                if kind == "p":
+                    _apply_pool(track, det, "recovery")
+                    taken_p.add(i)
+                    via = "recovery"
+                else:
+                    _apply_young(track, det, "recovery")
+                    taken_u.add(i)
+                    via = "recovery-young"
+                self.log.info("[TRK-REFIND] id=%s via=%s cost=%.2f missed=%d steps conf=%.2f%s",
+                              track.track_id, via, cost, missed, float(det.score),
+                              "" if shift is None else " gmc=(%.0f,%.0f)" % shift)
+            u_pool = [i for i in u_pool if i not in taken_p]
+            u_unc = [i for i in u_unc if i not in taken_u]
+            u_det = [u_det[int(i)] for i in ud]
 
-            # detections still unclaimed after the rescue
-            u_det_high = [u_det_high[int(i)] for i in r_u_det]
-            still_unmatched_pool = [still_unmatched_pool[int(i)] for i in r_u_track]
+        # ================================================================
+        # Step 4b (R1): strict low-score recovery for cars that were being
+        # tracked a moment ago - blurred AND jumped, the classic bump frame.
+        # Lost tracks are excluded: a weak detection is not enough to revive them.
+        # ================================================================
+        if self.recovery_enabled and self.low_recovery_enabled and u_sec:
+            rows = [("p", i) for i in u_pool if strack_pool[i].state == TrackState.Tracked] + \
+                   [("u", i) for i in u_unc if unconfirmed[i].hits == 0 and
+                    fid - unconfirmed[i].last_obs_frame <= 1]
+            if rows:
+                rtracks = [strack_pool[i] if k == "p" else unconfirmed[i] for k, i in rows]
+                rpred = np.array([pool_boxes[i] if k == "p" else unc_boxes[i]
+                                  for k, i in rows], dtype=float).reshape(-1, 4)
+                rcost = self._recovery_cost(rtracks, rpred, sec_boxes[u_sec],
+                                            sec_classes[u_sec], shift)
+                m, _, us = linear_assignment(rcost, thresh=self.low_recovery_thresh)
+                taken_p, taken_u = set(), set()
+                for ir, idc in m:
+                    kind, i = rows[int(ir)]
+                    track = rtracks[int(ir)]
+                    det = detections_second[u_sec[int(idc)]]
+                    track.recovered += 1
+                    self.stats["refind_recovery"] += 1
+                    if kind == "p":
+                        _apply_pool(track, det, "recovery-low")
+                        taken_p.add(i)
+                    else:
+                        _apply_young(track, det, "recovery-low")
+                        taken_u.add(i)
+                    self.log.info("[TRK-REFIND] id=%s via=recovery-low cost=%.2f conf=%.2f",
+                                  track.track_id, float(rcost[int(ir), int(idc)]),
+                                  float(det.score))
+                u_pool = [i for i in u_pool if i not in taken_p]
+                u_unc = [i for i in u_unc if i not in taken_u]
+                u_sec = [u_sec[int(i)] for i in us]
 
-        # ---- tracks that found nothing anywhere become lost ----
-        for pool_idx in still_unmatched_pool:
-            track = strack_pool[pool_idx]
+        # ---- confirmed tracks that found nothing become lost ----
+        for i in u_pool:
+            track = strack_pool[i]
             if track.state == TrackState.Tracked:
                 track.mark_lost()
                 track.miss_count += 1
                 lost_stracks.append(track)
                 self.stats["lost"] += 1
-                self.log.debug(
-                    "[TRK-LOST] id=%s age=%df hits=%d - no detection matched",
-                    track.track_id, self.frame_id - track.birth_frame, track.hits)
-
-        # ================================================================
-        # Step 4: unconfirmed (young) tracks
-        #
-        # FIX 3: the gate is loosened, the recovery pass applies here too, and
-        # a miss no longer kills the track outright - it gets
-        # `unconfirmed_max_miss` chances first. This is the change that keeps
-        # a plate alive long enough to reach MIN_SEEN_FRAMES downstream.
-        # ================================================================
-        remaining_dets = [detections[i] for i in u_det_high]
-        remaining_boxes = det_boxes[u_det_high] if u_det_high else np.zeros((0, 4))
-        remaining_scores = det_scores[u_det_high] if u_det_high else np.zeros((0,))
-        remaining_classes = det_classes[u_det_high] if u_det_high else np.zeros((0,), dtype=int)
-
-        dists = iou_distance_boxes(unc_boxes, remaining_boxes)
-        if not self.mot20:
-            dists = fuse_score_array(dists, remaining_scores)
-        matches, u_unconfirmed, u_detection = linear_assignment(
-            dists, thresh=self.unconfirmed_thresh)
-
-        claimed_dets = set()
-        for itracked, idet in matches:
-            track = unconfirmed[int(itracked)]
-            track.update(remaining_dets[int(idet)], self.frame_id,
-                         seed_velocity=self.seed_velocity,
-                         seed_max_ratio=self.seed_max_ratio)
-            activated_starcks.append(track)
-            claimed_dets.add(int(idet))
-            self.stats["confirmed"] += 1
-            self.log.debug("[TRK-CONFIRM] id=%s after=%df hits=%d",
-                           track.track_id, self.frame_id - track.birth_frame, track.hits)
-
-        u_unconfirmed = [int(i) for i in u_unconfirmed]
-        u_det_left = [int(i) for i in u_detection if int(i) not in claimed_dets]
-
-        # recovery for young tracks as well - this is where the bump case bites
-        if self.recovery_enabled and u_unconfirmed and u_det_left:
-            rb = unc_boxes[u_unconfirmed].copy()
-            if shift is not None:
-                rb[:, [0, 2]] += shift[0]
-                rb[:, [1, 3]] += shift[1]
-
-            utracks = [unconfirmed[i] for i in u_unconfirmed]
-            umissing = [max(t.dt_since_update, 1.0) for t in utracks]
-            uclasses = [int(round(float(t.flag_fdf))) for t in utracks]
-
-            rcost = recovery_distance(
-                rb, remaining_boxes[u_det_left], umissing,
-                track_classes=uclasses, det_classes=remaining_classes[u_det_left],
-                expansion=self.recovery_expansion,
-                base_radius=self.recovery_base_radius,
-                radius_growth=self.recovery_radius_growth,
-                max_radius=self.recovery_max_radius,
-                shape_weight=self.recovery_shape_weight,
-                class_penalty=self.recovery_class_penalty)
-
-            rmatches, r_u_unc, r_u_det = linear_assignment(rcost, thresh=self.recovery_thresh)
-            for iu, idc in rmatches:
-                track = unconfirmed[u_unconfirmed[int(iu)]]
-                det = remaining_dets[u_det_left[int(idc)]]
-                track.update(det, self.frame_id,
-                             seed_velocity=self.seed_velocity,
-                             seed_max_ratio=self.seed_max_ratio)
-                track.recovered += 1
-                activated_starcks.append(track)
-                self.stats["refind_recovery"] += 1
-                self.stats["confirmed"] += 1
-                self.log.info(
-                    "[TRK-REFIND] id=%s via=recovery-young cost=%.2f age=%df conf=%.2f",
-                    track.track_id, float(rcost[int(iu), int(idc)]),
-                    self.frame_id - track.birth_frame, float(det.score))
-
-            u_unconfirmed = [u_unconfirmed[int(i)] for i in r_u_unc]
-            u_det_left = [u_det_left[int(i)] for i in r_u_det]
+                self.log.debug("[TRK-LOST] id=%s age=%df hits=%d - no detection matched",
+                               track.track_id, fid - track.birth_frame, track.hits)
+            else:
+                track.miss_count += 1
 
         # ---- young tracks that matched nothing: grace period, not death ----
-        for it in u_unconfirmed:
-            track = unconfirmed[it]
+        for i in u_unc:
+            track = unconfirmed[i]
             track.miss_count += 1
             if track.miss_count > self.unconfirmed_max_miss:
                 track.mark_removed()
                 removed_stracks.append(track)
                 self.stats["removed_unconfirmed"] += 1
-                # A plate that never got a second chance. If you see a lot of
-                # these, raise unconfirmed_max_miss / recovery_max_radius.
                 self.log.info(
                     "[TRK-REMOVE] id=%s reason=unconfirmed_expired age=%df hits=%d misses=%d",
-                    track.track_id, self.frame_id - track.birth_frame,
-                    track.hits, track.miss_count)
+                    track.track_id, fid - track.birth_frame, track.hits, track.miss_count)
             else:
-                self.log.debug(
-                    "[TRK-COAST] id=%s unconfirmed miss=%d/%d age=%df",
-                    track.track_id, track.miss_count, self.unconfirmed_max_miss,
-                    self.frame_id - track.birth_frame)
+                self.log.debug("[TRK-COAST] id=%s unconfirmed miss=%d/%d age=%df",
+                               track.track_id, track.miss_count, self.unconfirmed_max_miss,
+                               fid - track.birth_frame)
 
         # ================================================================
-        # Step 5: init brand new tracks from what is left
+        # Step 5: brand new tracks from what is left
         # ================================================================
-        for idx in u_det_left:
-            track = remaining_dets[idx]
+        for idx in u_det:
+            track = detections[idx]
             if track.score < self.det_thresh:
                 continue
-            track.activate(self.kalman_filter, self.frame_id,
+            track.activate(self.kalman_filter, fid,
                            vel_std_scale=self.new_track_vel_std_scale)
-            activated_starcks.append(track)
+            activated_stracks.append(track)
             self.stats["created"] += 1
+            self.log.debug("[TRK-NEW] id=%s fid=%d cls=%d conf=%.2f box=(%d,%d,%d,%d)",
+                           track.track_id, fid, int(round(float(track.flag_fdf))),
+                           float(track.score), *[int(v) for v in track.tlbr])
 
-            if not self.log.isEnabledFor(logging.DEBUG):
+        # ================================================================
+        # Step 6: retire lost tracks that timed out or left the frame (R3)
+        # ================================================================
+        for track in joint_stracks(self.lost_stracks, lost_stracks):
+            if track.state != TrackState.Lost:
                 continue
-
-            # diagnostic: was there a lost track nearby that we *just* failed to
-            # rescue? if so the gate is too tight - the numbers tell you by how
-            # much.
-            near_id, near_d = None, None
-            if self.lost_stracks:
-                lb = np.array([t.tlbr for t in self.lost_stracks], dtype=float).reshape(-1, 4)
-                c_new = _centre(track.tlbr)
-                c_old = np.stack([(lb[:, 0] + lb[:, 2]) * 0.5, (lb[:, 1] + lb[:, 3]) * 0.5], axis=1)
-                hgt = np.maximum(lb[:, 3] - lb[:, 1], 1.0)
-                nd = np.linalg.norm(c_old - c_new[None, :], axis=1) / hgt
-                j = int(np.argmin(nd))
-                near_id, near_d = self.lost_stracks[j].track_id, float(nd[j])
-
-            self.log.debug(
-                "[TRK-NEW] id=%s fid=%d cls=%d conf=%.2f box=(%d,%d,%d,%d)%s",
-                track.track_id, self.frame_id, int(round(float(track.flag_fdf))),
-                float(track.score), *[int(v) for v in track.tlbr],
-                "" if near_id is None else
-                " nearest_lost=%s ndist=%.2f" % (near_id, near_d))
-
-        # ================================================================
-        # Step 6: retire lost tracks that ran out of buffer
-        # ================================================================
-        for track in self.lost_stracks:
-            if self.frame_id - track.end_frame > self.max_time_lost:
+            reason = None
+            if fid - track.end_frame > self.max_time_lost:
+                reason = "lost_timeout"
+                self.stats["removed_timeout"] += 1
+            elif self.remove_exited and self._exited(track, img_w, img_h):
+                reason = "exited"
+                self.stats["removed_exited"] += 1
+            if reason:
                 track.mark_removed()
                 removed_stracks.append(track)
-                self.stats["removed_timeout"] += 1
-                self.log.debug(
-                    "[TRK-REMOVE] id=%s reason=lost_timeout hits=%d recovered=%d",
-                    track.track_id, track.hits, track.recovered)
+                self.log.debug("[TRK-REMOVE] id=%s reason=%s hits=%d recovered=%d",
+                               track.track_id, reason, track.hits, track.recovered)
 
         # ================================================================
-        # Step 7: merge the bookkeeping lists
+        # Step 7: merge the bookkeeping lists (state is the source of truth)
         # ================================================================
-        self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
-        self.tracked_stracks = joint_stracks(self.tracked_stracks, activated_starcks)
-        self.tracked_stracks = joint_stracks(self.tracked_stracks, refind_stracks)
-        self.lost_stracks = sub_stracks(self.lost_stracks, self.tracked_stracks)
-        self.lost_stracks.extend(lost_stracks)
-        self.lost_stracks = sub_stracks(self.lost_stracks, list(self.removed_stracks))
+        tracked_all = joint_stracks(self.tracked_stracks, activated_stracks)
+        tracked_all = joint_stracks(tracked_all, refind_stracks)
+        self.tracked_stracks = [t for t in tracked_all if t.state == TrackState.Tracked]
+        self.lost_stracks = [t for t in joint_stracks(self.lost_stracks, lost_stracks)
+                             if t.state == TrackState.Lost]
         self.removed_stracks.extend(removed_stracks)
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(
             self.tracked_stracks, self.lost_stracks, self.duplicate_thresh)
 
-        output_stracks = [track for track in self.tracked_stracks if track.is_activated]
-        return output_stracks
+        return [t for t in self.tracked_stracks if t.is_activated]
 
 
 # ====================================================================
@@ -1543,16 +1494,18 @@ def sub_stracks(tlista, tlistb):
 
 
 def remove_duplicate_stracks(stracksa, stracksb, thresh=0.15):
+    if not stracksa or not stracksb:
+        return stracksa, stracksb
     pdist = iou_distance(stracksa, stracksb)
     pairs = np.where(pdist < thresh)
-    dupa, dupb = list(), list()
+    dupa, dupb = set(), set()
     for p, q in zip(*pairs):
         timep = stracksa[p].frame_id - stracksa[p].start_frame
         timeq = stracksb[q].frame_id - stracksb[q].start_frame
         if timep > timeq:
-            dupb.append(q)
+            dupb.add(q)
         else:
-            dupa.append(p)
-    resa = [t for i, t in enumerate(stracksa) if not i in dupa]
-    resb = [t for i, t in enumerate(stracksb) if not i in dupb]
+            dupa.add(p)
+    resa = [t for i, t in enumerate(stracksa) if i not in dupa]
+    resb = [t for i, t in enumerate(stracksb) if i not in dupb]
     return resa, resb
