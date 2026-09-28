@@ -282,8 +282,8 @@ class Engine:
     def _flush_window(self):
         w = self._win
         n = max(w["batches"], 1)
-        skip_pct = (100.0 * w["skipped_sum"] / (w["detections_sum"] + w["skipped_sum"])) \
-            if (w["detections_sum"] + w["skipped_sum"]) > 0 else 0.0
+        attempted = w["batches"] + w["skipped_sum"]
+        skip_pct = (100.0 * w["skipped_sum"] / attempted) if attempted > 0 else 0.0
         self.logger.info(
             f"📊 [STATS] engine={self.engine_id} last {w['batches']} batches | "
             f"sources={w['cams_sum'] / n:.1f} | infer avg={w['infer_ms_sum'] / n:.1f}ms | "
