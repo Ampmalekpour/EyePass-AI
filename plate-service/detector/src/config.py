@@ -162,6 +162,23 @@ CPU_MAX_CONCURRENT_ENGINES = _int("CPU_MAX_CONCURRENT_ENGINES", 1)
 # can actually be added.
 CPU_EXPECTED_CAMERAS = _int("CPU_EXPECTED_CAMERAS", 1)
 
+# THE OTHER HALF OF THE FIX. os.cpu_count() inside this container
+# reports the box's/VM's FULL logical core count (14, in the box this
+# was tuned against) regardless of any Docker `--cpus` quota you set on
+# this service (see DETECTOR_CPU_LIMIT in compose.yaml) -- a quota
+# throttles total CPU-seconds, it does not shrink what the container
+# can SEE. Left at the real core count, this planner would still size
+# thread pools for 14 cores while the kernel only ever grants it (say)
+# 6 -- every scheduling period the oversized thread pool asks for more
+# than the quota allows, stalls, and the next period repeats: this
+# produces exactly the wild, bursty latencies (150ms one call, 1800ms
+# the next, same single-image batch) rather than a clean, proportional
+# slowdown. Set this to the SAME number you gave DETECTOR_CPU_LIMIT so
+# the in-process thread math and the Docker-enforced quota agree. 0 =
+# trust os.cpu_count() (fine only when this container has no CPU limit
+# set and nothing else of consequence shares the host).
+CPU_CORES_OVERRIDE = _int("CPU_CORES_OVERRIDE", 0)
+
 CPU_ENGINE_MODE = os.getenv("CPU_ENGINE_MODE", "single").strip().lower()
 
 # "multi" mode only: cameras per engine (almost always 1 -- that's the

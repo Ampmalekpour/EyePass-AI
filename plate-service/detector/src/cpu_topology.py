@@ -63,16 +63,22 @@ def _ceil_div(a: int, b: int) -> int:
     return max(1, -(-max(1, a) // max(1, b)))
 
 
+def total_cores() -> int:
+    """CPU_CORES_OVERRIDE if set, else os.cpu_count(). Overriding
+    matters because os.cpu_count() reports the box's/VM's full logical
+    core count regardless of any Docker `--cpus` quota on this
+    container -- see config.py's CPU_CORES_OVERRIDE comment for why an
+    un-overridden planner under a quota reproduces the exact
+    wild-latency oversubscription symptom this module exists to fix."""
+    return int(config.CPU_CORES_OVERRIDE) or (os.cpu_count() or 4)
+
+
 def usable_cores() -> int:
     """Logical cores left over after CPU_RESERVE_CORES is set aside for
-    OS overhead and the per-camera RTSP capture/decode threads. Read
-    inside the container -- see config.py's CPU_MAX_CONCURRENT_ENGINES
-    comment for why this can still over-report under a Docker `--cpus`
-    quota (as opposed to a cpuset), and why that number should be
-    verified with `docker exec <container> nproc` rather than trusted
-    blindly."""
-    total = os.cpu_count() or 4
-    return max(1, total - max(0, config.CPU_RESERVE_CORES))
+    OS overhead and the per-camera RTSP capture/decode threads, out of
+    total_cores() (the real/overridden count, not necessarily
+    os.cpu_count())."""
+    return max(1, total_cores() - max(0, config.CPU_RESERVE_CORES))
 
 
 def auto_max_cameras_per_engine() -> int:
@@ -111,7 +117,8 @@ def plan(device: str, log: logging.Logger = None) -> dict:
                   "(max_cameras_per_engine=%d)", device, result["max_cameras_per_engine"])
         return result
 
-    cores = os.cpu_count() or 4
+    host_cores = os.cpu_count() or 4
+    cores = total_cores()
     usable = usable_cores()
     mode = config.CPU_ENGINE_MODE
     ceiling = max(1, config.CPU_MAX_CONCURRENT_ENGINES)
@@ -164,6 +171,18 @@ def plan(device: str, log: logging.Logger = None) -> dict:
             "torch_num_threads": config.TORCH_NUM_THREADS or usable,
             "expected_concurrent_engines": 1,
         }
+
+    if config.CPU_CORES_OVERRIDE:
+        log.info("[CPU-TOPOLOGY] using CPU_CORES_OVERRIDE=%d (host/container reports os.cpu_count()=%d "
+                  "-- set this to match your Docker --cpus limit, they must agree)",
+                  cores, host_cores)
+    elif host_cores >= 8:
+        log.warning("[CPU-TOPOLOGY] CPU_CORES_OVERRIDE is unset and os.cpu_count()=%d -- if this "
+                    "container has a Docker --cpus limit (DETECTOR_CPU_LIMIT) below that, or shares "
+                    "the host with other CPU-heavy services (OCR workers, publishers, backend/frontend), "
+                    "set CPU_CORES_OVERRIDE to the real budget or this planner will oversize thread "
+                    "pools and you'll see the same wild bursty [INFER-SLOW] latencies this exists to fix.",
+                    host_cores)
 
     log.info(
         "[CPU-TOPOLOGY] mode=%s cores=%d reserved=%d usable=%d expected_cameras=%d "

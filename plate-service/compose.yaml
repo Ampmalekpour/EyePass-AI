@@ -267,11 +267,10 @@ services:
       #
       # CPU_MAX_CONCURRENT_ENGINES is the important one: how many engine
       # PROCESSES this box can actually run in parallel without
-      # thrashing. Verify with `docker exec plate_detector nproc` (a
-      # Docker `--cpus` CPU limit is a CFS quota, not a cpuset, so
-      # os.cpu_count() inside the container can over-report vs. what
-      # Docker Desktop's Resources setting actually allows) -- do not
-      # leave this at the default 1 once you go past a single camera.
+      # thrashing -- set it to the SAME number as DETECTOR_CPU_LIMIT
+      # below (the Docker-enforced quota this container actually gets),
+      # not the host's raw core count. Do not leave this at the default
+      # 1 once you go past a single camera.
       CPU_ENGINE_MODE: ${CPU_ENGINE_MODE:-single}
       CPU_MAX_CONCURRENT_ENGINES: ${CPU_MAX_CONCURRENT_ENGINES:-1}
       CPU_EXPECTED_CAMERAS: ${CPU_EXPECTED_CAMERAS:-1}
@@ -281,6 +280,16 @@ services:
       CPU_MS_PER_CAMERA_FRAME: ${CPU_MS_PER_CAMERA_FRAME:-28.0}
       CAMERA_ASSUMED_FPS: ${CAMERA_ASSUMED_FPS:-25.0}
       CPU_AUTO_SAFETY_MARGIN: ${CPU_AUTO_SAFETY_MARGIN:-0.7}
+      # os.cpu_count() inside this container reports the HOST's full
+      # logical core count (14, in the box this was tuned against),
+      # regardless of the DETECTOR_CPU_LIMIT quota below -- a CFS quota
+      # throttles CPU-seconds, it does not change what the container can
+      # see. Leaving this unset while a quota (or sibling services) is
+      # in play is what produces wild, bursty [INFER-SLOW] latencies
+      # (150ms one call, 1800ms the next) instead of a clean slowdown:
+      # the thread pool is sized for cores the container never actually
+      # gets. Set this to the same value as DETECTOR_CPU_LIMIT.
+      CPU_CORES_OVERRIDE: ${CPU_CORES_OVERRIDE:-0}
 
       # ---- camera health --------------------------------------------
       HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}
@@ -423,10 +432,24 @@ services:
       retries: 4
       start_period: 120s        # YOLO load + CUDA init is slow on first boot
     stop_grace_period: 60s      # must exceed ENGINE_SHUTDOWN_TIMEOUT_SEC
-    # GPU reservation. Requires nvidia-container-toolkit on the host.
-    # Delete this whole `deploy:` block to run on a host with no GPU.
     deploy:
       resources:
+        # Hard, kernel-enforced CPU quota for this container (all of its
+        # engine subprocesses combined) -- Docker Compose translates
+        # `limits.cpus` into `--cpus` even outside swarm mode. This is
+        # the real backstop: no matter what the in-process thread math
+        # in cpu_topology.py gets told, this container physically
+        # cannot take more than DETECTOR_CPU_LIMIT cores' worth of CPU
+        # time away from plate_ocr's worker pool, mediamtx, the video
+        # publishers, or anything else on this host (backend, frontend,
+        # ...). Set CPU_CORES_OVERRIDE above to this SAME number so the
+        # planner's own math agrees with what's actually enforced here.
+        # Unset/0 = unlimited (today's prior behavior).
+        limits:
+          cpus: "${DETECTOR_CPU_LIMIT:-0}"
+        # GPU reservation. Requires nvidia-container-toolkit on the host.
+        # Delete just this `reservations:` block (keep `limits:` above)
+        # to run on a host with no GPU.
         reservations:
           devices:
             - driver: nvidia
@@ -528,6 +551,16 @@ services:
       retries: 4
       start_period: 180s        # PaddleOCR model load + warmup
     stop_grace_period: 45s      # must exceed WORKER_SHUTDOWN_TIMEOUT_SEC
+    # Hard CPU quota for this container's whole worker pool
+    # (DEFAULT_WORKER_COUNT PaddleOCR processes above, 3 by default) --
+    # previously unbounded, so on OCR_USE_GPU=false these workers
+    # competed for the same cores as plate_detector's engines with no
+    # limit on either side. See plate_detector's own deploy block for
+    # why this matters. Unset/0 = unlimited (prior behavior).
+    deploy:
+      resources:
+        limits:
+          cpus: "${OCR_CPU_LIMIT:-0}"
 
   # -------------------------------------------------------------------
   # CONTROL HUB — owns every track's recognition state for this module.
