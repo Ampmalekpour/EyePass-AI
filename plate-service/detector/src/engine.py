@@ -240,7 +240,19 @@ class Engine:
         # when several requests are pending, the task carries the most
         # important label (one set of crops answers all of them)
         self.STAGE_PRIORITY = {"leave_scene": 3, "cross_line": 2, "stop_roi": 2, "periodic": 1}
+        # one emoji per OCR-triggering stage so it's spottable at a glance in
+        # a scrolling log — periodic is the routine one, the other three are
+        # spatial/lifecycle events worth an eye catching more than plain text.
+        self.STAGE_EMOJI = {"periodic": "🔁", "cross_line": "🚧", "stop_roi": "🛑", "leave_scene": "🏁"}
         self.logger.info("control-hub client ready (engine_id=%s boot=%s)", self.engine_id, self.hub.boot_id)
+
+        # ---- windowed [STATS] summary (every LOG_EVERY_N_BATCHES batches) --
+        # [BATCH-INFER] used to print unconditionally, once per batch — at
+        # ~9 batches/s that's unreadable within minutes. This accumulates
+        # across a window of batches and flushes one consolidated line, so
+        # the log stays legible while still showing throughput + health.
+        self.LOG_EVERY_N_BATCHES = 15
+        self._win = self._new_window()
 
         # writers optional
         self.writers: Dict[str, cv2.VideoWriter] = {}
@@ -258,6 +270,29 @@ class Engine:
             self.logger.info(f"[DEBUG-REC] enabled -> {self.debug_cfg.as_dict()}")
         else:
             self.logger.info("[DEBUG-REC] disabled (set DEBUG_VIDEO_ENABLED=1 to record)")
+
+    # ---------------- windowed stats ----------------
+    @staticmethod
+    def _new_window() -> Dict[str, float]:
+        return {
+            "batches": 0, "cams_sum": 0, "infer_ms_sum": 0.0, "track_ms_sum": 0.0,
+            "detections_sum": 0, "tracks_sum": 0, "skipped_sum": 0,
+        }
+
+    def _flush_window(self):
+        w = self._win
+        n = max(w["batches"], 1)
+        skip_pct = (100.0 * w["skipped_sum"] / (w["detections_sum"] + w["skipped_sum"])) \
+            if (w["detections_sum"] + w["skipped_sum"]) > 0 else 0.0
+        self.logger.info(
+            f"📊 [STATS] engine={self.engine_id} last {w['batches']} batches | "
+            f"sources={w['cams_sum'] / n:.1f} | infer avg={w['infer_ms_sum'] / n:.1f}ms | "
+            f"track avg={w['track_ms_sum'] / n:.1f}ms | "
+            f"detections={w['detections_sum']} (avg {w['detections_sum'] / n:.1f}/batch) | "
+            f"tracks={w['tracks_sum']} (avg {w['tracks_sum'] / n:.1f}/batch) | "
+            f"frames_skipped={w['skipped_sum']} ({skip_pct:.1f}%)"
+        )
+        self._win = self._new_window()
 
     # ---------------- debug helpers ----------------
     def _dbg(self, camera_id: str) -> Optional[DebugRecorder]:
@@ -560,8 +595,9 @@ class Engine:
                 best_frame=cam["best_frame"].get(track_id), logger=self.logger,
             )
         det_scores = [round(float(c["score"]), 3) for c in task["crops"]]
+        emoji = self.STAGE_EMOJI.get(task["stage"], "🔁")
         self.logger.info(
-            f"[OCR-SUBMIT] camera={camera_id} track={track_id} uid={meta['uid']} stage={task['stage']} "
+            f"{emoji} [OCR-SUBMIT] camera={camera_id} track={track_id} uid={meta['uid']} stage={task['stage']} "
             f"seen_frames={meta.get('seen_frames', 0)} crops={n} det_scores={det_scores} "
             f"best_frame={'yes' if task['best_frame'] else 'no'} task_id={task['task_id']}"
         )
@@ -656,7 +692,7 @@ class Engine:
             action = msg.get("action")
             if action == "result":
                 self.logger.info(
-                    f"[OCR-RESULT] camera={camera_id} track={track_id} task={msg.get('task_id')} "
+                    f"🔎 [OCR-RESULT] camera={camera_id} track={track_id} task={msg.get('task_id')} "
                     f"hub_answer={disp.get('label')!r} conf={disp.get('confidence')} "
                     f"satisfied={rec_state.satisfied} rtt_ms={rec_state.last_latency_ms}"
                 )
@@ -666,7 +702,7 @@ class Engine:
             elif action == "request":
                 self._dbg_log(camera_id, "HUB_REQUEST", f"#{track_id} {msg.get('stage')}", track_id=track_id)
             if rec_state.satisfied and not was_satisfied:
-                self.logger.info(f"[SATISFIED] camera={camera_id} track={track_id} plate={disp.get('label')!r} "
+                self.logger.info(f"✅ [SATISFIED] camera={camera_id} track={track_id} plate={disp.get('label')!r} "
                                  f"— no more OCR for this track")
 
     # ---------------- debug frame assembly ----------------
@@ -877,25 +913,19 @@ class Engine:
 
             ib = self._last_infer_breakdown or {}
             batch_size = len(cam_ids)
-            avg_per_cam_ms = self._last_infer_ms / batch_size if batch_size else 0.0
-            frame_skip_snapshot = {
-                cid: {
-                    "skipped_total": self.cameras[cid].get("frames_skipped_total", 0),
-                    "skipped_this_iter": self.cameras[cid].pop("_last_iter_skipped", 0),
-                } for cid in cam_ids if cid in self.cameras
-            }
-            self.logger.info(
-                f"[BATCH-INFER] engine={self.engine_id} batch_no={self._batch_count} batch_size={batch_size} "
-                f"cameras={cam_ids} infer_total_ms={self._last_infer_ms:.2f} pre={ib.get('preprocess', 0.0):.2f}ms "
-                f"fwd={ib.get('inference', 0.0):.2f}ms post={ib.get('postprocess', 0.0):.2f}ms "
-                f"avg_per_camera_ms={avg_per_cam_ms:.2f} frame_skip={frame_skip_snapshot}"
-            )
 
             if self._last_infer_ms > config.SLOW_BATCH_WARN_MS:
                 self.logger.warning(
-                    f"[INFER-SLOW] engine={self.engine_id} cameras_in_batch={batch_size} "
+                    f"⚠️ [INFER-SLOW] engine={self.engine_id} cameras_in_batch={batch_size} "
                     f"infer_ms={self._last_infer_ms:.1f} (> {config.SLOW_BATCH_WARN_MS:g}ms threshold)"
                 )
+
+            # accumulated into self._win below, once per whole batch (all
+            # cameras) — see _flush_window() for the consolidated [STATS] line
+            _batch_detections = 0
+            _batch_tracks = 0
+            _batch_track_ms = 0.0
+            _batch_skipped = 0
 
             for idx, res in enumerate(results):
                 camera_id = cam_ids[idx]
@@ -911,6 +941,8 @@ class Engine:
                         confs = res.boxes.conf.cpu().numpy()
                         clss = res.boxes.cls.cpu().numpy()
                         detections = np.column_stack([boxes, confs, clss]).astype(np.float64)
+                    _batch_detections += int(detections.shape[0])
+                    _batch_skipped += cam.pop("_last_iter_skipped", 0)
 
                     _rx1, _ry1, _rx2, _ry2 = roi_offsets[idx]
                     dbg_dets = []
@@ -924,7 +956,10 @@ class Engine:
                             ))
 
                     roi_frame = frames[idx]
+                    _trk_t0 = time.time()
                     online_targets = cam["tracker"].update(detections, roi_frame.shape[:2], roi_frame.shape[:2])
+                    _batch_track_ms += (time.time() - _trk_t0) * 1000.0
+                    _batch_tracks += len(online_targets)
 
                     fid = cam["fid"]
                     rx1, ry1, rx2, ry2 = roi_offsets[idx]
@@ -1006,8 +1041,9 @@ class Engine:
                                 "seen_frames": meta.get("seen_frames", 0),
                                 "n_crops": len(cam["best_crops"].get(track_id, [])),
                             })
+                            emoji = self.STAGE_EMOJI.get(stage, "🔔")
                             self.logger.info(
-                                f"[{'LINE-CROSS' if stage == 'cross_line' else 'STOPPED-ROI'}] camera={camera_id} "
+                                f"{emoji} [{'LINE-CROSS' if stage == 'cross_line' else 'STOPPED-ROI'}] camera={camera_id} "
                                 f"track={track_id} uid={meta['uid']} class={ev['class']} detail={self._trigger_detail(ev)} "
                                 f"-> hub (task={task_id})"
                             )
@@ -1095,6 +1131,16 @@ class Engine:
                     self._send_msg(camera_id, {"status": "error", "error": str(e)})
                     self._dbg_log(camera_id, "ERROR", f"camera processing error: {e}")
                     continue
+
+            self._win["batches"] += 1
+            self._win["cams_sum"] += batch_size
+            self._win["infer_ms_sum"] += self._last_infer_ms
+            self._win["track_ms_sum"] += _batch_track_ms
+            self._win["detections_sum"] += _batch_detections
+            self._win["tracks_sum"] += _batch_tracks
+            self._win["skipped_sum"] += _batch_skipped
+            if self._win["batches"] >= self.LOG_EVERY_N_BATCHES:
+                self._flush_window()
 
         self.logger.info("Engine stopping...")
         self.cleanup()
