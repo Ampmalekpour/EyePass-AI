@@ -245,6 +245,11 @@ services:
       MODEL_PATH: ${DETECTION_MODEL_PATH:-/models/best.pt}
       DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-480}
       DETECTION_CONF_THRESHOLD: ${DETECTION_CONF_THRESHOLD:-0.25}
+      # run YOLO on 1-in-N frames per camera; tracker coasts the rest via
+      # its own Kalman prediction (see engine.py run loop + config.py).
+      # 1 = every frame (unchanged behavior). Main CPU lever for adding
+      # cameras per engine.
+      DETECT_EVERY_N_FRAMES: ${DETECT_EVERY_N_FRAMES:-1}
 
       # ---- engine topology / self-healing -----------------------------
       MAX_CAMERAS_PER_ENGINE: ${MAX_CAMERAS_PER_ENGINE:-6}

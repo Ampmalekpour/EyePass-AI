@@ -397,6 +397,12 @@ class Engine:
             "active": True,
             "debug": DebugRecorder(camera_id, self.engine_id, self.debug_cfg, self.logger),
             "dbg_read_fail": 0,
+            # detect-cadence bookkeeping (see config.DETECT_EVERY_N_FRAMES):
+            # _detect_offset staggers cameras so their detect frames don't
+            # all land on the same loop iteration; _last_tracker_fid lets us
+            # compute the real elapsed-frame dt for the next tracker.update().
+            "_detect_offset": len(self.cameras) % max(1, config.DETECT_EVERY_N_FRAMES),
+            "_last_tracker_fid": 0,
         }
 
         self._dbg_log(camera_id, "CAMERA", f"camera added -> {url}",
@@ -797,6 +803,7 @@ class Engine:
             self._drain_hub_ctl()
 
             frames, cam_ids, roi_offsets, full_frames = [], [], [], []
+            any_frame_read = False
 
             for camera_id, cam in list(self.cameras.items()):
                 if not cam.get("active", True):
@@ -807,6 +814,7 @@ class Engine:
                     if cam["dbg_read_fail"] in (1, 50, 500):
                         self._dbg_log(camera_id, "READ_FAIL", f"no frame from reader x{cam['dbg_read_fail']}")
                     continue
+                any_frame_read = True
 
                 if cam.get("dbg_read_fail", 0):
                     self._dbg_log(camera_id, "CAMERA", f"stream recovered after {cam['dbg_read_fail']} empty reads")
@@ -884,13 +892,42 @@ class Engine:
                                          f"pixel={cam['stop_roi_px']} (frame {W}x{H})")
 
                 roi_frame, (rx1, ry1, rx2, ry2) = _apply_roi(frame, cam["roi"])
+
+                # ---- detect cadence gate (config.DETECT_EVERY_N_FRAMES) ----
+                # N=1 (default) -> every frame goes to the model, unchanged.
+                # N>1 -> only 1-in-N frames are sent to YOLO; the rest are
+                # "coasted": no inference, no tracker.update() call at all
+                # (cheaper than calling update() with empty detections every
+                # frame, and mathematically equivalent since the next real
+                # update() advances the Kalman filter by the true elapsed
+                # dt in one step). The debug video still gets a frame every
+                # iteration via the tracker's existing ghost-track fallback
+                # in _write_debug_frame(), drawing each track's last known
+                # box so playback doesn't drop to 1/N fps.
+                N = max(1, config.DETECT_EVERY_N_FRAMES)
+                do_detect = (cam["fid"] % N) == cam.get("_detect_offset", 0)
+
+                if not do_detect:
+                    rec = cam.get("debug")
+                    if rec is not None and rec.enabled:
+                        try:
+                            self._write_debug_frame(
+                                cam=cam, camera_id=camera_id, full_frame=frame,
+                                roi_offset=(rx1, ry1, rx2, ry2), dbg_dets=[], dbg_tracks={},
+                                fid=cam["fid"],
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"[DEBUG-REC] coast frame write failed: {e}")
+                    continue
+
                 frames.append(roi_frame)
                 cam_ids.append(camera_id)
                 roi_offsets.append((rx1, ry1, rx2, ry2))
                 full_frames.append(frame)
 
             if not frames:
-                time.sleep(0.02)
+                if not any_frame_read:
+                    time.sleep(0.02)
                 continue
 
             _infer_t0 = time.time()
@@ -956,8 +993,18 @@ class Engine:
                             ))
 
                     roi_frame = frames[idx]
+                    # real elapsed camera frames since the tracker last saw this
+                    # camera -- normally N (config.DETECT_EVERY_N_FRAMES), but can
+                    # be larger if the reader also silently dropped frames in
+                    # between (see _last_iter_skipped above). BYTETracker uses
+                    # this to advance its Kalman filters by the true gap in one
+                    # step instead of assuming 1 frame passed.
+                    _dt = cam["fid"] - cam.get("_last_tracker_fid", cam["fid"] - 1)
+                    cam["_last_tracker_fid"] = cam["fid"]
                     _trk_t0 = time.time()
-                    online_targets = cam["tracker"].update(detections, roi_frame.shape[:2], roi_frame.shape[:2])
+                    online_targets = cam["tracker"].update(
+                        detections, roi_frame.shape[:2], roi_frame.shape[:2], dt=_dt
+                    )
                     _batch_track_ms += (time.time() - _trk_t0) * 1000.0
                     _batch_tracks += len(online_targets)
 

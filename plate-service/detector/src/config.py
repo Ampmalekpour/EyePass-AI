@@ -75,6 +75,17 @@ CONF_THRESHOLD = _float("DETECTION_CONF_THRESHOLD", 0.25)
 # alpr_service.py's class_labels and ocr_worker.py's voted_class split.
 CLASS_LABELS = {0: "Car", 1: "Motorcycle"}
 
+# Run YOLO detection on 1-out-of-N camera frames instead of every frame.
+# Frames in between are not sent to the model at all -- the tracker coasts
+# them via BYTETracker's own Kalman prediction (see tracker.update(dt=...)),
+# so a value of 1 (the default) means "every frame, unchanged behavior" and
+# a value of 3 means "detect on frame 0, 3, 6, ... coast frames 1-2, 4-5, ...".
+# This is the main CPU-throughput lever for running several cameras per
+# engine: it divides the inference cost per camera by N with the tracker
+# absorbing the gap, instead of the batch simply falling behind and the
+# engine silently dropping frames under overload.
+DETECT_EVERY_N_FRAMES = _int("DETECT_EVERY_N_FRAMES", 1)
+
 # ============================================================================
 # 4. ENGINE TOPOLOGY / SELF-HEALING
 # ============================================================================
