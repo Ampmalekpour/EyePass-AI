@@ -290,6 +290,17 @@ services:
       # the thread pool is sized for cores the container never actually
       # gets. Set this to the same value as DETECTOR_CPU_LIMIT.
       CPU_CORES_OVERRIDE: ${CPU_CORES_OVERRIDE:-0}
+      # cv2's own thread pool (resize/crop/warp) is separate from
+      # torch's -- left uncapped it also grabs every core, on top of
+      # (and invisible to) everything above. 0 = derive a small value
+      # from this engine's own torch thread count.
+      CV2_NUM_THREADS: ${CV2_NUM_THREADS:-0}
+      # FFmpeg's own internal decode thread count, PER CAMERA STREAM --
+      # also separate from torch/cv2, also uncapped by default (multi-
+      # threads H.264/H.265 software decode across every core it can
+      # see). 1-2 is plenty for one 1080p/25fps stream; 0 = FFmpeg's
+      # own default (all cores).
+      RTSP_FFMPEG_THREADS: ${RTSP_FFMPEG_THREADS:-1}
 
       # ---- camera health --------------------------------------------
       HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}

@@ -382,6 +382,28 @@ RTSP_READ_TIMEOUT_MS = _int("RTSP_READ_TIMEOUT_MS", 5000)
 RTSP_FFMPEG_STIMEOUT_US = _int("RTSP_FFMPEG_STIMEOUT_US", 5000000)
 RTSP_RECONNECT_BACKOFF_SEC = _float("RTSP_RECONNECT_BACKOFF_SEC", 0.2)
 RTSP_READ_FAIL_BACKOFF_SEC = _float("RTSP_READ_FAIL_BACKOFF_SEC", 0.5)
+# FFmpeg's OWN internal decode thread count, PER STREAM -- separate from
+# and invisible to everything in the "CPU ENGINE TOPOLOGY" section above.
+# Unset, FFmpeg multi-threads its own H.264/H.265 SOFTWARE decode across
+# every core it can see, per camera, regardless of TORCH_NUM_THREADS or
+# CPU_CORES_OVERRIDE -- with multiple cameras/engines this is real,
+# continuous, otherwise-invisible CPU demand competing with inference
+# that no setting elsewhere in this file bounds. 1-2 is plenty for a
+# single 1080p/25fps stream; 0 = FFmpeg's own default (all cores).
+RTSP_FFMPEG_THREADS = _int("RTSP_FFMPEG_THREADS", 1)
+
+# ============================================================================
+# 9d. OPENCV THREADING (engine.py, rtsp_reader.py)
+# ============================================================================
+# cv2's own parallel_for backend (resize/crop/warp -- used in ROI
+# cropping and preprocessing) is COMPLETELY SEPARATE from torch's thread
+# pool; torch.set_num_threads() has no effect on it. Left unset, OpenCV
+# defaults to using every core it can see, same failure mode as the
+# torch-side oversubscription this module already guards against, just
+# in a library TORCH_NUM_THREADS never touches. 0 = derive a small value
+# from the engine's own torch thread count (see engine.py); set
+# explicitly to override.
+CV2_NUM_THREADS = _int("CV2_NUM_THREADS", 0)
 RTSP_READER_JOIN_TIMEOUT_SEC = _float("RTSP_READER_JOIN_TIMEOUT_SEC", 2.0)
 
 # ============================================================================

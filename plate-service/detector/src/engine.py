@@ -211,7 +211,19 @@ class Engine:
         if self.device == "cpu":
             n = config.TORCH_NUM_THREADS or max(1, (os.cpu_count() or 4) - 1)
             torch.set_num_threads(n)
-            self.logger.info(f"[INIT] CPU mode: torch threads set to {n}")
+            # cv2's own parallel_for thread pool (resize/crop/warp -- ROI
+            # cropping, YOLO's own letterbox preprocessing) is entirely
+            # separate from torch's and was previously left at OpenCV's
+            # default of "every core this process can see" -- with N
+            # engine processes each doing that, every camera's per-frame
+            # cv2 work was ALSO oversubscribing on top of the (correctly
+            # capped) torch threads. Capped to a small, explicit value:
+            # this work is comparatively light per frame and doesn't
+            # need many threads, and giving it its own uncapped pool
+            # defeats the whole point of capping torch's.
+            cv2_n = config.CV2_NUM_THREADS or max(1, min(n, 2))
+            cv2.setNumThreads(cv2_n)
+            self.logger.info(f"[INIT] CPU mode: torch threads set to {n}, cv2 threads set to {cv2_n}")
 
         # track lifecycle config
         self.ABSENT_N = int(absent_n)

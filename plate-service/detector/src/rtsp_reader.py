@@ -76,9 +76,18 @@ class RTSPStreamReader:
         # stimeout is FFmpeg's own RTSP socket timeout, in MICROSECONDS,
         # read at open time by FFmpeg's RTSP demuxer — without it a
         # stalled handshake can hang the constructor call forever.
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            f"rtsp_transport;tcp|stimeout;{config.RTSP_FFMPEG_STIMEOUT_US}"
-        )
+        #
+        # `threads` caps FFmpeg's OWN internal software-decode thread
+        # count for THIS stream. Left unset, FFmpeg multi-threads its
+        # H.264/H.265 decode across every core it can see, per camera --
+        # entirely separate from and invisible to torch_num_threads/
+        # cv2.setNumThreads (see config.py's RTSP_FFMPEG_THREADS), and
+        # with N cameras each doing that concurrently, real continuous
+        # CPU demand that nothing else in this codebase accounts for.
+        opts = f"rtsp_transport;tcp|stimeout;{config.RTSP_FFMPEG_STIMEOUT_US}"
+        if config.RTSP_FFMPEG_THREADS > 0:
+            opts += f"|threads;{config.RTSP_FFMPEG_THREADS}"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = opts
 
         new_cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
         try:
