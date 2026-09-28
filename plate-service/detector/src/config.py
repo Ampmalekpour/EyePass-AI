@@ -122,23 +122,54 @@ ENGINE_SHUTDOWN_TIMEOUT_SEC = _float("ENGINE_SHUTDOWN_TIMEOUT_SEC", 30.0)
 # ============================================================================
 # single -- unchanged prior behavior: one engine batches up to
 #           MAX_CAMERAS_PER_ENGINE cameras into one model.predict() call
-#           per loop iteration.
+#           per loop iteration. One process, so it always gets the full
+#           usable thread pool -- no oversubscription risk, ever.
 # multi  -- one engine PROCESS per camera (CPU_MULTI_CAMERAS_PER_ENGINE,
 #           default 1): same Engine code, same DETECT_EVERY_N_FRAMES,
 #           same tracker config -- "recognition" is identical, only the
-#           OS-level scheduling differs (real parallelism across
-#           processes instead of in-process batching). Each engine's
-#           torch thread pool is capped low (CPU_MULTI_TORCH_THREADS)
-#           on purpose, so N concurrent single-camera processes don't
-#           each try to grab (cores-1) threads and oversubscribe.
+#           OS-level scheduling differs.
 # auto   -- compute MAX_CAMERAS_PER_ENGINE for "single"-style batching
 #           from core count + the estimated per-camera cost below,
-#           instead of a hand-set cap.
+#           instead of a hand-set cap; falls back toward bigger batches
+#           (fewer engines) if CPU_EXPECTED_CAMERAS would need more
+#           engines than CPU_MAX_CONCURRENT_ENGINES allows.
+#
+# CPU_MAX_CONCURRENT_ENGINES / CPU_EXPECTED_CAMERAS below exist because
+# of a real bug the first version of this had: "multi" and "auto" each
+# handed EVERY engine the full usable thread pool, on the unstated
+# assumption that only one engine would ever be running at a time. The
+# instant a 3rd single-camera engine started in "multi" mode, all three
+# processes tried to claim the whole pool simultaneously and infer time
+# went from ~40ms to 600-700ms (see [INFER-SLOW] warnings) -- classic
+# CPU oversubscription/thrashing, not a model or tracker problem. Fixed
+# by dividing the thread pool across however many engines are actually
+# expected to run concurrently, instead of every engine assuming it's
+# alone.
+#
+# CPU_MAX_CONCURRENT_ENGINES is the single most important number here:
+# it must reflect REAL cores available to THIS CONTAINER, not a guess.
+# os.cpu_count() is read inside the container at plan() time and is
+# usually right for a cpuset-limited box, but Docker's `--cpus`/Docker
+# Desktop CPU limits are often a CFS quota, not a cpuset -- a quota
+# does NOT change what os.cpu_count() reports, so auto-detection can
+# silently over-report. Verify with `docker exec <container> nproc`
+# (or your Docker Desktop Resources setting) and set this explicitly
+# rather than trusting the default.
+CPU_MAX_CONCURRENT_ENGINES = _int("CPU_MAX_CONCURRENT_ENGINES", 1)
+# Best estimate of how many cameras will end up attached. Used only to
+# figure out how many engines "multi"/"auto" should plan for (and thus
+# how to divide the thread pool) -- it does not limit how many cameras
+# can actually be added.
+CPU_EXPECTED_CAMERAS = _int("CPU_EXPECTED_CAMERAS", 1)
+
 CPU_ENGINE_MODE = os.getenv("CPU_ENGINE_MODE", "single").strip().lower()
 
-# "multi" mode only:
+# "multi" mode only: cameras per engine (almost always 1 -- that's the
+# point of "multi"). Thread count per engine is auto-divided from
+# CPU_MAX_CONCURRENT_ENGINES/CPU_EXPECTED_CAMERAS unless overridden here
+# (0 = auto-divide, matching TORCH_NUM_THREADS's own 0-sentinel convention).
 CPU_MULTI_CAMERAS_PER_ENGINE = _int("CPU_MULTI_CAMERAS_PER_ENGINE", 1)
-CPU_MULTI_TORCH_THREADS = _int("CPU_MULTI_TORCH_THREADS", 1)
+CPU_MULTI_TORCH_THREADS = _int("CPU_MULTI_TORCH_THREADS", 0)
 
 # "auto" mode only -- capacity-planning inputs:
 # cores held back for OS overhead + the per-camera RTSP capture/decode

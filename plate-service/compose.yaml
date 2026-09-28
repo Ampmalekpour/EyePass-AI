@@ -264,9 +264,19 @@ services:
       #          settings, real OS-level parallelism instead of batching.
       # auto   = compute max_cameras_per_engine from core count + the
       #          measured per-camera cost below.
+      #
+      # CPU_MAX_CONCURRENT_ENGINES is the important one: how many engine
+      # PROCESSES this box can actually run in parallel without
+      # thrashing. Verify with `docker exec plate_detector nproc` (a
+      # Docker `--cpus` CPU limit is a CFS quota, not a cpuset, so
+      # os.cpu_count() inside the container can over-report vs. what
+      # Docker Desktop's Resources setting actually allows) -- do not
+      # leave this at the default 1 once you go past a single camera.
       CPU_ENGINE_MODE: ${CPU_ENGINE_MODE:-single}
+      CPU_MAX_CONCURRENT_ENGINES: ${CPU_MAX_CONCURRENT_ENGINES:-1}
+      CPU_EXPECTED_CAMERAS: ${CPU_EXPECTED_CAMERAS:-1}
       CPU_MULTI_CAMERAS_PER_ENGINE: ${CPU_MULTI_CAMERAS_PER_ENGINE:-1}
-      CPU_MULTI_TORCH_THREADS: ${CPU_MULTI_TORCH_THREADS:-1}
+      CPU_MULTI_TORCH_THREADS: ${CPU_MULTI_TORCH_THREADS:-0}
       CPU_RESERVE_CORES: ${CPU_RESERVE_CORES:-1}
       CPU_MS_PER_CAMERA_FRAME: ${CPU_MS_PER_CAMERA_FRAME:-28.0}
       CAMERA_ASSUMED_FPS: ${CAMERA_ASSUMED_FPS:-25.0}
