@@ -6,17 +6,18 @@
 # One file. Dev vs prod is not a different file, it's different values
 # in .env (LOG_LEVEL, engine/worker counts, memory limits, GPU on/off).
 #
-# Unlike the face module's own compose.yaml, this file does NOT include
-# a mediamtx/camera_stream service: the plate module already has its
-# own eyepass-camera-stream + MediaMTX deployment running in production
-# (that's what plate:camera:events — singular "camera" — is; see
-# common/platecore/keys.py). Point REDIS_* / MTX_RTSP_BASE_URL below at
-# that existing stack. If you genuinely need a standalone dev relay +
-# camera_stream (no existing deployment to point at), copy the two
-# service blocks from face_service's own compose.yaml as a starting
-# point, or run the reference project's docker-compose.standalone.yml
-# instead — both are drop-in compatible with the Redis contract this
-# module reads (`{module}:cameras:config` / `:details` / `:camera:events`).
+# Two .env switches select what actually runs (see README "Run it"):
+#
+#   COMPOSE_FILE=compose.yaml:compose.gpu.yaml   GPU host (adds the
+#   COMPOSE_FILE=compose.yaml                    NVIDIA reservation) / CPU host
+#
+#   COMPOSE_PROFILES=standalone-stream           this module's OWN relay
+#   COMPOSE_PROFILES=                            (mediamtx + camera_stream) —
+#                                                leave it out to use the whole
+#                                                system's shared streamer instead
+#                                                (README "Using the system's
+#                                                streamer instead of the
+#                                                standalone one").
 #
 # Redis and MinIO are external dependencies (compose.infra.yaml, or
 # whatever the platform already runs). No depends_on reaches across
@@ -38,9 +39,10 @@
 #                    crops to MinIO, pushes results back to the owning
 #                    detector engine (plate:vehicle:results).
 #
-# GPU is baked into plate_detector below (delete the `deploy:` block if
-# you run on a host with no GPU — plate_ocr runs CPU-only by default
-# regardless, see ocr_service/requirements.txt).
+# The GPU reservation lives in compose.gpu.yaml (COMPOSE_FILE above), so
+# a CPU-only host needs no edit here — set DETECTION_DEVICE=cpu and drop
+# compose.gpu.yaml from COMPOSE_FILE. plate_ocr runs CPU-only by default
+# regardless, see ocr_service/requirements.txt.
 # =====================================================================
 
 name: eyeplate-plate
@@ -62,10 +64,18 @@ services:
   # itself, without waiting for the backend to resend anything.
   # -------------------------------------------------------------------
 
+  # -------------------------------------------------------------------
+  # STANDALONE STREAMER (profile `standalone-stream`): this module's own
+  # RTSP relay + camera_stream. On a full EyePass deployment the system
+  # already runs ONE shared mediamtx + camera_stream for every module —
+  # drop `standalone-stream` from COMPOSE_PROFILES and point
+  # MTX_RTSP_BASE_URL / REDIS_* / SHARED_NETWORK at it instead.
+  # -------------------------------------------------------------------
   mediamtx:
     <<: *common
     image: bluenviron/mediamtx:${MEDIAMTX_TAG:-latest}
     container_name: plate_mediamtx
+    profiles: [ standalone-stream ]
     environment:
       TZ: ${TZ:-UTC}
       MTX_LOGLEVEL: ${MTX_LOGLEVEL:-info}
@@ -91,6 +101,7 @@ services:
       context: ./camera-service
     image: eyeplate/camera-stream:${IMAGE_TAG:-dev}
     container_name: plate_camera_stream
+    profiles: [ standalone-stream ]
     init: true
     labels:
       autoheal: "true"
@@ -128,16 +139,22 @@ services:
         condition: service_started
 
 
+  # -------------------------------------------------------------------
+  # Test clips (profile `test-video`): loop TEST_VIDEO_FILE into the relay
+  # as camera paths 1..6. TEST_VIDEO_RTSP_BASE_URL is the relay they
+  # publish to — this module's own mediamtx by default, or the system's.
+  # (No depends_on: publish_loop.sh waits and retries on its own, and the
+  # relay may not be part of this compose project at all.)
+  # -------------------------------------------------------------------
   video_publisher:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_1
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/1
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/1
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
@@ -146,11 +163,10 @@ services:
     container_name: plate_video_publisher_2
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/2
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/2
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
@@ -159,11 +175,10 @@ services:
     container_name: plate_video_publisher_3
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/3
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/3
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
@@ -172,11 +187,10 @@ services:
     container_name: plate_video_publisher_4
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/4
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/4
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
@@ -185,11 +199,10 @@ services:
     container_name: plate_video_publisher_5
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/5
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/5
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
@@ -198,11 +211,10 @@ services:
     container_name: plate_video_publisher_6
     profiles: [ test-video ]
     environment:
-      MTX_RTSP_URL: rtsp://mediamtx:8554/6
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/6
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
-    depends_on: { mediamtx: { condition: service_started } }
     restart: unless-stopped
     networks: [ platform ]
 
@@ -213,6 +225,10 @@ services:
       dockerfile: detector/Dockerfile
       args:
         BASE_IMAGE: ${AI_BASE_IMAGE:-base_image_gpu:latest}
+        # CPU runtimes baked into the image — pin to the exported/benchmarked versions
+        INSTALL_CPU_RUNTIMES: ${INSTALL_CPU_RUNTIMES:-true}
+        OPENVINO_VERSION: ${OPENVINO_VERSION:-}
+        ONNXRUNTIME_VERSION: ${ONNXRUNTIME_VERSION:-}
     image: eyeplate/plate-detector:${IMAGE_TAG:-dev}
     container_name: plate_detector
     # PID-1 reaper for the spawned engine subprocesses, so a crashed
@@ -236,15 +252,34 @@ services:
       # network with it directly.
       MTX_RTSP_BASE_URL: ${MTX_RTSP_BASE_URL:-rtsp://mediamtx:8554}
 
-      # ---- compute --------------------------------------------------
-      # auto | cpu | cuda | cuda:N. Resolved inside each engine CHILD
-      # process — see detector/src/engine.py resolve_device().
+      # ---- compute: GPU or CPU, and which model ---------------------
+      # gpu | cpu | auto | cuda:N. Resolved inside each engine CHILD
+      # process — see detector/src/inference_backends.resolve_runtime().
+      #   gpu -> PyTorch .pt via Ultralytics (unchanged pipeline)
+      #   cpu -> DETECTION_BACKEND (openvino | onnx | pt)
       DETECTION_DEVICE: ${DETECTION_DEVICE:-auto}
       STRICT_DEVICE: ${STRICT_DEVICE:-false}
       TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-0}
-      MODEL_PATH: ${DETECTION_MODEL_PATH:-/models/best.pt}
-      DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-480}
+      # plate_v8n_480 | plate_v8s_640 — every file and the input size
+      # follow from this name (detector/src/model_files.py)
+      DETECTION_MODEL: ${DETECTION_MODEL:-plate_v8n_480}
+      DETECTION_MODEL_ROOT: /models
+      MODEL_PATH: ${DETECTION_MODEL_PATH:-}
+      DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-0}
       DETECTION_CONF_THRESHOLD: ${DETECTION_CONF_THRESHOLD:-0.25}
+      # ---- CPU pipeline (DETECTION_DEVICE=cpu) -------------------------
+      DETECTION_BACKEND: ${DETECTION_BACKEND:-openvino}
+      DETECTION_PRECISION: ${DETECTION_PRECISION:-fp32}
+      DETECTION_CPU_INPUT_SIZE: ${DETECTION_CPU_INPUT_SIZE:-}
+      DETECTION_CPU_SHAPE_MODE: ${DETECTION_CPU_SHAPE_MODE:-roi}
+      DETECTION_IOU_THRESHOLD: ${DETECTION_IOU_THRESHOLD:-0.7}
+      DETECTION_MAX_DET: ${DETECTION_MAX_DET:-300}
+      DETECTION_CPU_STREAMS: ${DETECTION_CPU_STREAMS:-0}
+      DETECTION_CPU_THREADS: ${DETECTION_CPU_THREADS:-0}
+      DETECTION_WARMUP_RUNS: ${DETECTION_WARMUP_RUNS:-3}
+      DETECTION_BACKEND_FALLBACK: ${DETECTION_BACKEND_FALLBACK:-true}
+      OPENVINO_CACHE_DIR: ${OPENVINO_CACHE_DIR:-/data/openvino_cache}
+      OPENVINO_SCHEDULING_CORE_TYPE: ${OPENVINO_SCHEDULING_CORE_TYPE:-}
       # run YOLO on 1-in-N frames per camera; tracker coasts the rest via
       # its own Kalman prediction (see engine.py run loop + config.py).
       # 1 = every frame (unchanged behavior). Main CPU lever for adding
@@ -413,14 +448,14 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-text}
       API_PORT: "8010"
 
-
-    depends_on:
-      mediamtx:
-        condition: service_started
+    # No depends_on on mediamtx: the relay may be this module's standalone
+    # one or the whole system's (not part of this project), and the RTSP
+    # reader reconnects on its own either way.
 
     volumes:
       # Model weights, mounted rather than baked so swapping the model
-      # needs no rebuild. Operator supplies best.pt here.
+      # needs no rebuild. Operator supplies plate_v8n_480.pt /
+      # plate_v8s_640.pt and their ONNX/OpenVINO variants here.
       - ${DETECTION_MODELS_DIR:-./models/detection}:/models:ro
       # NOTE: previously also mounted a `detector_data:/data` named
       # docker volume here for "durable local state" — nothing in this
@@ -441,7 +476,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 4
-      start_period: 120s        # YOLO load + CUDA init is slow on first boot
+      start_period: 120s        # model load + CUDA init / OpenVINO compile on first boot
     stop_grace_period: 60s      # must exceed ENGINE_SHUTDOWN_TIMEOUT_SEC
     deploy:
       resources:
@@ -458,14 +493,8 @@ services:
         # Unset/0 = unlimited (today's prior behavior).
         limits:
           cpus: "${DETECTOR_CPU_LIMIT:-0}"
-        # GPU reservation. Requires nvidia-container-toolkit on the host.
-        # Delete just this `reservations:` block (keep `limits:` above)
-        # to run on a host with no GPU.
-        reservations:
-          devices:
-            - driver: nvidia
-              count: ${GPU_COUNT:-1}
-              capabilities: [gpu]
+        # The GPU reservation is added by compose.gpu.yaml (COMPOSE_FILE
+        # in .env) — not here, so a CPU-only host needs no edit.
 
   # -------------------------------------------------------------------
   # Car/motorcycle PaddleOCR worker pool. Scaled independently of

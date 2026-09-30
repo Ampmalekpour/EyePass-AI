@@ -15,6 +15,16 @@
 ARG BASE_IMAGE=base_image_gpu:latest
 FROM ${BASE_IMAGE}
 
+# CPU inference runtimes (DETECTION_DEVICE=cpu). PIN THESE to the exact
+# versions of the venv the models were exported + benchmarked with
+# (`pip freeze` there) — .env OPENVINO_VERSION / ONNXRUNTIME_VERSION.
+# Export and run with the same OpenVINO: a newer runtime reads older IR,
+# not the other way round. Empty = latest (only for a first try).
+# INSTALL_CPU_RUNTIMES=false skips both (GPU-only image).
+ARG INSTALL_CPU_RUNTIMES=true
+ARG OPENVINO_VERSION=
+ARG ONNXRUNTIME_VERSION=
+
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
@@ -28,14 +38,31 @@ COPY detector/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt || \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
+# openvino + onnxruntime (CPU). onnxruntime is skipped when the base
+# image already ships an onnxruntime build (e.g. onnxruntime-gpu) —
+# installing both breaks the import; the detector always names
+# CPUExecutionProvider explicitly either way.
+RUN set -e; \
+    if [ "${INSTALL_CPU_RUNTIMES}" = "true" ]; then \
+      PKGS="openvino${OPENVINO_VERSION:+==${OPENVINO_VERSION}}"; \
+      python -c "import onnxruntime" 2>/dev/null || PKGS="$PKGS onnxruntime${ONNXRUNTIME_VERSION:+==${ONNXRUNTIME_VERSION}}"; \
+      echo "installing CPU runtimes: $PKGS"; \
+      pip install --no-cache-dir --break-system-packages $PKGS || pip install --no-cache-dir $PKGS; \
+      python -c "import openvino as ov, onnxruntime as ort; print('openvino', ov.__version__, '| onnxruntime', ort.__version__)"; \
+    fi
+
 # ---- shared internal library, copied into both service images -------
 COPY common/platecore /app/platecore
 
 # ---- this service's own source ---------------------------------------
 COPY detector/src /app
+# parity test + CPU-model export (README "CPU pipeline")
+COPY detector/tools /app/tools
 
 # ---- runtime directories -----------------------------------------------
-# /models        bind-mounted, read-only: best.pt (see README)
+# /models        bind-mounted, read-only: plate_v8n_480.pt, plate_v8s_640.pt
+#                and their ONNX/OpenVINO variants (see README)
+# /data          scratch: Ultralytics config, OpenVINO compiled-model cache
 # /debug         local bind volume: annotated debug video, when enabled
 RUN mkdir -p /data /models /debug
 

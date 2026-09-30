@@ -27,9 +27,11 @@ for the step-by-step flow and how every failure case is handled.
 
 - Docker Engine + Compose v2 (`docker compose version`).
 - For GPU: an NVIDIA driver + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
-  **No GPU?** Delete the `deploy:` block under `face_detector` /
-  `plate_detector` in each `compose.yaml`, and set
-  `DETECTION_DEVICE=cpu` in `.env`.
+  **No GPU?** Face: delete the `deploy:` block under `face_detector` in
+  `face-service/compose.yaml` and set `DETECTION_DEVICE=cpu`. Plate: no
+  compose edit. In `plate-service/.env` set `COMPOSE_FILE=compose.yaml`
+  and `DETECTION_DEVICE=cpu`, and the detector runs OpenVINO on the CPU
+  (see [plate-service/README.md → GPU or CPU](plate-service/README.md#gpu-or-cpu)).
 - Your prepared **base images**, which already contain
   torch/ultralytics/OpenCV (and PaddleOCR for plate):
   `base_image:latest` (face) and `base_image_gpu:latest` (plate). If
@@ -68,7 +70,7 @@ rebuild.
 
 | Put this | Here | Used by |
 |---|---|---|
-| `best.pt`, the YOLO vehicle/plate model | `plate-service/models/detection/best.pt` | plate_detector |
+| The plate models: `plate_v8n_480.pt` and/or `plate_v8s_640.pt`, plus their CPU exports (`plate_v8n_480_288x480.onnx`, `plate_v8n_480_fp32_openvino_model/`, …); layout in [plate-service/README.md](plate-service/README.md#the-detection-models-folder) | `plate-service/models/detection/` | plate_detector (`DETECTION_MODEL` picks one) |
 | Your whole `PadOcr/` folder's **contents**, names unchanged: `en_PP-OCRv3_det_infer/`, `rec_svrt_fa_final_1/`, `ch_ppocr_mobile_v2.0_cls_infer/`, `rec_svrt_motor/`, `Final_Dict.txt` | `plate-service/models/ocr/` | plate_ocr |
 | *(optional)* a test clip for `--profile test-video` | `plate-service/test_video.mp4` | video_publisher |
 
@@ -91,7 +93,11 @@ Edit at least these:
 - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`: **must be identical in
   both `.env` files** if both modules share the one MinIO from step 4.
   The two examples ship different defaults.
-- `DETECTION_DEVICE`: `auto`, `cpu` or `cuda:0`.
+- `DETECTION_DEVICE`: `auto`, `cpu` or `cuda:0` (plate also takes
+  `gpu`). For plate, also set `COMPOSE_FILE` (GPU or CPU host),
+  `DETECTION_MODEL` (`plate_v8n_480` / `plate_v8s_640`) and
+  `COMPOSE_PROFILES` (standalone relay, or the system's). See the
+  Quick start in [plate-service/README.md](plate-service/README.md#quick-start).
 
 ### 4. Start (the shared network and Redis/MinIO once, then the modules)
 

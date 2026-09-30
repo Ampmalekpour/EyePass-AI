@@ -14,6 +14,11 @@ questions from os.cpu_count() plus the CPU_* knobs in config.py's
      ask for, GIVEN HOW MANY ENGINES ARE EXPECTED TO RUN AT THE SAME
      TIME                                     -> torch_num_threads
 
+  3. for the OpenVINO / ONNX backends: how many parallel requests
+     (streams) and how many inference threads each engine's model
+     gets                        -> cpu_streams, cpu_infer_threads
+     (see openvino_plan(); torch_num_threads is unused on that path)
+
 main.py calls plan() exactly once at startup, before EngineManager is
 constructed — topology is fixed for the life of the process; change
 CPU_ENGINE_MODE (or any of its inputs) and restart to re-plan.
@@ -97,11 +102,48 @@ def auto_max_cameras_per_engine() -> int:
     return max(1, min(cap, max(1, config.MAX_CAMERAS_PER_ENGINE)))
 
 
-def plan(device: str, log: logging.Logger = None) -> dict:
+def openvino_plan(expected_cameras: int, max_cams: int, expected_engines: int, backend: str) -> dict:
+    """Parallel requests + threads for one engine's OpenVINO/ONNX model.
+
+    streams: one per camera the engine carries (OpenVINO NUM_STREAMS /
+      infer requests, or ONNX Runtime sessions) -- the engine starts one
+      async request per camera frame and waits for all of them.
+    threads: OpenVINO INFERENCE_NUM_THREADS / ORT intra_op_num_threads.
+      openvino, one engine, no CPU_CORES_OVERRIDE -> 0 = let OpenVINO
+      choose (forcing the full LOGICAL core count measured a single
+      inference 2x slower: 15 ms vs 7.2 ms, work spread onto E-cores and
+      hyper-threads). Several engines -> physical cores / engines, so
+      they share the cores instead of each claiming all of them. Under a
+      Docker quota (CPU_CORES_OVERRIDE) -> that budget / engines.
+      onnx: sessions don't coordinate, so always cores / (engines * sessions)."""
+    per_engine_cams = max(1, min(max_cams, _ceil_div(expected_cameras, expected_engines)))
+    budget = int(config.CPU_CORES_OVERRIDE) or physical_cores()
+    if backend == "onnx":
+        threads = max(1, budget // max(1, expected_engines * per_engine_cams))
+    elif config.CPU_CORES_OVERRIDE or expected_engines > 1:
+        threads = max(1, budget // max(1, expected_engines))
+    else:
+        threads = 0
+    return {"cpu_streams": per_engine_cams, "cpu_infer_threads": threads}
+
+
+def physical_cores() -> int:
+    try:
+        import psutil
+        n = psutil.cpu_count(logical=False)
+        if n:
+            return int(n)
+    except Exception:
+        pass
+    return os.cpu_count() or 4
+
+
+def plan(device: str, log: logging.Logger = None, backend: str = "pt") -> dict:
     """Returns the effective {mode, max_cameras_per_engine,
-    torch_num_threads, expected_concurrent_engines} for this box.
-    `device` is the already-resolved "cpu"/"cuda[:N]" string (see
-    engine.resolve_device) -- on anything but "cpu" this is a no-op
+    torch_num_threads, expected_concurrent_engines, cpu_streams,
+    cpu_infer_threads} for this box. `device` is the already-resolved
+    "cpu"/"cuda[:N]" string and `backend` the CPU backend (see
+    engine.resolve_runtime) -- on anything but "cpu" this is a no-op
     passthrough of the existing GPU config, so calling this
     unconditionally at startup is safe."""
     log = log or logger
@@ -112,6 +154,8 @@ def plan(device: str, log: logging.Logger = None) -> dict:
             "max_cameras_per_engine": max(1, config.MAX_CAMERAS_PER_ENGINE),
             "torch_num_threads": config.TORCH_NUM_THREADS,
             "expected_concurrent_engines": 1,
+            "cpu_streams": 0,
+            "cpu_infer_threads": 0,
         }
         log.info("[CPU-TOPOLOGY] device=%s -> GPU batching unchanged "
                   "(max_cameras_per_engine=%d)", device, result["max_cameras_per_engine"])
@@ -172,6 +216,9 @@ def plan(device: str, log: logging.Logger = None) -> dict:
             "expected_concurrent_engines": 1,
         }
 
+    result.update(openvino_plan(expected_cameras, result["max_cameras_per_engine"],
+                                result["expected_concurrent_engines"], backend))
+
     if config.CPU_CORES_OVERRIDE:
         log.info("[CPU-TOPOLOGY] using CPU_CORES_OVERRIDE=%d (host/container reports os.cpu_count()=%d "
                   "-- set this to match your Docker --cpus limit, they must agree)",
@@ -195,4 +242,16 @@ def plan(device: str, log: logging.Logger = None) -> dict:
         config.DETECT_EVERY_N_FRAMES, config.CPU_MS_PER_CAMERA_FRAME,
         config.CAMERA_ASSUMED_FPS, config.CPU_AUTO_SAFETY_MARGIN,
     )
+    if backend != "pt":
+        log.info("[CPU-TOPOLOGY] backend=%s -> per engine: streams=%s%s threads=%s%s "
+                 "(torch_num_threads above is unused — PyTorch does not compute on this path)",
+                 backend,
+                 config.CPU_STREAMS or result["cpu_streams"], " (DETECTION_CPU_STREAMS)" if config.CPU_STREAMS else "",
+                 config.CPU_INFER_THREADS or result["cpu_infer_threads"] or "auto(OpenVINO chooses)",
+                 " (DETECTION_CPU_THREADS)" if config.CPU_INFER_THREADS else "")
+        load = expected_cameras * config.CAMERA_ASSUMED_FPS / max(1, config.DETECT_EVERY_N_FRAMES)
+        log.info("[CPU-TOPOLOGY] planned load: %d cameras x %.0f fps / DETECT_EVERY_N_FRAMES=%d = "
+                 "%.0f inferences/s — keep this under ~60-70%% of the capacity you measured "
+                 "(README 'CPU pipeline')", expected_cameras, config.CAMERA_ASSUMED_FPS,
+                 max(1, config.DETECT_EVERY_N_FRAMES), load)
     return result

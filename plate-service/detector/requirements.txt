@@ -14,6 +14,15 @@
 # output goes to the local bind volume, never MinIO), so boto3 is not
 # needed here.
 # --------------------------------------------------------------------
+#
+# openvino / onnxruntime (CPU pipeline) are installed by the Dockerfile
+# with versions pinned from .env (OPENVINO_VERSION / ONNXRUNTIME_VERSION),
+# not here. pyyaml reads the models' metadata.yaml / export_info.yaml
+# (Ultralytics already depends on it); psutil gives the physical core
+# count used to split OpenVINO threads between engines.
+# --------------------------------------------------------------------
 redis==5.0.8
 scipy>=1.10
 lap>=0.4.0
+pyyaml>=5.4
+psutil>=5.9

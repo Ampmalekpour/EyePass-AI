@@ -70,6 +70,7 @@ def make_engine(leave_scene=True):
     eng.hub = FakeHub()
     eng._uid_index = {}
     eng.STAGE_PRIORITY = {"leave_scene": 3, "cross_line": 2, "stop_roi": 2, "periodic": 1}
+    eng.STAGE_EMOJI = {"periodic": "🔁", "cross_line": "🚧", "stop_roi": "🛑", "leave_scene": "🏁"}
     eng.MIN_SEEN_FRAMES = 8
     eng.MIN_CROPS_TO_FINALIZE = 1
     eng.writers = {}

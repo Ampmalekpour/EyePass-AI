@@ -2,10 +2,17 @@
 engine.py
 --------------------------------------------------------------------
 The plate detection/tracking/trigger engine — one YOLO model per
-process, handling however many cameras EngineManager assigns it via
-batched Ultralytics inference. Batch inference, BYTETrack update,
-spatial-trigger geometry, best-crop ranking and the debug recorder run
-here, per frame.
+process, handling however many cameras EngineManager assigns it. Batch
+inference, BYTETrack update, spatial-trigger geometry, best-crop
+ranking and the debug recorder run here, per frame.
+
+Inference goes through inference_backends.py:
+  GPU  -> PyTorch .pt via Ultralytics, batched predict (unchanged)
+  CPU  -> OpenVINO (default) / ONNX Runtime, one parallel request per
+          camera frame; PyTorch-on-CPU only as the logged fallback.
+Every backend returns the same [x1, y1, x2, y2, conf, cls] float64
+array per frame, so nothing below the inference call knows which one
+ran.
 
 A track's OCR STATE lives in the control hub (control-hub/), not here:
 
@@ -42,10 +49,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import torch
-from ultralytics import YOLO
 
 import config
+import inference_backends
+from model_files import parse_hw
 from debug_recorder import DebugConfig, DebugRecorder
 from platecore.bus import RedisBus
 from platecore.hub import (
@@ -119,23 +126,36 @@ def build_tracker_config() -> PlateTrackerConfig:
     )
 
 
-def resolve_device(preference: str, strict: bool, logger: logging.Logger) -> str:
-    """auto | cpu | cuda | cuda:N -> a concrete torch device string.
-    NEW — the reference Engine hardcoded self.device = "cpu" (a leftover
-    from a benchmarking session). This restores the auto-detect the
-    original comment said used to be there, gated by DETECTION_DEVICE."""
-    pref = (preference or "auto").strip().lower()
-    if pref == "auto":
-        if torch.cuda.is_available():
-            return "cuda"
-        return "cpu"
-    if pref.startswith("cuda") and not torch.cuda.is_available():
-        msg = f"DETECTION_DEVICE={preference!r} requested but CUDA is not available"
-        if strict:
-            raise RuntimeError(msg)
-        logger.error("%s — falling back to CPU", msg)
-        return "cpu"
-    return pref
+def resolve_runtime(logger: logging.Logger) -> "inference_backends.RuntimePlan":
+    """DETECTION_DEVICE / DETECTION_BACKEND / DETECTION_PRECISION -> the
+    concrete plan (gpu+pt, or cpu+openvino/onnx/pt). Replaces the old
+    resolve_device(), which only knew torch devices — its "auto -> cuda"
+    answer must never feed the ONNX/OpenVINO path."""
+    return inference_backends.resolve_runtime(
+        config.DETECTION_DEVICE, config.DETECTION_BACKEND, config.DETECTION_PRECISION,
+        config.STRICT_DEVICE, logger,
+    )
+
+
+def backend_settings(model_path: str = "", imgsz: int = 0) -> "inference_backends.BackendSettings":
+    return inference_backends.BackendSettings(
+        model_root=config.MODEL_ROOT,
+        model_name=config.DETECTION_MODEL,
+        model_path_override=model_path or "",
+        imgsz_override=int(imgsz or 0),
+        cpu_input_hw=parse_hw(config.CPU_INPUT_SIZE) if config.CPU_INPUT_SIZE else None,
+        conf=config.CONF_THRESHOLD,
+        iou=config.IOU_THRESHOLD,
+        max_det=config.MAX_DET,
+        cpu_streams=max(1, config.CPU_STREAMS or 1),
+        cpu_threads=config.CPU_INFER_THREADS,
+        openvino_cache_dir=config.OPENVINO_CACHE_DIR,
+        openvino_core_type=config.OPENVINO_SCHEDULING_CORE_TYPE,
+        warmup_runs=config.DETECTION_WARMUP_RUNS,
+        shape_mode=config.CPU_SHAPE_MODE,
+        fallback_to_pt=config.BACKEND_FALLBACK,
+        class_labels=config.CLASS_LABELS,
+    )
 
 
 # --------------------------------------------------------------------
@@ -193,8 +213,7 @@ class Engine:
             conf_digits: int = 2,
     ):
         self.engine_id = int(engine_id)
-        self.model_path = model_path
-        self.imgsz = int(imgsz)
+        self.model_path = model_path or ""
         self.conf = float(conf)
         self.save_output = bool(save_output)
 
@@ -207,23 +226,39 @@ class Engine:
 
         self.logger = setup_logger(f"Engine{self.engine_id}")
 
-        self.device = resolve_device(config.DETECTION_DEVICE, config.STRICT_DEVICE, self.logger)
+        # ---- detection backend (GPU: .pt/Ultralytics; CPU: OpenVINO/ONNX)
+        # Built HERE, in the engine child process — openvino/onnxruntime
+        # are imported and the model compiled inside the child, never in
+        # the parent (spawn-safe; required on Windows).
+        self.runtime = resolve_runtime(self.logger)
+        self.logger.info(f"[INIT] detection runtime: {self.runtime.describe()} "
+                         f"model={config.DETECTION_MODEL} root={config.MODEL_ROOT}")
+        self.backend = inference_backends.build_backend(
+            self.runtime, backend_settings(self.model_path, imgsz), self.logger)
+        self.device = self.backend.device
+        self.imgsz = self.backend.imgsz_label
+
         if self.device == "cpu":
-            n = config.TORCH_NUM_THREADS or max(1, (os.cpu_count() or 4) - 1)
-            torch.set_num_threads(n)
             # cv2's own parallel_for thread pool (resize/crop/warp -- ROI
-            # cropping, YOLO's own letterbox preprocessing) is entirely
-            # separate from torch's and was previously left at OpenCV's
-            # default of "every core this process can see" -- with N
-            # engine processes each doing that, every camera's per-frame
-            # cv2 work was ALSO oversubscribing on top of the (correctly
-            # capped) torch threads. Capped to a small, explicit value:
-            # this work is comparatively light per frame and doesn't
-            # need many threads, and giving it its own uncapped pool
-            # defeats the whole point of capping torch's.
-            cv2_n = config.CV2_NUM_THREADS or max(1, min(n, 2))
-            cv2.setNumThreads(cv2_n)
-            self.logger.info(f"[INIT] CPU mode: torch threads set to {n}, cv2 threads set to {cv2_n}")
+            # cropping, letterbox preprocessing) is entirely separate from
+            # the inference runtime's and defaults to "every core this
+            # process can see" -- with N engine processes each doing that,
+            # every camera's per-frame cv2 work oversubscribes on top of
+            # the inference threads. Capped to a small, explicit value.
+            if self.backend.kind == "pt":
+                # PyTorch computes on the CPU only on this path (the pt
+                # backend, or the fallback) — never for OpenVINO/ONNX.
+                import torch
+                n = config.TORCH_NUM_THREADS or max(1, (os.cpu_count() or 4) - 1)
+                torch.set_num_threads(n)
+                cv2_n = config.CV2_NUM_THREADS or max(1, min(n, 2))
+                cv2.setNumThreads(cv2_n)
+                self.logger.info(f"[INIT] CPU/pt mode: torch threads set to {n}, cv2 threads set to {cv2_n}")
+            else:
+                cv2_n = config.CV2_NUM_THREADS or 2
+                cv2.setNumThreads(cv2_n)
+                self.logger.info(f"[INIT] CPU/{self.backend.kind} mode: cv2 threads set to {cv2_n} "
+                                 f"(torch not used for inference)")
 
         # track lifecycle config
         self.ABSENT_N = int(absent_n)
@@ -236,13 +271,6 @@ class Engine:
 
         # cameras: camera_id -> camera state
         self.cameras: Dict[str, Dict[str, Any]] = {}
-
-        # YOLO model
-        self.model = YOLO(self.model_path).to(self.device)
-        self.logger.info(
-            f"[INIT] YOLO model loaded model={self.model_path} device={self.device} "
-            f"imgsz={self.imgsz} conf={self.conf}"
-        )
 
         # OCR tasks out to the ocr_service, track events/ctl with the
         # control hub (see platecore/hub.py).
@@ -289,6 +317,7 @@ class Engine:
         return {
             "batches": 0, "cams_sum": 0, "infer_ms_sum": 0.0, "track_ms_sum": 0.0,
             "detections_sum": 0, "tracks_sum": 0, "skipped_sum": 0,
+            "infer_ms": [], "loop_ms": [],
         }
 
     def _flush_window(self):
@@ -296,9 +325,15 @@ class Engine:
         n = max(w["batches"], 1)
         attempted = w["batches"] + w["skipped_sum"]
         skip_pct = (100.0 * w["skipped_sum"] / attempted) if attempted > 0 else 0.0
+        infer_p95 = float(np.percentile(w["infer_ms"], 95)) if w["infer_ms"] else 0.0
+        loop_avg = float(np.mean(w["loop_ms"])) if w["loop_ms"] else 0.0
+        loop_p95 = float(np.percentile(w["loop_ms"], 95)) if w["loop_ms"] else 0.0
+        # A p95 far above the average usually means some requests landed
+        # on E-cores / a starved core — see README "CPU pipeline".
         self.logger.info(
-            f"📊 [STATS] engine={self.engine_id} last {w['batches']} batches | "
-            f"sources={w['cams_sum'] / n:.1f} | infer avg={w['infer_ms_sum'] / n:.1f}ms | "
+            f"📊 [STATS] engine={self.engine_id} {self.backend.label} last {w['batches']} batches | "
+            f"sources={w['cams_sum'] / n:.1f} | infer avg={w['infer_ms_sum'] / n:.1f}ms "
+            f"p95={infer_p95:.1f}ms | loop avg={loop_avg:.1f}ms p95={loop_p95:.1f}ms | "
             f"track avg={w['track_ms_sum'] / n:.1f}ms | "
             f"detections={w['detections_sum']} (avg {w['detections_sum'] / n:.1f}/batch) | "
             f"tracks={w['tracks_sum']} (avg {w['tracks_sum'] / n:.1f}/batch) | "
@@ -796,7 +831,7 @@ class Engine:
         H, W = full_frame.shape[:2]
         ctx = {
             "fid": fid, "url": cam.get("url", ""), "cam_status": "running" if cam.get("active", True) else "idle",
-            "device": self.device, "imgsz": self.imgsz, "conf": self.conf, "batch_size": len(self.cameras),
+            "device": self.backend.label, "imgsz": self.imgsz, "conf": self.conf, "batch_size": len(self.cameras),
             "infer_ms": self._last_infer_ms, "ocr_qin": -1, "ocr_qout": -1,
             "frame_wh": (W, H), "roi_px": roi_offset, "line_px": cam.get("line_points_px"),
             "stop_roi_px": cam.get("stop_roi_px"), "triggers": triggers,
@@ -812,10 +847,9 @@ class Engine:
     def run(self):
         self.logger.info("Engine loop started")
         try:
-            dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
-            _ = self.model.predict(source=[dummy], imgsz=self.imgsz, conf=self.conf, device=self.device, verbose=False)
-        except Exception:
-            pass
+            self.backend.warmup()
+        except Exception as e:
+            self.logger.warning(f"[INIT] warm-up failed: {e}")
 
         while not self.stop_event.is_set():
             self._drain_control()
@@ -824,6 +858,7 @@ class Engine:
                 continue
 
             self._drain_hub_ctl()
+            _loop_t0 = time.time()
 
             frames, cam_ids, roi_offsets, full_frames = [], [], [], []
             any_frame_read = False
@@ -955,10 +990,7 @@ class Engine:
 
             _infer_t0 = time.time()
             try:
-                results = self.model.predict(
-                    source=frames, imgsz=self.imgsz, conf=self.conf, device=self.device,
-                    verbose=False, half=False,
-                )
+                batch_dets, infer_breakdown = self.backend.infer(frames)
             except Exception as e:
                 for cid in cam_ids:
                     self._send_msg(cid, {"status": "error", "error": str(e)})
@@ -968,8 +1000,8 @@ class Engine:
 
             self._last_infer_ms = (time.time() - _infer_t0) * 1000.0
             self._batch_count += 1
-            if results:
-                self._last_infer_breakdown = dict(results[0].speed)
+            if infer_breakdown:
+                self._last_infer_breakdown = dict(infer_breakdown)
 
             ib = self._last_infer_breakdown or {}
             batch_size = len(cam_ids)
@@ -987,7 +1019,7 @@ class Engine:
             _batch_track_ms = 0.0
             _batch_skipped = 0
 
-            for idx, res in enumerate(results):
+            for idx, detections in enumerate(batch_dets):
                 camera_id = cam_ids[idx]
                 cam = self.cameras.get(camera_id)
                 if cam is None:
@@ -995,12 +1027,8 @@ class Engine:
                 try:
                     self._emit_heartbeat(camera_id)
 
-                    detections = np.empty((0, 6), dtype=np.float64)
-                    if res.boxes is not None and len(res.boxes) > 0:
-                        boxes = res.boxes.xyxy.cpu().numpy()
-                        confs = res.boxes.conf.cpu().numpy()
-                        clss = res.boxes.cls.cpu().numpy()
-                        detections = np.column_stack([boxes, confs, clss]).astype(np.float64)
+                    # [x1, y1, x2, y2, conf, cls] float64 in ROI pixels,
+                    # whichever backend produced it (inference_backends.py)
                     _batch_detections += int(detections.shape[0])
                     _batch_skipped += cam.pop("_last_iter_skipped", 0)
 
@@ -1209,6 +1237,8 @@ class Engine:
             self._win["detections_sum"] += _batch_detections
             self._win["tracks_sum"] += _batch_tracks
             self._win["skipped_sum"] += _batch_skipped
+            self._win["infer_ms"].append(self._last_infer_ms)
+            self._win["loop_ms"].append((time.time() - _loop_t0) * 1000.0)
             if self._win["batches"] >= self.LOG_EVERY_N_BATCHES:
                 self._flush_window()
 
@@ -1219,6 +1249,10 @@ class Engine:
         for camera_id in list(self.cameras.keys()):
             self.remove_camera(camera_id, reason="engine_stopped")
         self.hub.stop()
+        try:
+            self.backend.close()
+        except Exception:
+            pass
 
 
 def _engine_process_main(

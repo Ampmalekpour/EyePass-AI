@@ -29,8 +29,10 @@ from platecore.logging_setup import setup_logger
 
 import cpu_topology
 from backend_bridge import DetectorBridge
-from engine import resolve_device
+from engine import backend_settings, resolve_runtime
 from engine_manager import EngineManager
+from inference_backends import model_path_for
+from model_files import resolve_model
 
 logger = setup_logger("detector.main")
 
@@ -39,31 +41,54 @@ def main():
     logging.getLogger().setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
 
     # Resolved once, here, in the parent process, purely to plan engine
-    # topology (a read-only torch.cuda.is_available() probe -- the
-    # parent never builds a model or runs inference itself). Each engine
-    # subprocess still calls resolve_device() again for itself in
-    # Engine.__init__, which remains the source of truth for what
-    # device IT actually runs on -- see config.py's DETECTION_DEVICE
-    # comment for why this is safe with spawn-based children.
+    # topology (for auto/gpu a read-only torch.cuda.is_available() probe;
+    # the parent never builds a model, never imports openvino/onnxruntime
+    # and never runs inference). Each engine subprocess resolves the
+    # runtime again for itself in Engine.__init__, which remains the
+    # source of truth for what IT runs -- see config.py's
+    # DETECTION_DEVICE comment for why this is safe with spawn children.
     # See cpu_topology.py: on a GPU box this is a no-op passthrough of
     # the existing MAX_CAMERAS_PER_ENGINE/TORCH_NUM_THREADS config; on a
     # CPU box, CPU_ENGINE_MODE (single/multi/auto) decides how many
-    # cameras share one engine process and how many torch threads each
-    # engine asks for.
-    planned_device = resolve_device(config.DETECTION_DEVICE, config.STRICT_DEVICE, logger)
-    topology = cpu_topology.plan(planned_device, logger)
+    # cameras share one engine process, and how many parallel requests
+    # (streams) and threads each engine's OpenVINO/ONNX model gets.
+    runtime = resolve_runtime(logger)
+    planned_device = runtime.torch_device if runtime.device_kind == "gpu" else "cpu"
+    topology = cpu_topology.plan(planned_device, logger, backend=runtime.backend)
     max_cameras_per_engine = topology["max_cameras_per_engine"]
+    # Engine subprocesses are spawned (mp.get_context("spawn")) after
+    # this point and inherit the parent's environment, so each one's own
+    # config read in Engine.__init__ picks these up without any change
+    # to the spawn call itself. Explicit .env values are never replaced.
     if topology["torch_num_threads"]:
-        # Engine subprocesses are spawned (mp.get_context("spawn")) after
-        # this point and inherit the parent's environment, so each one's
-        # own `config.TORCH_NUM_THREADS` read in Engine.__init__ picks
-        # this up without any change to the spawn call itself.
         os.environ["TORCH_NUM_THREADS"] = str(int(topology["torch_num_threads"]))
+    if runtime.device_kind == "cpu" and runtime.backend != "pt":
+        if not config.CPU_STREAMS:
+            os.environ["DETECTION_CPU_STREAMS"] = str(int(topology["cpu_streams"]))
+        if not config.CPU_INFER_THREADS and topology["cpu_infer_threads"]:
+            os.environ["DETECTION_CPU_THREADS"] = str(int(topology["cpu_infer_threads"]))
+
+    # Fail early and readably if the chosen model files are missing
+    # (filesystem only — nothing is loaded here). The engine re-resolves
+    # them itself and, for onnx/openvino, falls back to the .pt model
+    # with an ERROR log when DETECTION_BACKEND_FALLBACK=true.
+    settings = backend_settings(config.MODEL_PATH, config.IMG_SIZE)
+    try:
+        spec = resolve_model(settings.model_root, settings.model_name, runtime.backend, runtime.precision,
+                             model_path_for(runtime.backend, settings.model_path_override),
+                             settings.imgsz_override, settings.cpu_input_hw, settings.class_labels)
+        logger.info("[MODEL] %s", spec.describe())
+    except Exception as e:
+        logger.error("[MODEL] %s", e)
+        if runtime.backend == "pt" or not config.BACKEND_FALLBACK:
+            raise
+        logger.error("[MODEL] engines will fall back to the PyTorch .pt model on CPU "
+                     "(DETECTION_BACKEND_FALLBACK=true)")
 
     logger.info(
-        "Starting plate detector | device preference=%s resolved=%s cpu_engine_mode=%s | "
+        "Starting plate detector | DETECTION_DEVICE=%s -> %s | model=%s | cpu_engine_mode=%s | "
         "rtsp base=%s | max_cameras_per_engine=%d (was config default %d)",
-        config.DETECTION_DEVICE, planned_device, config.CPU_ENGINE_MODE,
+        config.DETECTION_DEVICE, runtime.describe(), config.DETECTION_MODEL, config.CPU_ENGINE_MODE,
         config.MTX_RTSP_BASE_URL, max_cameras_per_engine, config.MAX_CAMERAS_PER_ENGINE,
     )
 
@@ -162,6 +187,8 @@ def main():
             "topology": engine_manager.snapshot(),
             "camera_status": bridge.status_snapshot(),
             "device_preference": config.DETECTION_DEVICE,
+            "runtime": runtime.describe(),
+            "model": config.DETECTION_MODEL,
         }
 
     serve_health(config.API_PORT, snapshot)

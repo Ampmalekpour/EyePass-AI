@@ -55,32 +55,100 @@ MTX_RTSP_BASE_URL = os.getenv("MTX_RTSP_BASE_URL", "rtsp://mediamtx:8554")
 # ============================================================================
 # 3. COMPUTE / MODEL
 # ============================================================================
-# Plain torch CPU inference — this is a deliberate rollback from an
-# earlier OpenVINO AsyncInferQueue experiment (it hit a thread-count
-# regression from a container-wide OMP_NUM_THREADS=1 leftover from the
-# old per-process model; see git history / the earlier debugging
-# session if you want to revisit OpenVINO later). "auto" tries CUDA
-# first and falls back to CPU. Every engine subprocess resolves this
-# independently for itself (source of truth for what IT runs on);
-# main.py also resolves it once, read-only, in the parent purely to
-# plan engine topology (see cpu_topology.py) before any engine is
-# spawned — spawned children get a fresh interpreter either way (this
-# module uses mp.get_context("spawn"), never fork), so that read-only
-# torch.cuda.is_available() probe in the parent carries none of the
-# fork-time CUDA-context hazards this comment used to warn about. The
-# parent still never builds a model or runs inference itself.
+# ---- GPU or CPU ----------------------------------------------------------
+#   gpu (= cuda) | cuda:N  GPU pipeline: the PyTorch .pt model through
+#                          Ultralytics, batched predict — unchanged.
+#   cpu                    CPU pipeline: DETECTION_BACKEND below
+#                          (OpenVINO by default), Ultralytics bypassed.
+#   auto                   gpu if torch sees CUDA, otherwise cpu.
+# Every engine subprocess resolves this for itself
+# (inference_backends.resolve_runtime); main.py also resolves it once,
+# read-only, in the parent to plan the engine topology (cpu_topology.py).
+# Children are spawned (mp.get_context("spawn")), never forked, and the
+# parent never loads a model or imports openvino/onnxruntime.
 DETECTION_DEVICE = os.getenv("DETECTION_DEVICE", "auto")
+# true: a requested-but-missing GPU is a startup error instead of a
+# logged fallback to the CPU pipeline.
 STRICT_DEVICE = _bool("STRICT_DEVICE", "false")
-# Torch CPU threads PER ENGINE PROCESS. 0 = "cpu_count - 1" (leaves one
-# core for reader/OCR-client threads), matching the reference Engine.
-TORCH_NUM_THREADS = _int("TORCH_NUM_THREADS", 0)
 
-MODEL_PATH = os.getenv("MODEL_PATH", "/models/best.pt")
-IMG_SIZE = _int("DETECTION_IMG_SIZE", 480)
+# ---- which model -------------------------------------------------------------
+# Base name of the model in the models folder (bind-mounted at
+# DETECTION_MODEL_ROOT). Every variant is found from it — see
+# model_files.py for the exact layout:
+#   plate_v8n_480  -> plate_v8n_480.pt, plate_v8n_480_288x480.onnx,
+#                     plate_v8n_480_{fp32,int8}_openvino_model/
+#   plate_v8s_640  -> plate_v8s_640.pt (+ its own exports, if made)
+DETECTION_MODEL = os.getenv("DETECTION_MODEL", "plate_v8n_480").strip()
+# In-container folder holding the models (compose.yaml mounts
+# DETECTION_MODELS_DIR here — a different name on purpose, because
+# .env's DETECTION_MODELS_DIR is the HOST path and env_file injects it
+# into the container too).
+MODEL_ROOT = os.getenv("DETECTION_MODEL_ROOT", "/models")
+# Optional explicit file (compose maps DETECTION_MODEL_PATH here).
+# Empty = derive from DETECTION_MODEL, which is what you want. A .pt
+# path is only used by the pt backend; the onnx/openvino backends only
+# take a .onnx/.xml path.
+MODEL_PATH = os.getenv("MODEL_PATH", "").strip()
+# Square inference size for the PyTorch/Ultralytics path. 0 = follow
+# the model name (plate_v8n_480 -> 480, plate_v8s_640 -> 640). Only set
+# it to deliberately run a model at a non-native size.
+IMG_SIZE = _int("DETECTION_IMG_SIZE", 0)
 CONF_THRESHOLD = _float("DETECTION_CONF_THRESHOLD", 0.25)
 # class 0 = Car, class 1 = Motorcycle — verbatim from the reference
 # alpr_service.py's class_labels and ocr_worker.py's voted_class split.
 CLASS_LABELS = {0: "Car", 1: "Motorcycle"}
+
+# ---- CPU pipeline (DETECTION_DEVICE=cpu) -----------------------------------
+# openvino (default, fastest FP32) | onnx | pt (Ultralytics on CPU, the
+# old path — ~2x slower, kept as the fallback).
+DETECTION_BACKEND = os.getenv("DETECTION_BACKEND", "openvino").strip().lower()
+# fp32 (default) | int8 (openvino only — see README before using it).
+DETECTION_PRECISION = os.getenv("DETECTION_PRECISION", "fp32").strip().lower()
+# Static model input "HxW" for onnx/openvino. Empty = read it from the
+# model itself (graph shape / metadata.yaml / export_info.yaml). Setting
+# it reshapes an OpenVINO model (both sides multiples of 32); a static
+# ONNX model cannot be reshaped and must be re-exported instead.
+CPU_INPUT_SIZE = os.getenv("DETECTION_CPU_INPUT_SIZE", "").strip()
+# How an OpenVINO model is fed frames whose aspect ratio differs from
+# its exported shape (camera ROIs):
+#   roi   (default) letterbox exactly like Ultralytics does for the .pt
+#         model (smallest 32-aligned rectangle at DETECTION_IMG_SIZE /
+#         the model's size) and compile the model once per distinct ROI
+#         shape — same input as the GPU path, same detections.
+#   fixed always the one exported shape; padding absorbs the aspect
+#         ratio (a tall ROI then gets far fewer pixels).
+# The ONNX backend is always "fixed" (static export).
+CPU_SHAPE_MODE = os.getenv("DETECTION_CPU_SHAPE_MODE", "roi").strip().lower()
+# NMS IoU + max boxes — Ultralytics' own defaults, so onnx/openvino
+# match the PyTorch path exactly. (The pt path uses Ultralytics'
+# built-in defaults, which are these same values.)
+IOU_THRESHOLD = _float("DETECTION_IOU_THRESHOLD", 0.7)
+MAX_DET = _int("DETECTION_MAX_DET", 300)
+# Parallel inferences per engine = OpenVINO NUM_STREAMS / infer requests
+# (or ONNX Runtime sessions). 0 = the number of cameras this engine is
+# planned to carry (cpu_topology.py, from CPU_EXPECTED_CAMERAS).
+CPU_STREAMS = _int("DETECTION_CPU_STREAMS", 0)
+# OpenVINO INFERENCE_NUM_THREADS / ONNX intra_op_num_threads per engine.
+# 0 = auto: OpenVINO chooses when one engine owns the CPU (forcing the
+# logical core count measured 2x SLOWER); with several engines, or a
+# CPU_CORES_OVERRIDE quota, cores are divided between engines.
+CPU_INFER_THREADS = _int("DETECTION_CPU_THREADS", 0)
+# Compiled-model cache (faster engine start). Empty = no cache.
+OPENVINO_CACHE_DIR = os.getenv("OPENVINO_CACHE_DIR", "/data/openvino_cache").strip()
+# "" (OpenVINO default) | ANY_CORE | PCORE_ONLY | ECORE_ONLY. Try
+# PCORE_ONLY when [STATS] shows infer p95 far above the average on a
+# hybrid (P-/E-core) Intel CPU.
+OPENVINO_SCHEDULING_CORE_TYPE = os.getenv("OPENVINO_SCHEDULING_CORE_TYPE", "").strip()
+# Warm-up inferences per request at the real input shape.
+DETECTION_WARMUP_RUNS = _int("DETECTION_WARMUP_RUNS", 3)
+# true: if the onnx/openvino model fails to load/compile, log an ERROR
+# and run the .pt model on CPU instead. false: the engine fails.
+BACKEND_FALLBACK = _bool("DETECTION_BACKEND_FALLBACK", "true")
+
+# Torch CPU threads PER ENGINE PROCESS — only used when PyTorch itself
+# runs on the CPU (DETECTION_BACKEND=pt, or the fallback). 0 =
+# "cpu_count - 1", matching the reference Engine.
+TORCH_NUM_THREADS = _int("TORCH_NUM_THREADS", 0)
 
 # Run YOLO detection on 1-out-of-N camera frames instead of every frame.
 # Frames in between are not sent to the model at all -- the tracker coasts

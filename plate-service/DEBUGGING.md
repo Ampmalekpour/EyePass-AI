@@ -246,11 +246,12 @@ keys directly), and `cv2.CAP_PROP_BUFFERSIZE=1` in `rtsp_reader.py`
   (contradictory-but-working) value, so this is zero-risk as shipped.
   Switch it once you've verified the (now-explicit) requirements
   install cleanly on a lighter base.
-* **README says this module has no mediamtx/camera_stream; compose.yaml
-  ships both.** Left as-is (out of scope for this pass) — just be aware
-  `docker compose up -d --build` with no profile flags DOES start a
-  local `mediamtx` + `camera_stream`, which is the copy the channel-name
-  bug above was in.
+* **README said this module has no mediamtx/camera_stream; compose.yaml
+  shipped both.** Resolved: they are now the `standalone-stream`
+  profile (`COMPOSE_PROFILES` in `.env`), on by default in
+  `.env.example`. Drop the profile to use the whole system's shared
+  streamer instead — README "Using the system's streamer instead of
+  the standalone one".
 * **Named docker volume removed.** `compose.yaml` used to mount a
   `detector_data:/data` named volume "for durable local state" — a
   full grep of `detector/src` and `ocr_service/src` found nothing that

@@ -1,0 +1,26 @@
+# =====================================================================
+# GPU overlay for plate_detector
+# ---------------------------------------------------------------------
+# Adds the NVIDIA GPU reservation (requires nvidia-container-toolkit on
+# the host). Selected from .env, so switching GPU <-> CPU is an .env
+# change only:
+#
+#   GPU host:  COMPOSE_FILE=compose.yaml:compose.gpu.yaml
+#              DETECTION_DEVICE=gpu
+#   CPU host:  COMPOSE_FILE=compose.yaml
+#              DETECTION_DEVICE=cpu
+#
+# (COMPOSE_PATH_SEPARATOR=: in .env keeps the ':' list working on
+#  Windows too.) Equivalent by hand:
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d --build
+# =====================================================================
+
+services:
+  plate_detector:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
