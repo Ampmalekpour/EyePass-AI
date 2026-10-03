@@ -12,7 +12,8 @@ fire-smoke-service/  fire / smoke detection
 ```
 
 Face and plate are fully independent. Each folder has everything it
-needs, and each runs `mediamtx` + `camera_stream` (the RTSP relay),
+needs, and each runs `mediamtx` + `camera_stream` (the RTSP relay; on the
+plate production branch `armin_claude_plate_prod` the platform provides it),
 `*_detector` (GPU), `face_recognizer` / `plate_ocr`, and its **own**
 `control_hub`, which owns that module's per-track recognition state and
 decides what the backend receives. See
@@ -73,7 +74,7 @@ rebuild.
 |---|---|---|
 | The plate model folders `plate_v8n_480/` (with `export_info.yaml`, `.pt`, ONNX, OpenVINO FP32/INT8) and `plate_v8s_640/`; layout in [plate-service/README.md → Models](plate-service/README.md#models) | `plate-service/models/detection/` | plate_detector (`DETECTION_GPU_MODEL` / `DETECTION_CPU_MODEL` pick one) |
 | Your whole `PadOcr/` folder's **contents**, names unchanged: `en_PP-OCRv3_det_infer/`, `rec_svrt_fa_final_1/`, `ch_ppocr_mobile_v2.0_cls_infer/`, `rec_svrt_motor/`, `Final_Dict.txt` | `plate-service/models/ocr/` | plate_ocr |
-| *(optional)* a test clip for `--profile test-video` | `plate-service/test_video.mp4` | video_publisher |
+| *(optional, `armin_claude_plate` branch only)* a test clip for `--profile test-video` | `plate-service/test_video.mp4` | video_publisher |
 
 Different location? Point `DETECTION_MODELS_DIR`,
 `RECOGNITION_MODELS_DIR`, `RECOGNITION_GALLERY_DIR` or `OCR_MODELS_DIR`

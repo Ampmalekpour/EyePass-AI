@@ -74,9 +74,9 @@ detector/               plate_detector service (src/, tools/, Dockerfile, requir
                           tools/bench_multistream.py the multi-stream benchmark (GPU reference vs CPU variants)
                           tools/export_cpu_models.py .pt -> ONNX + OpenVINO FP32 in the model-folder layout
 ocr_service/            plate_ocr service (src/, Dockerfile, requirements.txt)
-compose.yaml            plate_detector + plate_ocr + control_hub (+ standalone relay, test clips, autoheal as profiles)
+compose.yaml            plate_detector + plate_ocr + control_hub (+ autoheal, profile watchdog)
 compose.gpu.yaml        GPU reservation for plate_detector (COMPOSE_FILE in .env)
-compose.infra.yaml      redis + minio (+ inspection tools, --profile tools)
+DEPLOY_LINUX_GPU.md     server setup: NVIDIA driver, Docker, NVIDIA Container Toolkit, install, troubleshooting
 .env.example            dev/test .env (device, models, deployment)
 .env.prod.example       production .env with [FILL_IN] placeholders
 redis_tools.py          manual test harness / CLI — stands in for the backend
@@ -88,9 +88,7 @@ README.md               this file
 ## Quick start
 
 ```bash
-docker network create eyeplate_net      # once, ever — skip if it already exists
-cp .env.example .env                    # production: cp .env.prod.example .env (see "Production")
-docker compose -f compose.infra.yaml up -d   # dev only: Redis + MinIO (production uses the platform's)
+cp .env.prod.example .env               # staging/test: .env.example — replace every [FILL_IN]
 docker compose up -d --build            # reads COMPOSE_FILE / COMPOSE_PROFILES from .env
 docker compose logs -f plate_detector   # [INIT] / [MODEL] lines, then ⏱️ [PERF] and 📊 [STATS]
 ```
@@ -105,8 +103,13 @@ are**. Everything else is set in each service's `config.py`:
 | `DETECTION_GPU_MODEL` | `plate_v8n_480` · `plate_v8s_640` (or `v8n` / `v8s`) |
 | `DETECTION_CPU_MODEL` | `openvino_fp32` · `openvino_int8` · `onnx` |
 | `OCR_DEVICE` | `cpu` · `gpu` |
-| `COMPOSE_PROFILES` | `standalone-stream` (own relay, dev) · empty (the system's streamer) · `+test-video`, `+watchdog` |
-| Redis / MinIO / relay / ports / folders | deployment values (`[FILL_IN]` in `.env.prod.example`) |
+| `COMPOSE_PROFILES` | empty · `watchdog` (autoheal) |
+| Redis / MinIO / relay / network / base image / ports / folders | deployment values, marked `[FILL_IN]` |
+
+This branch (`armin_claude_plate_prod`) is the production layout: no
+own RTSP relay, no test-clip publishers, no local Redis/MinIO. Those
+belong to the platform (backend team). Server setup (NVIDIA driver,
+Docker, GPU in Docker): [DEPLOY_LINUX_GPU.md](DEPLOY_LINUX_GPU.md).
 
 | Everything else | File |
 |---|---|
@@ -293,154 +296,77 @@ docker compose run --rm -v "<folder with video2.mp4>:/clips:ro" plate_detector \
 Without Docker, the same file runs on the host with the benchmark venv:
 `python detector/tools/bench_multistream.py --model-dir <...>\plate_v8n_480 --video <...>\video2.mp4 --results <...>\bench_final --streams 4`.
 
-**2. The whole service with N simulated cameras.** The `test-video`
-profile loops `TEST_VIDEO_FILE` into the relay as cameras `1`..`6`:
+**2. The running service.** With cameras activated by the backend,
+the detector's own logs give the same numbers live:
 
 ```bash
-# .env:  COMPOSE_PROFILES=standalone-stream,test-video   TEST_VIDEO_FILE=./video2.mp4
-docker compose up -d --build
-python redis_tools.py set-camera --id 1 --address publisher --roi 0 0 1 1   # "publisher": the test clip is PUSHED into the relay
-python redis_tools.py activate --id 1        # repeat for 2, 3, 4 ...
 docker compose logs -f plate_detector | grep -E "PERF|STATS|INFER-SLOW"
 ```
 
-Read `missed %`, `latency` and `infer p95` per camera, and compare them
-with the benchmark's SPEED table for the same number of streams. Add
-cameras until `missed` rises: that is the box's capacity. Put it in
-`CPU_MAX_CAMERAS_PER_ENGINE` (CPU) or `MAX_CAMERAS_PER_ENGINE` (GPU).
+Read `missed %`, `latency` and `infer p95` per camera and compare them
+with the benchmark's SPEED table for the same number of streams. When
+`missed` rises as cameras are added, the server is at capacity: put
+that number in `CPU_MAX_CAMERAS_PER_ENGINE` (CPU) or
+`MAX_CAMERAS_PER_ENGINE` (GPU). (The test-clip publishers and the own
+relay used for local testing live on the `armin_claude_plate` branch.)
 
 
 ## Production
 
-1. **Start from the production template:**
-   ```bash
-   cp .env.prod.example .env
-   ```
-   Every value the backend/DevOps team must provide is `[FILL_IN]`
-   (Redis host/port/db/password/URL, MinIO endpoint/keys/buckets/public
-   URL, the system relay URL, the shared Docker network, image tag,
-   OpenVINO/ONNX Runtime versions). Search for `[FILL_IN]` and replace
-   all of them. The device/model lines are ours to set.
-2. **Production runs only** `plate_detector`, `plate_ocr` and
-   `control_hub`. `COMPOSE_PROFILES` is empty, so the platform's Redis,
-   MinIO and shared RTSP relay are used (see the next section).
-3. Put the models in place (see "Models"), then:
-   ```bash
-   docker compose up -d --build
-   docker compose ps
-   curl localhost:8010/health ; curl localhost:8011/health ; curl localhost:8021/health
-   docker compose logs plate_detector | grep -E "MODEL|EXECUTION_DEVICES|FAILED|FALLING BACK"
-   ```
-   Expect the right `[MODEL]` line, `EXECUTION_DEVICES=['CPU']` on CPU,
-   and no `FAILED` / `FALLING BACK`.
+The full server procedure (driver, Docker, NVIDIA Container Toolkit,
+base image, models, `.env`, start, checks, troubleshooting) is in
+[DEPLOY_LINUX_GPU.md](DEPLOY_LINUX_GPU.md). In short:
 
+1. `cp .env.prod.example .env`, then replace every `[FILL_IN]`
+   (`grep -n "\[FILL_IN\]" .env`): Redis, MinIO, the RTSP relay URL,
+   the shared Docker network, base image, image tag, OpenVINO / ONNX
+   Runtime versions. The device/model lines are set by the AI team.
+2. Put the models in place (see "Models").
+3. `docker compose up -d --build`, then check `docker compose ps`, the
+   three `/health` endpoints (8010, 8011, 8021) and
+   `docker compose logs plate_detector | grep -E "MODEL|FAILED|FALLING BACK"`.
 
-## Put this service in its own folder (e.g. `C:\Users\eyerik.com\Desktop\plate-service`)
+Getting only this folder onto the server:
 
-The service is the `plate-service/` folder of the repo. Two ways:
-
-**A. Git clone, then use only `plate-service/`** (recommended: you can `git pull` updates):
-
-```bat
-cd C:\Users\eyerik.com\Desktop
-git clone -b armin_claude_plate https://github.com/Ampmalekpour/EyePass-AI.git eyepass-ai
-:: the service is now in C:\Users\eyerik.com\Desktop\eyepass-ai\plate-service
-```
-
-To have exactly `C:\Users\eyerik.com\Desktop\plate-service` with only
-the plate service in it (sparse checkout):
-
-```bat
-cd C:\Users\eyerik.com\Desktop
-git clone --no-checkout -b armin_claude_plate https://github.com/Ampmalekpour/EyePass-AI.git plate-service-repo
-cd plate-service-repo
+```bash
+git clone --no-checkout -b armin_claude_plate_prod https://github.com/Ampmalekpour/EyePass-AI.git eyepass-plate
+cd eyepass-plate
 git sparse-checkout set plate-service
-git checkout armin_claude_plate
-:: service folder: C:\Users\eyerik.com\Desktop\plate-service-repo\plate-service
-:: later updates:  git pull
+git checkout armin_claude_plate_prod
+cd plate-service            # updates later: git pull
 ```
 
-**B. Copy the folder** (no git in the target): download the branch as
-ZIP from GitHub (branch `armin_claude_plate` → Code → Download ZIP) and
-copy its `plate-service\` contents into
-`C:\Users\eyerik.com\Desktop\plate-service`.
 
-Then, in the service folder:
+## RTSP relay and Redis (provided by the platform)
 
-```bat
-copy .env.example .env            :: or .env.prod.example for production
-:: put the models:  models\detection\plate_v8n_480\...   models\detection\plate_v8s_640\...   models\ocr\...
-docker network create eyeplate_net
-docker compose up -d --build
-```
+This service does not run its own relay. The platform's mediamtx +
+camera_stream must provide, for every plate camera:
 
-Everything the service needs is inside that folder (`compose*.yaml`,
-`.env*`, `detector/`, `ocr_service/`, `control-hub/`, `camera-service/`,
-`common/`, `models/`, `redis_tools.py`). It does not use anything from
-the other modules.
-
-
-## Using the system's streamer instead of the standalone one
-
-**What the standalone streamer is.** With `COMPOSE_PROFILES=standalone-stream`
-this module runs its **own** RTSP relay: `plate_mediamtx` (MediaMTX) and
-`plate_camera_stream`. `camera_stream` reads `plate:cameras:config`,
-registers each camera in MediaMTX as path `<camera_id>`, and reports
-online/offline on `plate:camera:events` and `plate:cameras:details`.
-That is right for a laptop or a single-module test. On a full EyePass
-deployment the system already runs **one shared** MediaMTX +
-camera_stream for every module (it scans `*:cameras:config`, so it
-already serves the plate cameras). A second relay would open a second
-connection to every camera.
-
-The detector needs three things from any streamer:
-
-1. frames at `MTX_RTSP_BASE_URL/<camera_id>`;
-2. online/offline events on Redis channel `plate:camera:events`
+1. frames at `MTX_RTSP_BASE_URL/<camera_id>` (the mediamtx path name is
+   the camera id);
+2. online/offline events on the Redis channel `plate:camera:events`
    (singular `camera`) and details in `plate:cameras:details`, in the
-   Redis the detector uses;
-3. a Docker network where the relay's container name resolves.
+   same Redis this service uses (camera_stream reads
+   `plate:cameras:config`, which the backend writes);
+3. a Docker network (`SHARED_NETWORK`) where the mediamtx, Redis and
+   MinIO container names resolve.
 
-**Switch:**
+Check from the server:
 
-1. **Find the system's names** (relay container, its network, its Redis):
-   ```bash
-   docker ps --format '{{.Names}}\t{{.Image}}' | grep -iE 'mediamtx|camera|redis|minio'
-   docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' <system-mediamtx-container>
-   ```
-2. **Edit `.env`:**
-   ```ini
-   COMPOSE_PROFILES=                                    # drop standalone-stream
-   SHARED_NETWORK=<the system's network>
-   MTX_RTSP_BASE_URL=rtsp://<system-mediamtx-container>:8554
-   REDIS_HOST=<system redis container>                  # the SAME Redis as the system camera_stream + backend
-   REDIS_URL=redis://<system redis container>:6379/0
-   MINIO_ENDPOINT=http://<system minio container>:9000
-   TEST_VIDEO_RTSP_BASE_URL=rtsp://<system-mediamtx-container>:8554   # only with test-video
-   ```
-   Or keep `eyeplate_net` and attach the system containers to it:
-   `docker network connect eyeplate_net <system-mediamtx-container>`.
-3. **Remove the standalone containers** (no longer in the profiles, so
-   `up` would leave them running): `docker rm -f plate_mediamtx plate_camera_stream`
-4. **Start:** `docker compose up -d`.
-5. **Verify:**
-   ```bash
-   docker exec plate_detector python -c "import cv2; c=cv2.VideoCapture('rtsp://<system-mediamtx-container>:8554/<camera_id>'); print(c.read()[0])"
-   docker exec <system redis container> redis-cli SUBSCRIBE plate:camera:events
-   docker compose logs -f plate_detector | grep -E "CAMERA-ADD|PERF"
-   ```
-   No frames in `[PERF]`: the relay path must equal the camera id, and
-   `MTX_RTSP_BASE_URL` must use the container name, not `localhost`.
+```bash
+docker exec plate_detector python -c "import cv2; c=cv2.VideoCapture('rtsp://<mediamtx container>:8554/<camera_id>'); print(c.read()[0])"
+docker exec <redis container> redis-cli SUBSCRIBE plate:camera:events
+docker compose logs -f plate_detector | grep -E "Camera event|CAMERA-ADD|PERF"
+```
 
-**Back to standalone:** put `standalone-stream` back in
-`COMPOSE_PROFILES`, set `MTX_RTSP_BASE_URL=rtsp://mediamtx:8554`, then
-`docker compose up -d`.
+No frames in `[PERF]`: the relay path must equal the camera id, and
+`MTX_RTSP_BASE_URL` must use the container name, not `localhost`.
 
 
 ## Upgrading an existing `.env`
 
-`.env` got much shorter: copy `.env.example` (or `.env.prod.example`)
-to `.env` and re-enter your Redis/MinIO/relay values. Variables removed
+`.env` got much shorter: copy `.env.prod.example` (or `.env.example`)
+to `.env` and fill in every `[FILL_IN]`. Variables removed
 from `.env` are now set in `config.py` and are ignored if left in
 `.env` (the containers no longer read `.env` directly). Renamed:
 `DETECTION_MODEL` → `DETECTION_GPU_MODEL`, `DETECTION_BACKEND` +

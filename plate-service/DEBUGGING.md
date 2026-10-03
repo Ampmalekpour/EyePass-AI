@@ -257,7 +257,8 @@ keys directly), and `cv2.CAP_PROP_BUFFERSIZE=1` in `rtsp_reader.py`
   Switch it once you've verified the (now-explicit) requirements
   install cleanly on a lighter base.
 * **README said this module has no mediamtx/camera_stream; compose.yaml
-  shipped both.** Resolved: they are now the `standalone-stream`
+  shipped both.** Resolved: on the production branch they are removed (the
+  platform provides the relay); on `armin_claude_plate` they are the `standalone-stream`
   profile (`COMPOSE_PROFILES` in `.env`), on by default in
   `.env.example`. Drop the profile to use the whole system's shared
   streamer instead — README "Using the system's streamer instead of
