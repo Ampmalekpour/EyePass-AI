@@ -1,17 +1,16 @@
 """
 config.py (plate control hub)
 --------------------------------------------------------------------
-Every knob the control hub understands, read once from the
-environment.
+Every setting of the control hub, set in this file. .env only gives
+the deployment (Redis + REDIS_MODULE); the policy below is decided
+here (edit and restart).
 
 Two layers:
 
-  * SERVICE-wide settings (Redis, which modules to run, health port,
-    stream/consumer names). Plain env names.
+  * SERVICE-wide settings (which module, health port, stream/consumer
+    names, lease, logs).
 
-  * PER-MODULE policy settings. Each is read as `{MODULE}_{NAME}`
-    (here PLATE_SATISFIED_CONF, PLATE_FINALIZE_TIMEOUT_SEC, ...) and
-    falls back to the default below when unset.
+  * PER-MODULE policy (ModuleConfig + _MODULE_DEFAULTS["plate"]).
 
 Every default reproduces the pipeline's previous behaviour wherever
 that behaviour was intentional (0.70 face "stop asking" gate, 0.85
@@ -33,24 +32,6 @@ def _env(name: str, default: str) -> str:
     return default if v is None or v.strip() == "" else v.strip()
 
 
-def _float(name: str, default: float) -> float:
-    try:
-        return float(_env(name, str(default)))
-    except ValueError:
-        return default
-
-
-def _int(name: str, default: int) -> int:
-    try:
-        return int(float(_env(name, str(default))))
-    except ValueError:
-        return default
-
-
-def _bool(name: str, default: bool) -> bool:
-    return _env(name, "true" if default else "false").lower() in ("1", "true", "yes", "on")
-
-
 # ====================================================================
 # Service-wide
 # ====================================================================
@@ -60,30 +41,34 @@ def _bool(name: str, default: bool) -> bool:
 HUB_MODULE = _env("REDIS_MODULE", "plate")
 HUB_MODULES: List[str] = [HUB_MODULE]
 
-HEALTH_PORT = _int("HUB_HEALTH_PORT", 8020)
+HEALTH_PORT = 8020
 
 # Consumer group on both inbound streams. One group per module stream;
 # a fixed consumer name so a restarted hub re-reads its own pending
 # (read-but-not-acked) entries instead of orphaning them.
-CONSUMER_GROUP = _env("HUB_CONSUMER_GROUP", "control-hub")
-CONSUMER_NAME = _env("HUB_CONSUMER_NAME", "hub")
+CONSUMER_GROUP = "control-hub"
+CONSUMER_NAME = "hub"
 
-READ_BLOCK_MS = _int("HUB_READ_BLOCK_MS", 200)
-READ_COUNT = _int("HUB_READ_COUNT", 200)
-TICK_INTERVAL_SEC = _float("HUB_TICK_INTERVAL_SEC", 0.2)
+READ_BLOCK_MS = 200
+READ_COUNT = 200
+TICK_INTERVAL_SEC = 0.2
 
 # Leader lease: only one hub instance may own a module at a time (its
 # track state is in memory). A second instance of the same container
 # simply waits as a hot standby and takes over when the lease expires.
-LEASE_TTL_SEC = _float("HUB_LEASE_TTL_SEC", 15.0)
-LEASE_RENEW_SEC = _float("HUB_LEASE_RENEW_SEC", 5.0)
+LEASE_TTL_SEC = 15.0
+LEASE_RENEW_SEC = 5.0
 
 # Track-state checkpoints (one Redis string per live track) expire on
 # their own even if the hub never deletes them.
-STATE_TTL_SEC = _int("HUB_STATE_TTL_SEC", 3600)
+STATE_TTL_SEC = 3600
 
 # ctl lists (hub -> detector engine) expire when an engine goes away.
-CTL_TTL_SEC = _int("HUB_CTL_TTL_SEC", 120)
+CTL_TTL_SEC = 120
+
+# Logs
+LOG_LEVEL = "INFO"
+LOG_FORMAT = "text"          # text | json
 
 
 # ====================================================================
@@ -140,28 +125,24 @@ class ModuleConfig:
     extra: Dict[str, str] = field(default_factory=dict)
 
 
+# The plate policy — edit here.
 _MODULE_DEFAULTS: Dict[str, Dict[str, object]] = {
-    "plate": dict(satisfied_conf=0.85, consensus_min=3),
+    "plate": dict(
+        satisfied_conf=0.85,             # a VALID plate this confident ends re-querying
+        consensus_min=3,                 # ... or this many agreeing valid results (0 = off)
+        trigger_max_wait_sec=3.0,        # trigger held this long when no crop could be sent
+        trigger_task_wait_sec=15.0,      # ... or until its task's result while it is queued
+        periodic_interval_sec=3.0,       # periodic re-query cadence (cond_per_trig cameras)
+        periodic_first_delay_sec=1.0,
+        finalize_timeout_sec=30.0,       # upper bound for the final record after track end
+        final_min_seen_frames=8,         # final gate (dropped unless something was published)
+        final_min_crops=1,
+        track_stale_sec=120.0,           # a track the hub stops hearing about is ended after
+        late_result_grace_sec=300.0,
+        late_result_policy="republish_if_changed",   # | drop
+    ),
 }
 
 
 def module_config(module: str) -> ModuleConfig:
-    base = ModuleConfig(module=module, **_MODULE_DEFAULTS.get(module, {}))
-    p = module.upper() + "_"
-    return ModuleConfig(
-        module=module,
-        satisfied_conf=_float(p + "SATISFIED_CONF", base.satisfied_conf),
-        consensus_min=_int(p + "CONSENSUS_MIN", base.consensus_min),
-        trigger_max_wait_sec=_float(p + "TRIGGER_MAX_WAIT_SEC", base.trigger_max_wait_sec),
-        trigger_task_wait_sec=_float(p + "TRIGGER_TASK_WAIT_SEC", base.trigger_task_wait_sec),
-        periodic_interval_sec=_float(p + "PERIODIC_INTERVAL_SEC", base.periodic_interval_sec),
-        periodic_first_delay_sec=_float(p + "PERIODIC_FIRST_DELAY_SEC", base.periodic_first_delay_sec),
-        finalize_timeout_sec=_float(p + "FINALIZE_TIMEOUT_SEC", base.finalize_timeout_sec),
-        final_min_seen_frames=_int(p + "FINAL_MIN_SEEN_FRAMES", base.final_min_seen_frames),
-        final_min_crops=_int(p + "FINAL_MIN_CROPS", base.final_min_crops),
-        track_stale_sec=_float(p + "TRACK_STALE_SEC", base.track_stale_sec),
-        late_result_grace_sec=_float(p + "LATE_RESULT_GRACE_SEC", base.late_result_grace_sec),
-        late_result_policy=_env(p + "LATE_RESULT_POLICY", base.late_result_policy).lower(),
-        max_results_per_track=_int(p + "MAX_RESULTS_PER_TRACK", base.max_results_per_track),
-        liveness_policy=_env(p + "LIVENESS_POLICY", base.liveness_policy).lower(),
-    )
+    return ModuleConfig(module=module, **_MODULE_DEFAULTS.get(module, {}))

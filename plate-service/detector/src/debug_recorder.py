@@ -18,7 +18,7 @@
 #     leave_scene final), drop decisions with the reason
 #   * a scrolling event log + HUD side panel
 #
-# Everything is off a single env switch and never raises into the
+# Everything is off a single config switch (config.DEBUG_VIDEO_ENABLED) and never raises into the
 # pipeline: any failure disables the recorder for that camera only.
 # --------------------------------------------------------------------
 
@@ -36,73 +36,27 @@ import numpy as np
 
 
 # --------------------------------------------------------------------
-# Config (all env driven so you can tune it without rebuilding)
+# Config — read from config.py (section 9. VISUAL DEBUG)
 # --------------------------------------------------------------------
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in ("1", "true", "yes", "on", "y")
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except Exception:
-        return default
-
-
 class DebugConfig:
-    """Snapshot of the debug-recorder env config (picklable, spawn-safe)."""
+    """Snapshot of config.DEBUG_VIDEO_* (picklable, spawn-safe)."""
 
     def __init__(self):
-        # master switch
-        self.enabled = _env_bool("DEBUG_VIDEO_ENABLED", False)
-
-        # where the videos go: this MUST be your bind-mounted host dir
-        self.dir = os.environ.get("DEBUG_VIDEO_DIR", "/debug")
-
-        # nominal fps written into the container header. The engine loop is
-        # not isochronous, so we also burn the real wall clock on every frame.
-        self.fps = _env_float("DEBUG_VIDEO_FPS", 12.0)
-
-        # roll a new file every N seconds (0 = never roll)
-        self.segment_seconds = _env_float("DEBUG_VIDEO_SEGMENT_SECONDS", 300.0)
-
-        # keep at most N segments per camera on disk (0 = keep everything)
-        self.max_segments = _env_int("DEBUG_VIDEO_MAX_SEGMENTS", 12)
-
-        # write every Nth processed frame (1 = all). Bump to 2/3 on busy rigs.
-        self.every_n = max(1, _env_int("DEBUG_VIDEO_EVERY_N", 1))
-
-        # downscale the video part before annotating (1.0 = native)
-        self.scale = _env_float("DEBUG_VIDEO_SCALE", 1.0)
-
-        # width of the right-hand telemetry panel in px (0 = no panel)
-        self.panel_width = _env_int("DEBUG_VIDEO_PANEL_WIDTH", 430)
-
-        # fourcc; mp4v is the safe default inside the nvcr/pytorch image
-        self.codec = os.environ.get("DEBUG_VIDEO_CODEC", "mp4v")
-        self.ext = os.environ.get("DEBUG_VIDEO_EXT", ".mp4")
-
-        # also emit a machine-greppable event log next to each segment
-        self.jsonl = _env_bool("DEBUG_VIDEO_JSONL", True)
-
-        # keep drawing tracks for N frames after they vanish (ghosts)
-        self.ghost_frames = _env_int("DEBUG_VIDEO_GHOST_FRAMES", 45)
-
-        # how many events the side panel shows
-        self.event_lines = _env_int("DEBUG_VIDEO_EVENT_LINES", 14)
-
-        # trail length in points
-        self.trail_len = _env_int("DEBUG_VIDEO_TRAIL", 30)
+        import config
+        self.enabled = bool(config.DEBUG_VIDEO_ENABLED)       # master switch
+        self.dir = config.DEBUG_VIDEO_DIR                     # bind-mounted host dir
+        self.fps = float(config.DEBUG_VIDEO_FPS)              # nominal fps in the header
+        self.segment_seconds = float(config.DEBUG_VIDEO_SEGMENT_SECONDS)  # 0 = never roll
+        self.max_segments = int(config.DEBUG_VIDEO_MAX_SEGMENTS)          # 0 = keep all
+        self.every_n = max(1, int(config.DEBUG_VIDEO_EVERY_N))            # write every Nth frame
+        self.scale = float(config.DEBUG_VIDEO_SCALE)          # downscale before annotating
+        self.panel_width = int(config.DEBUG_VIDEO_PANEL_WIDTH)  # right telemetry panel, 0 = none
+        self.codec = config.DEBUG_VIDEO_CODEC
+        self.ext = config.DEBUG_VIDEO_EXT
+        self.jsonl = bool(config.DEBUG_VIDEO_JSONL)           # event log next to each segment
+        self.ghost_frames = int(config.DEBUG_VIDEO_GHOST_FRAMES)  # draw lost tracks N frames
+        self.event_lines = int(config.DEBUG_VIDEO_EVENT_LINES)
+        self.trail_len = int(config.DEBUG_VIDEO_TRAIL)
 
     def as_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)

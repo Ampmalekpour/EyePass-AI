@@ -72,9 +72,15 @@ New: `track_uid`; `events_detail` (with direction etc.); `meta.event`; `meta.res
 stage, plate_image, frame_image, votes, candidates, n_results, description}`. The single answer is
 decided here instead of in Django. Finals also carry `revision`, `complete` and `missing_tasks`.
 
-## Configuration (`.env`, `PLATE_…`)
+## Configuration (`control-hub/src/config.py`)
 
-| Variable | Default | Meaning |
+The policy is set in `control-hub/src/config.py` (`_MODULE_DEFAULTS["plate"]`),
+not in `.env`; edit it and `docker compose up -d --build control_hub`.
+`.env` only gives the Redis connection. Field names below are the old
+env names; in `config.py` they are lower-case without `PLATE_`
+(`satisfied_conf`, `consensus_min`, …).
+
+| Setting | Default | Meaning |
 |---|---|---|
 | `PLATE_SATISFIED_CONF` | 0.85 | A valid answer at this confidence stops re-querying and releases held triggers |
 | `PLATE_CONSENSUS_MIN` | 3 | …or this many agreeing valid results with no disagreement (0 = off) |
@@ -87,10 +93,10 @@ decided here instead of in Django. Finals also carry `revision`, `complete` and 
 | `PLATE_LATE_RESULT_GRACE_SEC` | 300 | How long closed tracks are remembered |
 | `PLATE_TRACK_STALE_SEC` | 120 | End a track the hub stops hearing about |
 
-Detector side: `SUBMIT_TIMEOUT_SEC` (15), `TRACK_UPDATE_INTERVAL_SEC`
-(5), `HUB_OUTBOX_MAX` (20000). Hub service: `HUB_HEALTH_PORT` (8020
-inside the container, published as `HUB_API_PORT`), `HUB_LEASE_TTL_SEC`,
-`HUB_STATE_TTL_SEC`.
+Detector side (`detector/src/config.py`): `SUBMIT_TIMEOUT_SEC` (15),
+`TRACK_UPDATE_INTERVAL_SEC` (5). Hub service (`control-hub/src/config.py`):
+`HEALTH_PORT` (8020 inside the container, published as `HUB_API_PORT`),
+`LEASE_TTL_SEC`, `STATE_TTL_SEC`, `LOG_LEVEL`.
 
 ## Operating it
 

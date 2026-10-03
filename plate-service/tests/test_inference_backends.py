@@ -1,12 +1,15 @@
 """
 test_inference_backends.py
 --------------------------------------------------------------------
-The CPU-pipeline plumbing that needs no model runtime: model file
-resolution (model_files.py), GPU/CPU runtime planning, the
-Ultralytics-exact letterbox / auto-shape / postprocess math
-(inference_backends.py) and the OpenVINO stream/thread plan
-(cpu_topology.openvino_plan). openvino / onnxruntime / torch are not
-needed — parity against real models is tools/parity_test.py's job.
+The detector's model plumbing that needs no model runtime:
+  * model_files.resolve_model — export_info.yaml manifest first, then
+    file names; per-model folders; actionable errors
+  * inference_backends.resolve_runtime — gpu/cpu/auto, model aliases,
+    missing GPU
+  * letterbox + onnx_postprocess (the benchmark's own-ONNX engine math)
+  * the INT8 fix's overlap helper
+  * perf_stats.EnginePerf accounting (missed / processed / latency)
+Real-model accuracy and speed are tools/bench_multistream.py's job.
 --------------------------------------------------------------------
 """
 
@@ -17,6 +20,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "common"))
 sys.path.insert(0, os.path.join(ROOT, "detector", "src"))
 
@@ -26,9 +30,9 @@ stub_modules.install()
 import numpy as np  # noqa: E402
 
 import config  # noqa: E402
-import cpu_topology  # noqa: E402
 import inference_backends as ib  # noqa: E402
 import model_files as mf  # noqa: E402
+from perf_stats import EnginePerf  # noqa: E402
 
 LOG = logging.getLogger("test")
 
@@ -39,71 +43,58 @@ def _touch(path, text=""):
         f.write(text)
 
 
+def _resolve(root, name, variant):
+    return mf.resolve_model(root, name, variant, config.MODEL_MANIFEST_KEYS, config.MODEL_FILE_PATTERNS,
+                            config.CLASS_LABELS)
+
+
 class ModelFilesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         r = self.root = self.tmp.name
-        _touch(os.path.join(r, "plate_v8n_480.pt"))
-        _touch(os.path.join(r, "plate_v8n_480_288x480.onnx"))
-        _touch(os.path.join(r, "plate_v8n_480_fp32_openvino_model", "plate_v8n_480.xml"))
-        _touch(os.path.join(r, "plate_v8n_480_fp32_openvino_model", "metadata.yaml"),
-               "imgsz:\n- 288\n- 480\nnames:\n  0: car_plate\n  1: motorcycle_plate\n")
-        _touch(os.path.join(r, "plate_v8n_480_int8_openvino_model", "plate_v8n_480.xml"))
-        _touch(os.path.join(r, "export_info.yaml"),
-               "input_size: [288, 480]\nclass_names: [car_plate, motorcycle_plate]\n")
-        _touch(os.path.join(r, "plate_v8s_640.pt"))
+        d = os.path.join(r, "plate_v8n_480")
+        _touch(os.path.join(d, "plate_v8n_480.pt"))
+        _touch(os.path.join(d, "plate_v8n_480_288x480.onnx"))
+        _touch(os.path.join(d, "plate_v8n_480_fp32_openvino_model", "plate_v8n_480.xml"))
+        _touch(os.path.join(d, "plate_v8n_480_int8_box_openvino_model", "plate_v8n_480.xml"))
+        _touch(os.path.join(d, "export_info.yaml"),
+               "model_name: plate_v8n_480\nimgsz: [288, 480]\n"
+               "names: {0: car_plate, 1: motorcycle_plate}\n"
+               "pt: plate_v8n_480.pt\nonnx: plate_v8n_480_288x480.onnx\n"
+               "openvino:\n  ov_fp32: plate_v8n_480_fp32_openvino_model\n"
+               "  ov_int8_box: plate_v8n_480_int8_box_openvino_model\n")
+        _touch(os.path.join(r, "plate_v8s_640", "plate_v8s_640.pt"))
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_nominal_size_and_parsers(self):
-        self.assertEqual(mf.nominal_imgsz("plate_v8n_480"), 480)
-        self.assertEqual(mf.nominal_imgsz("/m/plate_v8s_640.pt"), 640)
-        self.assertIsNone(mf.nominal_imgsz("best"))
-        self.assertEqual(mf.parse_hw("288x480"), (288, 480))
-        self.assertEqual(mf.parse_hw([1, 3, 384, 640]), (384, 640))
-        self.assertEqual(mf.parse_hw({"height": 288, "width": 480}), (288, 480))
-        self.assertEqual(mf.parse_hw(640), (640, 640))
-        self.assertEqual(mf.parse_names("{0: 'a', 1: 'b'}"), {0: "a", 1: "b"})
-
-    def test_pt_follows_model_name(self):
-        s = mf.resolve_model(self.root, "plate_v8n_480", "pt")
-        self.assertTrue(s.path.endswith("plate_v8n_480.pt"))
-        self.assertEqual(s.imgsz, 480)
-        s = mf.resolve_model(self.root, "plate_v8s_640", "pt")
-        self.assertEqual(s.imgsz, 640)
-        # explicit DETECTION_IMG_SIZE still wins
-        self.assertEqual(mf.resolve_model(self.root, "plate_v8s_640", "pt", imgsz_override=512).imgsz, 512)
-
-    def test_openvino_fp32_and_int8(self):
-        s = mf.resolve_model(self.root, "plate_v8n_480", "openvino", "fp32")
-        self.assertTrue(s.path.endswith(os.path.join("plate_v8n_480_fp32_openvino_model", "plate_v8n_480.xml")))
+    def test_manifest_variants(self):
+        s = _resolve(self.root, "plate_v8n_480", "openvino_int8")
+        self.assertTrue(s.path.endswith("plate_v8n_480_int8_box_openvino_model"))
         self.assertEqual(s.input_hw, (288, 480))
         self.assertEqual(s.names, {0: "car_plate", 1: "motorcycle_plate"})
-        s8 = mf.resolve_model(self.root, "plate_v8n_480", "openvino", "int8")
-        self.assertIn("int8_openvino_model", s8.path)
-        # int8 folder has no metadata.yaml -> shared export_info.yaml (matches 480)
-        self.assertEqual(s8.input_hw, (288, 480))
-        self.assertEqual(s8.names, {0: "car_plate", 1: "motorcycle_plate"})
+        self.assertTrue(_resolve(self.root, "plate_v8n_480", "openvino_fp32").path.endswith("_fp32_openvino_model"))
+        self.assertTrue(_resolve(self.root, "plate_v8n_480", "onnx").path.endswith("_288x480.onnx"))
+        pt = _resolve(self.root, "plate_v8n_480", "pt")
+        self.assertTrue(pt.path.endswith("plate_v8n_480.pt"))
+        self.assertEqual(pt.imgsz, 480)
 
-    def test_onnx_picks_shaped_file(self):
-        s = mf.resolve_model(self.root, "plate_v8n_480", "onnx")
-        self.assertTrue(s.path.endswith("plate_v8n_480_288x480.onnx"))
-        self.assertEqual(s.input_hw, (288, 480))
-
-    def test_shared_export_info_not_applied_to_other_model(self):
-        _touch(os.path.join(self.root, "plate_v8s_640_384x640.onnx"))
-        s = mf.resolve_model(self.root, "plate_v8s_640", "onnx")
-        # export_info.yaml describes the 480 model -> ignored; file name used
-        self.assertEqual(s.input_hw, (384, 640))
-        self.assertEqual(s.sources["input_hw"], "file name")
+    def test_folder_without_manifest(self):
+        s = _resolve(self.root, "plate_v8s_640", "pt")
+        self.assertTrue(s.path.endswith(os.path.join("plate_v8s_640", "plate_v8s_640.pt")))
+        self.assertEqual(s.imgsz, 640)
+        self.assertIsNone(s.manifest)
 
     def test_missing_variant_is_actionable(self):
         with self.assertRaises(FileNotFoundError) as cm:
-            mf.resolve_model(self.root, "plate_v8s_640", "openvino")
-        self.assertIn("plate_v8s_640_fp32_openvino_model", str(cm.exception))
-        with self.assertRaises(ValueError):
-            mf.resolve_model(self.root, "plate_v8n_480", "onnx", "int8")
+            _resolve(self.root, "plate_v8s_640", "openvino_fp32")
+        self.assertIn("plate_v8s_640", str(cm.exception))
+
+    def test_parsers(self):
+        self.assertEqual(mf.parse_hw([288, 480]), (288, 480))
+        self.assertEqual(mf.parse_hw("384x640"), (384, 640))
+        self.assertEqual(mf.nominal_imgsz("plate_v8s_640"), 640)
+        self.assertEqual(mf.parse_names(["a", "b"]), {0: "a", 1: "b"})
 
 
 class RuntimePlanTest(unittest.TestCase):
@@ -113,95 +104,82 @@ class RuntimePlanTest(unittest.TestCase):
     def tearDown(self):
         ib._cuda_available = self._orig
 
-    def test_gpu_always_pt(self):
-        ib._cuda_available = lambda: True
-        p = ib.resolve_runtime("gpu", "openvino", "int8", False, LOG)
-        self.assertEqual((p.device_kind, p.backend, p.torch_device, p.precision), ("gpu", "pt", "cuda", "fp32"))
-        self.assertEqual(ib.resolve_runtime("cuda:1", "", "fp32", False, LOG).torch_device, "cuda:1")
-        self.assertEqual(ib.resolve_runtime("auto", "", "fp32", False, LOG).device_kind, "gpu")
+    def plan(self, device, gpu="plate_v8n_480", cpu="openvino_fp32", strict=False):
+        return ib.resolve_runtime(device, gpu, cpu, config.CPU_MODEL_NAME, "cuda:0", strict,
+                                  config.MODEL_ALIASES, LOG)
 
-    def test_cpu_defaults_to_openvino(self):
+    def test_gpu(self):
+        ib._cuda_available = lambda: True
+        p = self.plan("gpu", gpu="v8s")
+        self.assertEqual((p.device_kind, p.variant, p.model_name, p.torch_device),
+                         ("gpu", "pt", "plate_v8s_640", "cuda:0"))
+        self.assertEqual(self.plan("auto").device_kind, "gpu")
+
+    def test_cpu_variants(self):
         ib._cuda_available = lambda: False
-        p = ib.resolve_runtime("cpu", "", "fp32", False, LOG)
-        self.assertEqual((p.device_kind, p.backend, p.torch_device), ("cpu", "openvino", "cpu"))
-        self.assertEqual(ib.resolve_runtime("auto", "onnx", "int8", False, LOG).precision, "fp32")
+        for alias, want in (("openvino_fp32", "openvino_fp32"), ("int8", "openvino_int8"), ("onnx", "onnx")):
+            p = self.plan("cpu", cpu=alias)
+            self.assertEqual((p.device_kind, p.variant, p.model_name), ("cpu", want, config.CPU_MODEL_NAME))
+        with self.assertRaises(ValueError):
+            self.plan("cpu", cpu="tensorrt")
 
     def test_missing_gpu(self):
         ib._cuda_available = lambda: False
-        self.assertEqual(ib.resolve_runtime("gpu", "", "fp32", False, LOG).device_kind, "cpu")
+        self.assertEqual(self.plan("gpu").device_kind, "cpu")
         with self.assertRaises(RuntimeError):
-            ib.resolve_runtime("gpu", "", "fp32", True, LOG)
+            self.plan("gpu", strict=True)
 
 
-class PrePostProcessTest(unittest.TestCase):
-    def test_auto_shape_matches_ultralytics(self):
-        self.assertEqual(ib.auto_shape((1080, 1920), 480)[0], (288, 480))
-        self.assertEqual(ib.auto_shape((1080, 1920), 640)[0], (384, 640))
-        self.assertEqual(ib.auto_shape((1080, 960), 480)[0], (480, 448))
-        self.assertEqual(ib.auto_shape((540, 1920), 480)[0], (160, 480))
+class OnnxMathTest(unittest.TestCase):
+    def test_letterbox(self):
+        img, r, left, top = ib.letterbox(np.full((1080, 1920, 3), 7, np.uint8), (288, 480))
+        self.assertEqual(img.shape, (288, 480, 3))
+        self.assertAlmostEqual(r, 0.25)
+        self.assertEqual((left, top), (0, 9))
+        self.assertEqual(int(img[0, 0, 0]), 114)
 
-    def test_letterbox_centred_114(self):
-        img = np.full((1080, 1920, 3), 7, np.uint8)
-        blob, gain, pad = ib.preprocess(img, (288, 480))
-        self.assertEqual(blob.shape, (1, 3, 288, 480))
-        self.assertEqual(blob.dtype, np.float32)
-        self.assertAlmostEqual(gain, 0.25)
-        self.assertEqual(pad, (0, 9))                 # 270 rows centred in 288
-        self.assertAlmostEqual(float(blob[0, 0, 0, 0]), 114 / 255, places=5)
-        self.assertAlmostEqual(float(blob[0, 0, 100, 100]), 7 / 255, places=5)
-
-    def test_postprocess_nms_classes_and_mapping(self):
-        # 3 candidates in a 288x480 input for a 1080x1920 frame (gain .25, pad (0, 9)):
-        #  a: class 0 conf .9 ; b: overlaps a, class 0 conf .8 -> suppressed
-        #  c: same box as a but class 1 conf .7 -> kept (class-aware NMS)
-        #  d: below conf
+    def test_postprocess(self):
         cands = np.array([
-            # cx,  cy,  w,  h,  s0,  s1
-            [100, 109, 40, 20, 0.9, 0.1],
-            [101, 109, 40, 20, 0.8, 0.1],
-            [100, 109, 40, 20, 0.1, 0.7],
-            [300, 200, 30, 10, 0.1, 0.2],
+            [100, 109, 40, 20, 0.9, 0.1],   # kept, class 0
+            [101, 109, 40, 20, 0.8, 0.1],   # same class, overlaps -> suppressed
+            [100, 109, 40, 20, 0.1, 0.7],   # other class -> kept (class-aware)
+            [300, 200, 30, 10, 0.1, 0.2],   # below conf
         ], dtype=np.float32)
-        raw = cands.T[None]                            # (1, 6, 4)
-        dets = ib.postprocess(raw, 0.25, (0, 9), (1080, 1920), conf_thres=0.25)
-        self.assertEqual(dets.dtype, np.float64)
+        dets = ib.onnx_postprocess(cands.T[None], 0.25, 0, 9, (1080, 1920), 0.25, 0.7, 300)
         self.assertEqual(dets.shape, (2, 6))
+        self.assertEqual(dets.dtype, np.float64)
         np.testing.assert_allclose(dets[0], [320, 360, 480, 440, 0.9, 0], rtol=1e-5)
         self.assertEqual(int(dets[1, 5]), 1)
-        agnostic = ib.postprocess(raw, 0.25, (0, 9), (1080, 1920), conf_thres=0.25, agnostic=True)
-        self.assertEqual(agnostic.shape[0], 1)
+        self.assertEqual(ib.onnx_postprocess(np.zeros((1, 6, 5), np.float32), 1, 0, 0, (10, 10),
+                                             0.25, 0.7, 300).shape, (0, 6))
 
-    def test_postprocess_empty(self):
-        raw = np.zeros((1, 6, 10), np.float32)
-        self.assertEqual(ib.postprocess(raw, 1.0, (0, 0), (100, 100), 0.25).shape, (0, 6))
+    def test_int8_overlaps(self):
+        a = np.array([[0, 0, 10, 10]], np.float32)
+        b = np.array([[0, 0, 10, 10], [0, 0, 5, 5]], np.float32)
+        iou, iomin = ib._overlaps(a, b)
+        np.testing.assert_allclose(iou[0], [1.0, 0.25], rtol=1e-5)
+        np.testing.assert_allclose(iomin[0], [1.0, 1.0], rtol=1e-5)
 
 
-class OpenVINOPlanTest(unittest.TestCase):
-    def setUp(self):
-        self._override = config.CPU_CORES_OVERRIDE
-        self._phys = cpu_topology.physical_cores
-        cpu_topology.physical_cores = lambda: 12
+class PerfStatsTest(unittest.TestCase):
+    def test_counts(self):
+        p = EnginePerf(0, "cpu/onnx", 0.0, 2)
+        p.frame_arrived("a", new_frames=3, missed=2)
+        p.frame_done("a", {"preprocess": 1, "inference": 5, "postprocess": 1}, 2.0, 40.0, 1)
+        p.frame_coasted("a")
+        self.assertEqual((p.cams["a"].captured, p.cams["a"].missed, p.cams["a"].processed,
+                          p.cams["a"].coasted), (3, 2, 1, 1))
+        lines = []
 
-    def tearDown(self):
-        config.CPU_CORES_OVERRIDE = self._override
-        cpu_topology.physical_cores = self._phys
-
-    def test_one_engine_lets_openvino_choose_threads(self):
-        config.CPU_CORES_OVERRIDE = 0
-        self.assertEqual(cpu_topology.openvino_plan(4, 6, 1, "openvino"),
-                         {"cpu_streams": 4, "cpu_infer_threads": 0})
-
-    def test_several_engines_share_cores(self):
-        config.CPU_CORES_OVERRIDE = 0
-        self.assertEqual(cpu_topology.openvino_plan(4, 1, 4, "openvino"),
-                         {"cpu_streams": 1, "cpu_infer_threads": 3})
-        config.CPU_CORES_OVERRIDE = 8
-        self.assertEqual(cpu_topology.openvino_plan(4, 6, 1, "openvino")["cpu_infer_threads"], 8)
-
-    def test_onnx_sessions_split_cores(self):
-        config.CPU_CORES_OVERRIDE = 0
-        self.assertEqual(cpu_topology.openvino_plan(4, 6, 1, "onnx"),
-                         {"cpu_streams": 4, "cpu_infer_threads": 3})
+        class L:
+            def info(self, m):
+                lines.append(m)
+        p.maybe_log_cameras(L(), 1)
+        self.assertIn("missed=2", lines[0])
+        p.batch_done(1, 10, 12, [5], 2, 3, 1, 1)
+        p.batch_done(1, 10, 12, [5], 0, 1, 1, 1)
+        p.maybe_log_engine(L(), 1)
+        self.assertIn("[STATS]", lines[-1])
 
 
 if __name__ == "__main__":

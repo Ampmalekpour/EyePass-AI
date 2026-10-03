@@ -43,10 +43,11 @@ def setup_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.hasHandlers():
         return logger
-    level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    import config
+    level = getattr(logging, (os.environ.get("LOG_LEVEL") or config.LOG_LEVEL).upper(), logging.INFO)
     logger.setLevel(level)
     handler = logging.StreamHandler()
-    if os.environ.get("LOG_FORMAT", "text").strip().lower() == "json":
+    if (os.environ.get("LOG_FORMAT") or config.LOG_FORMAT).strip().lower() == "json":
         handler.setFormatter(_JsonFormatter())
     else:
         handler.setFormatter(

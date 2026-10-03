@@ -7,12 +7,16 @@ inference, BYTETrack update, spatial-trigger geometry, best-crop
 ranking and the debug recorder run here, per frame.
 
 Inference goes through inference_backends.py:
-  GPU  -> PyTorch .pt via Ultralytics, batched predict (unchanged)
-  CPU  -> OpenVINO (default) / ONNX Runtime, one parallel request per
-          camera frame; PyTorch-on-CPU only as the logged fallback.
+  GPU  -> the engine's cameras are batched into ONE Ultralytics .pt
+          predict() per loop (the original GPU pipeline)
+  CPU  -> ONE model instance per camera of the engine (OpenVINO FP32 /
+          INT8 through Ultralytics on intel:cpu, or an own ONNX Runtime
+          session), all cameras' frames run in parallel
 Every backend returns the same [x1, y1, x2, y2, conf, cls] float64
 array per frame, so nothing below the inference call knows which one
-ran.
+ran. A camera is only processed when its reader has a NEW frame;
+frames replaced before the engine got to them are counted as missed
+(perf_stats.py -> ⏱️ [PERF] / 📊 [STATS] log lines).
 
 A track's OCR STATE lives in the control hub (control-hub/), not here:
 
@@ -52,7 +56,7 @@ import numpy as np
 
 import config
 import inference_backends
-from model_files import parse_hw
+from perf_stats import EnginePerf
 from debug_recorder import DebugConfig, DebugRecorder
 from platecore.bus import RedisBus
 from platecore.hub import (
@@ -127,34 +131,29 @@ def build_tracker_config() -> PlateTrackerConfig:
 
 
 def resolve_runtime(logger: logging.Logger) -> "inference_backends.RuntimePlan":
-    """DETECTION_DEVICE / DETECTION_BACKEND / DETECTION_PRECISION -> the
-    concrete plan (gpu+pt, or cpu+openvino/onnx/pt). Replaces the old
-    resolve_device(), which only knew torch devices — its "auto -> cuda"
-    answer must never feed the ONNX/OpenVINO path."""
+    """.env DETECTION_DEVICE / DETECTION_GPU_MODEL / DETECTION_CPU_MODEL
+    -> gpu + pt (the .pt model), or cpu + openvino_fp32/openvino_int8/onnx."""
     return inference_backends.resolve_runtime(
-        config.DETECTION_DEVICE, config.DETECTION_BACKEND, config.DETECTION_PRECISION,
-        config.STRICT_DEVICE, logger,
+        config.DETECTION_DEVICE, config.DETECTION_GPU_MODEL, config.DETECTION_CPU_MODEL,
+        config.CPU_MODEL_NAME, config.GPU_DEVICE, config.STRICT_DEVICE, config.MODEL_ALIASES, logger,
     )
 
 
-def backend_settings(model_path: str = "", imgsz: int = 0) -> "inference_backends.BackendSettings":
+def backend_settings() -> "inference_backends.BackendSettings":
     return inference_backends.BackendSettings(
         model_root=config.MODEL_ROOT,
-        model_name=config.DETECTION_MODEL,
-        model_path_override=model_path or "",
-        imgsz_override=int(imgsz or 0),
-        cpu_input_hw=parse_hw(config.CPU_INPUT_SIZE) if config.CPU_INPUT_SIZE else None,
         conf=config.CONF_THRESHOLD,
-        iou=config.IOU_THRESHOLD,
+        nms_iou=config.NMS_IOU,
         max_det=config.MAX_DET,
-        cpu_streams=max(1, config.CPU_STREAMS or 1),
-        cpu_threads=config.CPU_INFER_THREADS,
-        openvino_cache_dir=config.OPENVINO_CACHE_DIR,
-        openvino_core_type=config.OPENVINO_SCHEDULING_CORE_TYPE,
-        warmup_runs=config.DETECTION_WARMUP_RUNS,
-        shape_mode=config.CPU_SHAPE_MODE,
-        fallback_to_pt=config.BACKEND_FALLBACK,
+        warmup_runs=config.WARMUP_RUNS,
+        gpu_half=config.GPU_HALF,
+        ov_device=config.OV_DEVICE,
+        onnx_cpu_threads=config.ONNX_CPU_THREADS,
+        int8_fix=dict(config.INT8_FIX),
+        manifest_keys=config.MODEL_MANIFEST_KEYS,
+        file_patterns=config.MODEL_FILE_PATTERNS,
         class_labels=config.CLASS_LABELS,
+        fallback_to_pt=config.BACKEND_FALLBACK_TO_PT,
     )
 
 
@@ -231,34 +230,24 @@ class Engine:
         # are imported and the model compiled inside the child, never in
         # the parent (spawn-safe; required on Windows).
         self.runtime = resolve_runtime(self.logger)
-        self.logger.info(f"[INIT] detection runtime: {self.runtime.describe()} "
-                         f"model={config.DETECTION_MODEL} root={config.MODEL_ROOT}")
-        self.backend = inference_backends.build_backend(
-            self.runtime, backend_settings(self.model_path, imgsz), self.logger)
+        self.logger.info(f"[INIT] detection runtime: {self.runtime.describe()} root={config.MODEL_ROOT}")
+        self.backend = inference_backends.build_backend(self.runtime, backend_settings(), self.logger)
         self.device = self.backend.device
         self.imgsz = self.backend.imgsz_label
 
-        if self.device == "cpu":
-            # cv2's own parallel_for thread pool (resize/crop/warp -- ROI
-            # cropping, letterbox preprocessing) is entirely separate from
-            # the inference runtime's and defaults to "every core this
-            # process can see" -- with N engine processes each doing that,
-            # every camera's per-frame cv2 work oversubscribes on top of
-            # the inference threads. Capped to a small, explicit value.
+        if self.backend.label.startswith("cpu"):
+            # cv2's own thread pool (ROI crop / resize) is separate from the
+            # inference runtime's — kept small so it doesn't compete with it.
+            cv2.setNumThreads(max(1, config.CV2_NUM_THREADS))
             if self.backend.kind == "pt":
-                # PyTorch computes on the CPU only on this path (the pt
-                # backend, or the fallback) — never for OpenVINO/ONNX.
+                # PyTorch only computes on the CPU in the .pt fallback.
                 import torch
                 n = config.TORCH_NUM_THREADS or max(1, (os.cpu_count() or 4) - 1)
                 torch.set_num_threads(n)
-                cv2_n = config.CV2_NUM_THREADS or max(1, min(n, 2))
-                cv2.setNumThreads(cv2_n)
-                self.logger.info(f"[INIT] CPU/pt mode: torch threads set to {n}, cv2 threads set to {cv2_n}")
+                self.logger.info(f"[INIT] CPU/pt fallback: torch threads={n} cv2 threads={config.CV2_NUM_THREADS}")
             else:
-                cv2_n = config.CV2_NUM_THREADS or 2
-                cv2.setNumThreads(cv2_n)
-                self.logger.info(f"[INIT] CPU/{self.backend.kind} mode: cv2 threads set to {cv2_n} "
-                                 f"(torch not used for inference)")
+                self.logger.info(f"[INIT] CPU/{self.backend.kind}: one model instance per camera, "
+                                 f"cv2 threads={config.CV2_NUM_THREADS}")
 
         # track lifecycle config
         self.ABSENT_N = int(absent_n)
@@ -286,13 +275,9 @@ class Engine:
         self.STAGE_EMOJI = {"periodic": "🔁", "cross_line": "🚧", "stop_roi": "🛑", "leave_scene": "🏁"}
         self.logger.info("control-hub client ready (engine_id=%s boot=%s)", self.engine_id, self.hub.boot_id)
 
-        # ---- windowed [STATS] summary (every LOG_EVERY_N_BATCHES batches) --
-        # [BATCH-INFER] used to print unconditionally, once per batch — at
-        # ~9 batches/s that's unreadable within minutes. This accumulates
-        # across a window of batches and flushes one consolidated line, so
-        # the log stays legible while still showing throughput + health.
-        self.LOG_EVERY_N_BATCHES = 15
-        self._win = self._new_window()
+        # ---- performance logs: ⏱️ [PERF] per camera, 📊 [STATS] per engine
+        self.perf = EnginePerf(self.engine_id, self.backend.label,
+                               config.PERF_LOG_INTERVAL_SEC, config.STATS_EVERY_N_BATCHES)
 
         # writers optional
         self.writers: Dict[str, cv2.VideoWriter] = {}
@@ -305,41 +290,15 @@ class Engine:
         self.debug_cfg = DebugConfig()
         self._last_infer_ms = 0.0
         self._batch_count = 0
-        self._last_infer_breakdown: Dict[str, float] = {}
         if self.debug_cfg.enabled:
             self.logger.info(f"[DEBUG-REC] enabled -> {self.debug_cfg.as_dict()}")
         else:
-            self.logger.info("[DEBUG-REC] disabled (set DEBUG_VIDEO_ENABLED=1 to record)")
+            self.logger.info("[DEBUG-REC] disabled (config.DEBUG_VIDEO_ENABLED)")
 
-    # ---------------- windowed stats ----------------
-    @staticmethod
-    def _new_window() -> Dict[str, float]:
-        return {
-            "batches": 0, "cams_sum": 0, "infer_ms_sum": 0.0, "track_ms_sum": 0.0,
-            "detections_sum": 0, "tracks_sum": 0, "skipped_sum": 0,
-            "infer_ms": [], "loop_ms": [],
-        }
-
-    def _flush_window(self):
-        w = self._win
-        n = max(w["batches"], 1)
-        attempted = w["batches"] + w["skipped_sum"]
-        skip_pct = (100.0 * w["skipped_sum"] / attempted) if attempted > 0 else 0.0
-        infer_p95 = float(np.percentile(w["infer_ms"], 95)) if w["infer_ms"] else 0.0
-        loop_avg = float(np.mean(w["loop_ms"])) if w["loop_ms"] else 0.0
-        loop_p95 = float(np.percentile(w["loop_ms"], 95)) if w["loop_ms"] else 0.0
-        # A p95 far above the average usually means some requests landed
-        # on E-cores / a starved core — see README "CPU pipeline".
-        self.logger.info(
-            f"📊 [STATS] engine={self.engine_id} {self.backend.label} last {w['batches']} batches | "
-            f"sources={w['cams_sum'] / n:.1f} | infer avg={w['infer_ms_sum'] / n:.1f}ms "
-            f"p95={infer_p95:.1f}ms | loop avg={loop_avg:.1f}ms p95={loop_p95:.1f}ms | "
-            f"track avg={w['track_ms_sum'] / n:.1f}ms | "
-            f"detections={w['detections_sum']} (avg {w['detections_sum'] / n:.1f}/batch) | "
-            f"tracks={w['tracks_sum']} (avg {w['tracks_sum'] / n:.1f}/batch) | "
-            f"frames_skipped={w['skipped_sum']} ({skip_pct:.1f}%)"
-        )
-        self._win = self._new_window()
+    def _tlog(self, msg: str, *args, **kwargs):
+        """Per-track event lines — config.LOG_TRACK_EVENTS turns them off."""
+        if config.LOG_TRACK_EVENTS:
+            self.logger.info(msg, *args, **kwargs)
 
     # ---------------- debug helpers ----------------
     def _dbg(self, camera_id: str) -> Optional[DebugRecorder]:
@@ -460,8 +419,14 @@ class Engine:
             # all land on the same loop iteration; _last_tracker_fid lets us
             # compute the real elapsed-frame dt for the next tracker.update().
             "_detect_offset": len(self.cameras) % max(1, config.DETECT_EVERY_N_FRAMES),
-            "_last_tracker_fid": 0,
+            "_last_tracker_fid": -(len(self.cameras) % max(1, config.DETECT_EVERY_N_FRAMES)),
+            "_last_captured": None,
         }
+        # CPU backends: one model instance per camera (no-op on the GPU)
+        try:
+            self.backend.ensure_streams(len(self.cameras))
+        except Exception as e:
+            self.logger.exception(f"[CAMERA-ADD] camera={camera_id}: could not create its model instance: {e}")
 
         self._dbg_log(camera_id, "CAMERA", f"camera added -> {url}",
                       data={"roi": roi, "line_points": line_points, "stop_roi": stop_roi, "triggers": triggers})
@@ -484,6 +449,7 @@ class Engine:
             except Exception:
                 self.logger.exception(f"camera={camera_id} track={tid}: ending on removal failed")
         self.cameras.pop(camera_id, None)
+        self.perf.forget(camera_id)
         try:
             cam["reader"].stop()
         except Exception:
@@ -660,7 +626,7 @@ class Engine:
             )
         det_scores = [round(float(c["score"]), 3) for c in task["crops"]]
         emoji = self.STAGE_EMOJI.get(task["stage"], "🔁")
-        self.logger.info(
+        self._tlog(
             f"{emoji} [OCR-SUBMIT] camera={camera_id} track={track_id} uid={meta['uid']} stage={task['stage']} "
             f"seen_frames={meta.get('seen_frames', 0)} crops={n} det_scores={det_scores} "
             f"best_frame={'yes' if task['best_frame'] else 'no'} task_id={task['task_id']}"
@@ -725,7 +691,7 @@ class Engine:
             self._uid_index.pop(uid, None)
 
         lifetime_s = time.time() - float(meta.get("first_seen_wall_ts", time.time()))
-        self.logger.info(
+        self._tlog(
             f"[TRACK-END] camera={camera_id} track={track_id} uid={uid} reason={reason} "
             f"seen_frames={seen_frames} crops={num_crops} lifetime={lifetime_s:.2f}s "
             f"leave_scene_task={finalize_task_id}"
@@ -755,7 +721,7 @@ class Engine:
             disp = rec_state.display or {}
             action = msg.get("action")
             if action == "result":
-                self.logger.info(
+                self._tlog(
                     f"🔎 [OCR-RESULT] camera={camera_id} track={track_id} task={msg.get('task_id')} "
                     f"hub_answer={disp.get('label')!r} conf={disp.get('confidence')} "
                     f"satisfied={rec_state.satisfied} rtt_ms={rec_state.last_latency_ms}"
@@ -766,7 +732,7 @@ class Engine:
             elif action == "request":
                 self._dbg_log(camera_id, "HUB_REQUEST", f"#{track_id} {msg.get('stage')}", track_id=track_id)
             if rec_state.satisfied and not was_satisfied:
-                self.logger.info(f"✅ [SATISFIED] camera={camera_id} track={track_id} plate={disp.get('label')!r} "
+                self._tlog(f"✅ [SATISFIED] camera={camera_id} track={track_id} plate={disp.get('label')!r} "
                                  f"— no more OCR for this track")
 
     # ---------------- debug frame assembly ----------------
@@ -858,15 +824,17 @@ class Engine:
                 continue
 
             self._drain_hub_ctl()
+            self.perf.maybe_log_cameras(self.logger, len(self.cameras))
             _loop_t0 = time.time()
 
-            frames, cam_ids, roi_offsets, full_frames = [], [], [], []
+            frames, cam_ids, roi_offsets, full_frames, frame_ts = [], [], [], [], []
             any_frame_read = False
+            _loop_missed = _loop_captured = 0
 
             for camera_id, cam in list(self.cameras.items()):
                 if not cam.get("active", True):
                     continue
-                ret, frame = cam["reader"].read()
+                ret, frame, f_ts, captured_now = cam["reader"].read_latest()
                 if not (ret and frame is not None):
                     cam["dbg_read_fail"] = cam.get("dbg_read_fail", 0) + 1
                     if cam["dbg_read_fail"] in (1, 50, 500):
@@ -878,55 +846,25 @@ class Engine:
                     self._dbg_log(camera_id, "CAMERA", f"stream recovered after {cam['dbg_read_fail']} empty reads")
                     cam["dbg_read_fail"] = 0
 
-                cam["fid"] += 1
+                # Only NEW frames: the reader keeps the latest frame, so if
+                # nothing arrived since the last loop there is nothing to do
+                # for this camera; frames that arrived and were replaced before
+                # we got here are the misses (same rule as the benchmark).
+                prev = cam["_last_captured"]
+                cam["_last_captured"] = captured_now
+                new_frames = captured_now - prev if prev is not None else 1
+                if new_frames <= 0:
+                    continue
+                missed = max(0, new_frames - 1)
+                self.perf.frame_arrived(camera_id, new_frames, missed)
+                _loop_missed += missed
+                _loop_captured += new_frames
+
+                # fid counts CAMERA frames (missed ones included), so the
+                # tracker's dt and ABSENT_N stay in real camera frames.
+                cam["fid"] += new_frames
                 cam["frames_processed"] += 1
                 cam["last_frame_ts"] = time.time()
-
-                reader_stats = cam["reader"].get_stats()
-                captured_now = reader_stats["frames_captured"]
-                prev_captured = cam.get("_last_reader_frames_captured")
-                if prev_captured is not None:
-                    skipped = max(0, captured_now - prev_captured - 1)
-                    cam["_last_iter_skipped"] = skipped
-                    if skipped > 0:
-                        cam["frames_skipped_total"] = cam.get("frames_skipped_total", 0) + skipped
-                        cam["_win_skipped"] = cam.get("_win_skipped", 0) + skipped
-                cam["_last_reader_frames_captured"] = captured_now
-                cam["_win_processed"] = cam.get("_win_processed", 0) + 1
-
-                _now = time.time()
-                if _now - cam.get("_last_stats_log_ts", 0) >= config.PIPELINE_STATS_LOG_INTERVAL_SEC:
-                    win_start = cam.get("_win_start_ts", _now)
-                    win_elapsed = max(_now - win_start, 1e-6)
-                    win_processed = cam.get("_win_processed", 0)
-                    win_skipped = cam.get("_win_skipped", 0)
-                    win_total = win_processed + win_skipped
-                    fps_out = win_processed / win_elapsed
-                    fps_in = win_total / win_elapsed
-                    win_skip_pct = (100.0 * win_skipped / win_total) if win_total > 0 else 0.0
-
-                    cam["_last_stats_log_ts"] = _now
-                    cam["_win_start_ts"] = _now
-                    cam["_win_processed"] = 0
-                    cam["_win_skipped"] = 0
-
-                    processed_total = cam["frames_processed"]
-                    skipped_total = cam.get("frames_skipped_total", 0)
-                    lifetime_skip_pct = (
-                        100.0 * skipped_total / (processed_total + skipped_total)
-                        if (processed_total + skipped_total) > 0 else 0.0
-                    )
-                    ib = self._last_infer_breakdown or {}
-                    infer_str = (
-                        f"pre={ib.get('preprocess', 0.0):.1f}ms fwd={ib.get('inference', 0.0):.1f}ms "
-                        f"post={ib.get('postprocess', 0.0):.1f}ms total={self._last_infer_ms:.1f}ms"
-                    ) if ib else f"total={self._last_infer_ms:.1f}ms"
-
-                    self.logger.info(
-                        f"[PIPELINE] camera={camera_id} fps_in={fps_in:.1f} fps_out={fps_out:.1f} "
-                        f"skip_rate={win_skip_pct:.1f}% (lifetime={lifetime_skip_pct:.1f}%) infer[{infer_str}] "
-                        f"tracks={len(cam.get('track_meta', {}))} reconnects={reader_stats['reconnects']}"
-                    )
 
                 # line_points / stop_roi arrive either as fractions of the
                 # frame (0..1, what the reference video_processor.py
@@ -963,9 +901,10 @@ class Engine:
                 # in _write_debug_frame(), drawing each track's last known
                 # box so playback doesn't drop to 1/N fps.
                 N = max(1, config.DETECT_EVERY_N_FRAMES)
-                do_detect = (cam["fid"] % N) == cam.get("_detect_offset", 0)
+                do_detect = (cam["fid"] - cam["_last_tracker_fid"]) >= N
 
                 if not do_detect:
+                    self.perf.frame_coasted(camera_id)
                     rec = cam.get("debug")
                     if rec is not None and rec.enabled:
                         try:
@@ -982,15 +921,16 @@ class Engine:
                 cam_ids.append(camera_id)
                 roi_offsets.append((rx1, ry1, rx2, ry2))
                 full_frames.append(frame)
+                frame_ts.append(f_ts)
 
             if not frames:
-                if not any_frame_read:
-                    time.sleep(0.02)
+                # no camera has a new frame yet: wait a little instead of spinning
+                time.sleep(0.02 if not any_frame_read else 0.002)
                 continue
 
             _infer_t0 = time.time()
             try:
-                batch_dets, infer_breakdown = self.backend.infer(frames)
+                batch_dets, frame_timings = self.backend.infer(frames)
             except Exception as e:
                 for cid in cam_ids:
                     self._send_msg(cid, {"status": "error", "error": str(e)})
@@ -1000,10 +940,6 @@ class Engine:
 
             self._last_infer_ms = (time.time() - _infer_t0) * 1000.0
             self._batch_count += 1
-            if infer_breakdown:
-                self._last_infer_breakdown = dict(infer_breakdown)
-
-            ib = self._last_infer_breakdown or {}
             batch_size = len(cam_ids)
 
             if self._last_infer_ms > config.SLOW_BATCH_WARN_MS:
@@ -1012,25 +948,21 @@ class Engine:
                     f"infer_ms={self._last_infer_ms:.1f} (> {config.SLOW_BATCH_WARN_MS:g}ms threshold)"
                 )
 
-            # accumulated into self._win below, once per whole batch (all
-            # cameras) — see _flush_window() for the consolidated [STATS] line
             _batch_detections = 0
             _batch_tracks = 0
-            _batch_track_ms = 0.0
-            _batch_skipped = 0
 
             for idx, detections in enumerate(batch_dets):
                 camera_id = cam_ids[idx]
                 cam = self.cameras.get(camera_id)
                 if cam is None:
                     continue
+                _cam_t0 = time.time()
                 try:
                     self._emit_heartbeat(camera_id)
 
                     # [x1, y1, x2, y2, conf, cls] float64 in ROI pixels,
                     # whichever backend produced it (inference_backends.py)
                     _batch_detections += int(detections.shape[0])
-                    _batch_skipped += cam.pop("_last_iter_skipped", 0)
 
                     _rx1, _ry1, _rx2, _ry2 = roi_offsets[idx]
                     dbg_dets = []
@@ -1047,16 +979,14 @@ class Engine:
                     # real elapsed camera frames since the tracker last saw this
                     # camera -- normally N (config.DETECT_EVERY_N_FRAMES), but can
                     # be larger if the reader also silently dropped frames in
-                    # between (see _last_iter_skipped above). BYTETracker uses
+                    # between (missed frames). BYTETracker uses
                     # this to advance its Kalman filters by the true gap in one
                     # step instead of assuming 1 frame passed.
                     _dt = cam["fid"] - cam.get("_last_tracker_fid", cam["fid"] - 1)
                     cam["_last_tracker_fid"] = cam["fid"]
-                    _trk_t0 = time.time()
                     online_targets = cam["tracker"].update(
                         detections, roi_frame.shape[:2], roi_frame.shape[:2], dt=_dt
                     )
-                    _batch_track_ms += (time.time() - _trk_t0) * 1000.0
                     _batch_tracks += len(online_targets)
 
                     fid = cam["fid"]
@@ -1101,7 +1031,7 @@ class Engine:
                         score = float(getattr(track, "score", 0.0))
 
                         if is_new_track:
-                            self.logger.info(
+                            self._tlog(
                                 f"[TRACK-NEW] camera={camera_id} track={track_id} fid={fid} "
                                 f"cls={track_class} det_conf={score:.3f} bbox_roi=({x1},{y1},{x2},{y2})"
                             )
@@ -1148,13 +1078,13 @@ class Engine:
 
                         if stop_roi_trig and trigger_events.get("roi_entry"):
                             ev = trigger_events["roi_entry"]
-                            self.logger.info(
+                            self._tlog(
                                 f"[ROI-ENTRY] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} "
                                 f"point={ev['point']} confidence={ev['confidence']:.2f}"
                             )
                         if stop_roi_trig and trigger_events.get("roi_exit"):
                             ev = trigger_events["roi_exit"]
-                            self.logger.info(f"[ROI-EXIT] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} point={ev['point']}")
+                            self._tlog(f"[ROI-EXIT] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} point={ev['point']}")
 
                         quality_ok = self._quality_check_crop(track_class, crop, sharp)
                         hh, ww = crop.shape[:2]
@@ -1229,18 +1159,24 @@ class Engine:
                     self._send_msg(camera_id, {"status": "error", "error": str(e)})
                     self._dbg_log(camera_id, "ERROR", f"camera processing error: {e}")
                     continue
+                finally:
+                    _now = time.time()
+                    ts = frame_ts[idx]
+                    self.perf.frame_done(
+                        camera_id, frame_timings[idx] if idx < len(frame_timings) else {},
+                        track_ms=(_now - _cam_t0) * 1000.0,
+                        latency_ms=(_now - ts) * 1000.0 if ts else None,
+                        n_dets=int(detections.shape[0]),
+                    )
 
-            self._win["batches"] += 1
-            self._win["cams_sum"] += batch_size
-            self._win["infer_ms_sum"] += self._last_infer_ms
-            self._win["track_ms_sum"] += _batch_track_ms
-            self._win["detections_sum"] += _batch_detections
-            self._win["tracks_sum"] += _batch_tracks
-            self._win["skipped_sum"] += _batch_skipped
-            self._win["infer_ms"].append(self._last_infer_ms)
-            self._win["loop_ms"].append((time.time() - _loop_t0) * 1000.0)
-            if self._win["batches"] >= self.LOG_EVERY_N_BATCHES:
-                self._flush_window()
+            self.perf.batch_done(
+                n_frames=batch_size, batch_ms=self._last_infer_ms,
+                loop_ms=(time.time() - _loop_t0) * 1000.0,
+                infer_frame_ms=[t.get("inference", 0.0) for t in frame_timings],
+                missed=_loop_missed, captured=_loop_captured,
+                dets=_batch_detections, tracks=_batch_tracks,
+            )
+            self.perf.maybe_log_engine(self.logger, len(self.cameras))
 
         self.logger.info("Engine stopping...")
         self.cleanup()

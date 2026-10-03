@@ -1,5 +1,15 @@
 # DEBUGGING — visual debug output, structured logs, and every tunable
 
+
+> **Where the switches are now:** every debug/log switch below is a
+> constant in the service's `config.py` (`detector/src/config.py`
+> sections 8–9, `ocr_service/src/config.py` sections 4–5), not in
+> `.env`. Edit it and `docker compose up -d --build <service>`. Names
+> are unchanged except `DETECTOR_DEBUG_VIDEO_ENABLED`, which is now
+> `DEBUG_VIDEO_ENABLED` in `detector/src/config.py`. Performance logs
+> (⏱️ `[PERF]`, 📊 `[STATS]`, 📊 `[OCR-STATS]`) are described in the
+> README, "Logs".
+
 This is the plate module's counterpart to face_service_'s own
 DEBUGGING.md — same structure, same idea, applied to ALPR instead of
 face recognition: `plate_detector` (YOLO detect + BYTETrack + spatial
@@ -315,21 +325,22 @@ keys directly), and `cv2.CAP_PROP_BUFFERSIZE=1` in `rtsp_reader.py`
 ## 10. Quick recipes
 
 **"I want to see everything, cheaply, on one camera while I test":**
-```env
+(values in `detector/src/config.py` / `ocr_service/src/config.py`)
+```python
 LOG_LEVEL=DEBUG
 LOG_FORMAT=text
 LOG_DECISION_TRACE=true
-DETECTOR_DEBUG_VIDEO_ENABLED=true
+DEBUG_VIDEO_ENABLED = true
 DEBUG_VIDEO_EVERY_N=1
 DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED=true
 OCR_SAVE_DECISION_DEBUG=true
 ```
 
 **"Production, log aggregator, minimal disk use":**
-```env
+```python
 LOG_FORMAT=json
 LOG_DECISION_TRACE=true
-DETECTOR_DEBUG_VIDEO_ENABLED=false
+DEBUG_VIDEO_ENABLED = false
 DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED=false
 OCR_SAVE_DECISION_DEBUG=false
 CAMERA_SNAPSHOT_DEBUG_ENABLED=false

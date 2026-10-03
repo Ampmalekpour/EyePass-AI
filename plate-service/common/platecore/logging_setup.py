@@ -2,7 +2,7 @@
 lines look the same whether they come from the detector, an Engine
 subprocess, the OCR pool, or a worker process.
 
-LOG_FORMAT (env, default "text"):
+LOG_FORMAT (service config.py via configure(), env overrides; default "text"):
   text  - human-readable, unchanged from before this revision:
           "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
   json  - one JSON object per line: timestamp, level, logger, message,
@@ -19,7 +19,7 @@ Both formats go to stdout only; this module never opens a file — each
 service manages its own log file paths via its own config.py where it
 wants one (e.g. camera_status.log in camera-service).
 
-LOG_LEVEL (env, default "INFO") is unchanged from before: DEBUG/INFO/
+LOG_LEVEL (service config.py via configure(), env overrides; default "INFO") is unchanged from before: DEBUG/INFO/
 WARNING/ERROR/CRITICAL, same as Python's own logging module.
 """
 
@@ -55,14 +55,33 @@ class _JsonFormatter(logging.Formatter):
                                "logger": payload["logger"], "message": payload["message"]})
 
 
+_DEFAULTS = {"level": None, "format": None}
+
+
+def configure(level: str = None, fmt: str = None) -> None:
+    """Called by each service's config.py with its LOG_LEVEL / LOG_FORMAT.
+    The LOG_LEVEL / LOG_FORMAT env vars, when set, still win (debugging
+    a live container without a rebuild)."""
+    _DEFAULTS["level"] = level
+    _DEFAULTS["format"] = fmt
+
+
+def _level() -> str:
+    return (os.environ.get("LOG_LEVEL") or _DEFAULTS["level"] or "INFO").upper()
+
+
+def _format() -> str:
+    return (os.environ.get("LOG_FORMAT") or _DEFAULTS["format"] or "text").strip().lower()
+
+
 def setup_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.hasHandlers():
         return logger
-    level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    level = getattr(logging, _level(), logging.INFO)
     logger.setLevel(level)
     handler = logging.StreamHandler()
-    if os.environ.get("LOG_FORMAT", "text").strip().lower() == "json":
+    if _format() == "json":
         handler.setFormatter(_JsonFormatter())
     else:
         handler.setFormatter(

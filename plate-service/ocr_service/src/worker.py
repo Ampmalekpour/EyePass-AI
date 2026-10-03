@@ -79,6 +79,8 @@ class OcrWorker(mp.Process):
         self.car_ocr: Optional[PaddleOCR] = None
         self.motor_ocr: Optional[PaddleOCR] = None
         self.logger = None
+        self._last_status = None
+        self._stats = self._new_stats()
 
     # ------------------------------------------------------------------
     # Startup (child process only)
@@ -486,7 +488,43 @@ class OcrWorker(mp.Process):
             return None
         return result
 
+    # ------------------------------------------------------------------
+    # logs: per-task lines (config.LOG_TASK_EVENTS) + 📊 [OCR-STATS]
+    # ------------------------------------------------------------------
+    def _tlog(self, msg, *args, **kwargs):
+        if config.LOG_TASK_EVENTS:
+            self.logger.info(msg, *args, **kwargs)
+
+    @staticmethod
+    def _new_stats():
+        return {"t0": time.time(), "tasks": 0, "ok": 0, "invalid": 0, "error": 0,
+                "proc_ms": [], "queue_ms": []}
+
+    def _record_stats(self, total_ms, queue_ms, status):
+        st = self._stats
+        st["tasks"] += 1
+        st[{"ok": "ok", "invalid": "invalid"}.get(status, "error")] += 1
+        st["proc_ms"].append(total_ms)
+        if queue_ms is not None:
+            st["queue_ms"].append(queue_ms)
+
+    def _maybe_log_stats(self):
+        st = self._stats
+        el = time.time() - st["t0"]
+        if el < config.OCR_STATS_LOG_INTERVAL_SEC:
+            return
+        if st["tasks"]:
+            pm, qm = np.array(st["proc_ms"]), np.array(st["queue_ms"] or [0.0])
+            self.logger.info(
+                "📊 [OCR-STATS] worker=%s last %.0fs | tasks=%d (%.2f/s) ok=%d invalid=%d error=%d "
+                "(valid %.0f%%) | processing avg=%.0f p95=%.0f ms | queue wait avg=%.0f p95=%.0f ms",
+                self.worker_id, el, st["tasks"], st["tasks"] / el, st["ok"], st["invalid"], st["error"],
+                100.0 * st["ok"] / st["tasks"], pm.mean(), np.percentile(pm, 95), qm.mean(),
+                np.percentile(qm, 95))
+        self._stats = self._new_stats()
+
     def _emit_result(self, task: Dict[str, Any], **kwargs):
+        self._last_status = kwargs.get("status")
         result = self._build_result(task, **kwargs)
         if result is None:
             return False
@@ -550,7 +588,7 @@ class OcrWorker(mp.Process):
         if crops:
             frame_number = int(crops[0].get("frame_number", 0) or 0)
 
-        self.logger.info(
+        self._tlog(
             "[OCR-%s] [TASK-START] task=%s camera=%s track=%s stage=%s crops=%d queue_latency=%s",
             self.worker_id, task_id, camera_id, track_id, trigger_type, len(crops),
             f"{queue_latency_ms:.0f}ms" if queue_latency_ms is not None else "n/a",
@@ -586,7 +624,7 @@ class OcrWorker(mp.Process):
             return
 
         voted_class = max(set(class_votes), key=class_votes.count)
-        self.logger.info("[OCR-%s] [VOTE] task=%s voted_class=%s class_votes=%s detection_confidences=%s",
+        self._tlog("[OCR-%s] [VOTE] task=%s voted_class=%s class_votes=%s detection_confidences=%s",
                           self.worker_id, task_id, voted_class, class_votes, crop_det_scores)
 
         _task_t0 = time.time()
@@ -607,14 +645,14 @@ class OcrWorker(mp.Process):
                 per_crop_ms.append((time.time() - c0) * 1000.0)
 
             voted_text, voted_conf = self._vote_car_texts(raw_texts, raw_confs)
-            self.logger.info(
+            self._tlog(
                 "[OCR-%s] [CAR-OCR] task=%s candidates=%s per_crop_ms=%s voted=%r voted_conf=%.3f",
                 self.worker_id, task_id, list(zip(raw_texts, [round(c, 3) for c in raw_confs])),
                 [round(m, 1) for m in per_crop_ms], voted_text, voted_conf,
             )
 
             is_valid, desc, norm_plate = self._validate_car(voted_text, voted_conf, self.CONF_THRESHOLD)
-            self.logger.info("[OCR-%s] [VALIDATE] task=%s valid=%s reason=%r normalized=%r",
+            self._tlog("[OCR-%s] [VALIDATE] task=%s valid=%s reason=%r normalized=%r",
                               self.worker_id, task_id, is_valid, desc, norm_plate)
 
             if config.LOG_DECISION_TRACE:
@@ -662,13 +700,13 @@ class OcrWorker(mp.Process):
                 per_crop_ms.append((time.time() - c0) * 1000.0)
 
             voted_parts, voted_conf = self._vote_motor_parts(raw_parts)
-            self.logger.info(
+            self._tlog(
                 "[OCR-%s] [MOTOR-OCR] task=%s candidates=%s per_crop_ms=%s voted=%s voted_conf=%.3f",
                 self.worker_id, task_id, raw_parts, [round(m, 1) for m in per_crop_ms], voted_parts, voted_conf,
             )
 
             is_valid, desc, display, compact = self._validate_motor(voted_parts, self.CONF_THRESHOLD)
-            self.logger.info("[OCR-%s] [VALIDATE] task=%s valid=%s reason=%r display=%r compact=%r",
+            self._tlog("[OCR-%s] [VALIDATE] task=%s valid=%s reason=%r display=%r compact=%r",
                               self.worker_id, task_id, is_valid, desc, display, compact)
 
             if config.LOG_DECISION_TRACE:
@@ -708,7 +746,8 @@ class OcrWorker(mp.Process):
                                voted_class=voted_class, error=f"unknown voted_class={voted_class}")
 
         total_ms = (time.time() - _task_t0) * 1000.0
-        self.logger.info(
+        self._record_stats(total_ms, queue_latency_ms, self._last_status)
+        self._tlog(
             "[OCR-%s] [TASK-DONE] task=%s camera=%s track=%s stage=%s total_processing_ms=%.1f",
             self.worker_id, task_id, camera_id, track_id, trigger_type, total_ms,
             extra={"fields": {
@@ -735,6 +774,7 @@ class OcrWorker(mp.Process):
         self.logger.info("[OCR-%s] Ready.", self.worker_id)
 
         while not self.stop_event.is_set():
+            self._maybe_log_stats()
             if not self.processing_event.is_set():
                 time.sleep(config.OCR_IDLE_POLL_INTERVAL_SEC)
                 continue

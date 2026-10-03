@@ -54,6 +54,9 @@ class RTSPStreamReader:
         self.reconnects = 0
         self.consecutive_read_failures = 0
         self.last_capture_ts: Optional[float] = None
+        # timestamp of the frame currently held in self.frame (arrival ->
+        # result latency in the engine's [PERF] lines)
+        self.frame_ts: Optional[float] = None
         self.last_read_latency_ms: float = 0.0
 
         self.thread = threading.Thread(
@@ -178,10 +181,12 @@ class RTSPStreamReader:
                     )
                     self.consecutive_read_failures = 0
 
+                now = time.time()
+                self.frame_ts = now
                 self.ret = True
                 self.frame = frame
                 self.frames_captured += 1
-                self.last_capture_ts = time.time()
+                self.last_capture_ts = now
 
             except Exception as e:
                 self.ret = False
@@ -196,11 +201,25 @@ class RTSPStreamReader:
             return False, None
         return True, self.frame
 
+    def read_latest(self):
+        """(ok, frame, capture_ts, frames_captured) for the newest frame."""
+        frame, ts, n = self.frame, self.frame_ts, self.frames_captured
+        if not self.ret or frame is None:
+            return False, None, None, n
+        return True, frame, ts, n
+
     def stop(self):
         with self._lock:
             self.stopped = True
             cap = self.cap
             self.cap = None
+
+        # Let the reader thread leave cap.read() BEFORE releasing the
+        # capture: releasing a VideoCapture while another thread is still
+        # inside read() on it can deadlock FFmpeg (seen as engine
+        # shutdown / camera removal hanging forever).
+        if self.thread.is_alive():
+            self.thread.join(timeout=config.RTSP_READER_JOIN_TIMEOUT_SEC)
 
         if cap is not None:
             try:
@@ -211,9 +230,6 @@ class RTSPStreamReader:
                 )
             except Exception:
                 pass
-
-        if self.thread.is_alive():
-            self.thread.join(timeout=config.RTSP_READER_JOIN_TIMEOUT_SEC)
 
         self.ret = False
         self.frame = None

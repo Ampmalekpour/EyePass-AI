@@ -29,9 +29,10 @@ for the step-by-step flow and how every failure case is handled.
 - For GPU: an NVIDIA driver + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
   **No GPU?** Face: delete the `deploy:` block under `face_detector` in
   `face-service/compose.yaml` and set `DETECTION_DEVICE=cpu`. Plate: no
-  compose edit. In `plate-service/.env` set `COMPOSE_FILE=compose.yaml`
-  and `DETECTION_DEVICE=cpu`, and the detector runs OpenVINO on the CPU
-  (see [plate-service/README.md → GPU or CPU](plate-service/README.md#gpu-or-cpu)).
+  compose edit. In `plate-service/.env` set `COMPOSE_FILE=compose.yaml`,
+  `DETECTION_DEVICE=cpu` and `DETECTION_CPU_MODEL` (`openvino_fp32` /
+  `openvino_int8` / `onnx`); see
+  [plate-service/README.md → How the detector runs the models](plate-service/README.md#how-the-detector-runs-the-models).
 - Your prepared **base images**, which already contain
   torch/ultralytics/OpenCV (and PaddleOCR for plate):
   `base_image:latest` (face) and `base_image_gpu:latest` (plate). If
@@ -70,7 +71,7 @@ rebuild.
 
 | Put this | Here | Used by |
 |---|---|---|
-| The plate models: `plate_v8n_480.pt` and/or `plate_v8s_640.pt`, plus their CPU exports (`plate_v8n_480_288x480.onnx`, `plate_v8n_480_fp32_openvino_model/`, …); layout in [plate-service/README.md](plate-service/README.md#the-detection-models-folder) | `plate-service/models/detection/` | plate_detector (`DETECTION_MODEL` picks one) |
+| The plate model folders `plate_v8n_480/` (with `export_info.yaml`, `.pt`, ONNX, OpenVINO FP32/INT8) and `plate_v8s_640/`; layout in [plate-service/README.md → Models](plate-service/README.md#models) | `plate-service/models/detection/` | plate_detector (`DETECTION_GPU_MODEL` / `DETECTION_CPU_MODEL` pick one) |
 | Your whole `PadOcr/` folder's **contents**, names unchanged: `en_PP-OCRv3_det_infer/`, `rec_svrt_fa_final_1/`, `ch_ppocr_mobile_v2.0_cls_infer/`, `rec_svrt_motor/`, `Final_Dict.txt` | `plate-service/models/ocr/` | plate_ocr |
 | *(optional)* a test clip for `--profile test-video` | `plate-service/test_video.mp4` | video_publisher |
 
@@ -93,11 +94,12 @@ Edit at least these:
 - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`: **must be identical in
   both `.env` files** if both modules share the one MinIO from step 4.
   The two examples ship different defaults.
-- `DETECTION_DEVICE`: `auto`, `cpu` or `cuda:0` (plate also takes
-  `gpu`). For plate, also set `COMPOSE_FILE` (GPU or CPU host),
-  `DETECTION_MODEL` (`plate_v8n_480` / `plate_v8s_640`) and
-  `COMPOSE_PROFILES` (standalone relay, or the system's). See the
-  Quick start in [plate-service/README.md](plate-service/README.md#quick-start).
+- `DETECTION_DEVICE`: `auto`, `cpu` or `cuda:0` (plate: `gpu` / `cpu` / `auto`).
+  For plate, `.env` only holds the device/model choice
+  (`DETECTION_GPU_MODEL`, `DETECTION_CPU_MODEL`, `OCR_DEVICE`), `COMPOSE_FILE`,
+  `COMPOSE_PROFILES` and deployment values; all tuning is in each
+  service's `config.py`. Production: start from `.env.prod.example`.
+  See [plate-service/README.md → Quick start](plate-service/README.md#quick-start).
 
 ### 4. Start (the shared network and Redis/MinIO once, then the modules)
 

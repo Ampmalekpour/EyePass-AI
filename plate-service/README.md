@@ -67,15 +67,18 @@ additive. The inconsistencies this fixed are listed in
 ```
 common/platecore/      shared library, copied into both Docker images
 detector/               plate_detector service (src/, tools/, Dockerfile, requirements.txt)
-                          src/inference_backends.py  GPU (.pt) / CPU (OpenVINO, ONNX) inference
-                          src/model_files.py         DETECTION_MODEL -> files, input size, class names
-                          tools/parity_test.py       acceptance test: .pt vs CPU backend on a clip
-                          tools/export_cpu_models.py .pt -> ONNX + OpenVINO in the expected layout
+                          src/config.py              every detector setting (.env picks device + model)
+                          src/inference_backends.py  GPU batch (.pt) / CPU per-camera (OpenVINO, ONNX)
+                          src/model_files.py         export_info.yaml manifest -> model files
+                          src/perf_stats.py          ⏱️ [PERF] / 📊 [STATS] performance logs
+                          tools/bench_multistream.py the multi-stream benchmark (GPU reference vs CPU variants)
+                          tools/export_cpu_models.py .pt -> ONNX + OpenVINO FP32 in the model-folder layout
 ocr_service/            plate_ocr service (src/, Dockerfile, requirements.txt)
 compose.yaml            plate_detector + plate_ocr + control_hub (+ standalone relay, test clips, autoheal as profiles)
 compose.gpu.yaml        GPU reservation for plate_detector (COMPOSE_FILE in .env)
 compose.infra.yaml      redis + minio (+ inspection tools, --profile tools)
-.env.example            every variable the stack understands
+.env.example            dev/test .env (device, models, deployment)
+.env.prod.example       production .env with [FILL_IN] placeholders
 redis_tools.py          manual test harness / CLI — stands in for the backend
 tests/                  unit tests (platecore, engine_manager rebalance, triggers, backend_bridge, inference backends)
 README.md               this file
@@ -86,518 +89,364 @@ README.md               this file
 
 ```bash
 docker network create eyeplate_net      # once, ever — skip if it already exists
-cp .env.example .env                    # then set the lines below
-```
-
-| You want | Set in `.env` |
-|---|---|
-| **GPU** detection | `COMPOSE_FILE=compose.yaml:compose.gpu.yaml` and `DETECTION_DEVICE=gpu` |
-| **CPU** detection | `COMPOSE_FILE=compose.yaml` and `DETECTION_DEVICE=cpu` (OpenVINO FP32 by default) |
-| The small, fast model | `DETECTION_MODEL=plate_v8n_480` |
-| The larger model | `DETECTION_MODEL=plate_v8s_640` |
-| This module's own relay (dev, single module) | `COMPOSE_PROFILES=standalone-stream` |
-| The whole system's shared relay | `COMPOSE_PROFILES=` (empty) + see [Using the system's streamer](#using-the-systems-streamer-instead-of-the-standalone-one) |
-
-```bash
+cp .env.example .env                    # production: cp .env.prod.example .env (see "Production")
+docker compose -f compose.infra.yaml up -d   # dev only: Redis + MinIO (production uses the platform's)
 docker compose up -d --build            # reads COMPOSE_FILE / COMPOSE_PROFILES from .env
-docker compose logs -f plate_detector   # check the [INIT] / [MODEL] / [CPU-TOPOLOGY] lines
+docker compose logs -f plate_detector   # [INIT] / [MODEL] lines, then ⏱️ [PERF] and 📊 [STATS]
 ```
 
-Everything else in `.env.example` has a working default. The rest of
-this section explains each piece.
+`.env` decides only **which device and model** run and **where things
+are**. Everything else is set in each service's `config.py`:
 
-
-## What you need to provide
-
-Nothing in this delivery trains or ships model weights: you bind-mount
-what you already have.
-
-| What | Where it goes | `.env` variable |
-|---|---|---|
-| The detection models (layout below) | `${DETECTION_MODELS_DIR}/` (mounted at `/models`) | `DETECTION_MODELS_DIR` (default `./models/detection`) |
-| Your whole `PadOcr/` folder, **with these exact subfolder/file names kept** (see below) | `${OCR_MODELS_DIR}/` | `OCR_MODELS_DIR` (default `./models/ocr`) |
-| Your base image (already has torch/ultralytics/OpenCV) | Docker build arg | `AI_BASE_IMAGE` (default `base_image_gpu:latest`) |
-
-### The detection models folder
-
-```
-${DETECTION_MODELS_DIR}/                       (= /models inside plate_detector)
-├── plate_v8n_480.pt                           PyTorch: GPU pipeline, and the CPU fallback
-├── plate_v8n_480_288x480.onnx                 ONNX FP32, static 288x480      (DETECTION_BACKEND=onnx)
-├── plate_v8n_480_fp32_openvino_model/         OpenVINO FP32                   (DETECTION_BACKEND=openvino, default)
-│   ├── plate_v8n_480.xml
-│   ├── plate_v8n_480.bin
-│   └── metadata.yaml
-├── plate_v8n_480_int8_openvino_model/         OpenVINO INT8                   (DETECTION_PRECISION=int8, see below)
-│   ├── plate_v8n_480.xml
-│   ├── plate_v8n_480.bin
-│   └── metadata.yaml
-├── export_info.yaml                           input size + class names of the 480 export
-├── export_eval.json                           (not read by the detector)
-├── plate_v8s_640.pt                           PyTorch: GPU pipeline
-└── plate_v8s_640_*                            its CPU exports, once made (tools/export_cpu_models.py)
-```
-
-**The names matter.** `DETECTION_MODEL` is the base name, and every
-file is found from it (`detector/src/model_files.py`):
-
-| Pipeline | File used for `DETECTION_MODEL=<name>` |
+| In `.env` | Values |
 |---|---|
-| GPU, or `DETECTION_BACKEND=pt` | `<name>.pt` |
-| CPU, `openvino` + `fp32` | `<name>_fp32_openvino_model/<name>.xml` |
-| CPU, `openvino` + `int8` | `<name>_int8_openvino_model/<name>.xml` |
-| CPU, `onnx` | `<name>_<H>x<W>.onnx` (or `<name>.onnx`) |
+| `COMPOSE_FILE` | GPU host: `compose.yaml:compose.gpu.yaml` · CPU host: `compose.yaml` |
+| `DETECTION_DEVICE` | `gpu` · `cpu` · `auto` |
+| `DETECTION_GPU_MODEL` | `plate_v8n_480` · `plate_v8s_640` (or `v8n` / `v8s`) |
+| `DETECTION_CPU_MODEL` | `openvino_fp32` · `openvino_int8` · `onnx` |
+| `OCR_DEVICE` | `cpu` · `gpu` |
+| `COMPOSE_PROFILES` | `standalone-stream` (own relay, dev) · empty (the system's streamer) · `+test-video`, `+watchdog` |
+| Redis / MinIO / relay / ports / folders | deployment values (`[FILL_IN]` in `.env.prod.example`) |
 
-**Input size follows the model.** You don't set it.
+| Everything else | File |
+|---|---|
+| detection thresholds, GPU FP16, OpenVINO device, INT8 fix, engines, tracker, triggers, crops, RTSP, logs, debug video | `detector/src/config.py` |
+| OCR thresholds, worker pool, logs, decision montages | `ocr_service/src/config.py` |
+| control hub policy (satisfied conf, waits, final gate), logs | `control-hub/src/config.py` |
 
-- GPU: `imgsz` is the trailing number of the name, so `plate_v8n_480`
-  runs at 480 and `plate_v8s_640` runs at 640. Ultralytics letterboxes
-  each ROI to that size, as before. `DETECTION_IMG_SIZE` stays `0`.
-  Setting it forces another size and logs a warning.
-- CPU: the model's own input shape (e.g. 288x480) is read from the
-  graph, `metadata.yaml`, `<name>_export_info.yaml` / `export_info.yaml`
-  or the ONNX file name, in that order, and logged at startup. The
-  shared `export_info.yaml` is only applied to the model whose size it
-  describes, so the 480 file is never used for `plate_v8s_640`. Class
-  names are read the same way.
+Changing a `config.py` value: edit it, then `docker compose up -d --build <service>`.
+Changing `.env`: `docker compose up -d`.
 
-**`plate_v8s_640` on the CPU** needs its own exports. Make them inside
-the detector image, so they come out with the same OpenVINO version
-the detector runs:
+
+## Models
+
+### Which files, and where
+
+The detector reads one **folder per model** in `DETECTION_MODELS_DIR`
+(default `./models/detection`, mounted read-only at `/models`), the same
+layout the multi-stream benchmark uses:
+
+```
+models/detection/
+├── plate_v8n_480/                               ← copy your whole plate_v8n_480 model folder
+│   ├── export_info.yaml                         manifest: model_name, imgsz, names, pt, onnx,
+│   │                                            openvino: {ov_fp32, ov_int8_box}
+│   ├── plate_v8n_480.pt                         GPU (DETECTION_GPU_MODEL=plate_v8n_480) + CPU fallback
+│   ├── plate_v8n_480_288x480.onnx               DETECTION_CPU_MODEL=onnx
+│   ├── plate_v8n_480_fp32_openvino_model/       DETECTION_CPU_MODEL=openvino_fp32
+│   └── plate_v8n_480_int8_box_openvino_model/   DETECTION_CPU_MODEL=openvino_int8
+│                                                (from requantize_int8_head_fp32.py)
+└── plate_v8s_640/
+    └── plate_v8s_640.pt                         GPU (DETECTION_GPU_MODEL=plate_v8s_640)
+
+models/ocr/                                      ← the CONTENTS of your PadOcr/ folder, names unchanged
+├── en_PP-OCRv3_det_infer/
+├── rec_svrt_fa_final_1/
+├── ch_ppocr_mobile_v2.0_cls_infer/
+├── rec_svrt_motor/
+└── Final_Dict.txt
+```
+
+- **Paths come from `export_info.yaml`** (`pt`, `onnx`,
+  `openvino.ov_fp32`, `openvino.ov_int8_box`, `imgsz`, `names`), exactly
+  like the benchmark. Without a manifest the files are found by name
+  (`MODEL_FILE_PATTERNS` in `detector/src/config.py`), so a folder with
+  only `plate_v8s_640.pt` works for the GPU.
+- **CPU variants are taken from `plate_v8n_480/`** (`CPU_MODEL_NAME` in
+  `config.py`), the model that has ONNX/OpenVINO exports. To run
+  `plate_v8s_640` on the CPU later, export it
+  (`tools/export_cpu_models.py`) and set `CPU_MODEL_NAME`.
+- **Input size follows the model.** GPU: 480 / 640 from the name, as
+  before. CPU: the export size from `export_info.yaml` (288x480).
+- `bench_final/`, `export_eval.json` and other extra files in the
+  folder are ignored.
+- The models are bind-mounted: replacing a file needs only
+  `docker compose restart plate_detector`.
+
+### Make CPU exports for another model
 
 ```bash
 docker compose run --rm -v "$PWD/models/detection:/export" plate_detector \
-    python tools/export_cpu_models.py --model /export/plate_v8s_640.pt --out /export
-# -> plate_v8s_640_384x640.onnx, plate_v8s_640_fp32_openvino_model/, plate_v8s_640_export_info.yaml
+    python tools/export_cpu_models.py --model /export/plate_v8s_640/plate_v8s_640.pt --out /export
+# -> plate_v8s_640/{export_info.yaml, plate_v8s_640_384x640.onnx, plate_v8s_640_fp32_openvino_model/}
 ```
 
-Ultralytics installs `onnx`/`onnxslim` on the first export if the
-image lacks them, which needs internet access; otherwise
-`pip install onnx onnxslim` in the image first. The default shape is
-16:9 rounded up to a multiple of 32 (`480 → 288x480`,
-`640 → 384x640`); use `--input-size HxW` to override it. The script
-exports with the benchmarked settings (`opset=17, simplify=True,
-dynamic=False, batch=1, half=False`, no NMS in the graph, then
-`ov.convert_model` + `ov.save_model(compress_to_fp16=False)`). It
-converts OpenVINO from a *dynamic* ONNX export so the model can be
-compiled per camera ROI; see [ROIs and input shapes](#rois-and-input-shapes).
-
-The OCR folder must contain, **exactly as named** (read by
-`ocr_service/src/config.py`):
-
-```
-${OCR_MODELS_DIR}/
-├── en_PP-OCRv3_det_infer/       (shared detector model, car + motorcycle)
-├── rec_svrt_fa_final_1/         (car plate recognizer)
-├── ch_ppocr_mobile_v2.0_cls_infer/   (shared angle classifier)
-├── rec_svrt_motor/              (motorcycle plate recognizer)
-└── Final_Dict.txt               (shared character dictionary)
-```
-
-Both folders are plain bind mounts, never baked into the image, so a
-model swap needs no rebuild. Replace the files and run
-`docker compose restart plate_detector`. Switching `DETECTION_MODEL`,
-`DETECTION_DEVICE` or `DETECTION_BACKEND` also only needs a restart
-(`docker compose up -d`), except GPU ↔ CPU, which also changes
-`COMPOSE_FILE`.
+Static ONNX (opset 17, simplified, batch 1, FP32, no NMS) and OpenVINO
+FP32 from it, as benchmarked. INT8 is not made here; it comes from
+`requantize_int8_head_fp32.py` and is added to `export_info.yaml` as
+`openvino.ov_int8_box`.
 
 
-## GPU or CPU
+## How the detector runs the models
 
-One variable picks the pipeline, and a matching `COMPOSE_FILE` adds or
-drops the NVIDIA reservation:
-
-```ini
-# GPU host
-COMPOSE_FILE=compose.yaml:compose.gpu.yaml
-DETECTION_DEVICE=gpu            # or cuda:1 for a specific GPU
-
-# CPU host
-COMPOSE_FILE=compose.yaml
-DETECTION_DEVICE=cpu
-DETECTION_BACKEND=openvino      # default; onnx or pt also possible
-DETECTION_PRECISION=fp32        # default
-CPU_EXPECTED_CAMERAS=4          # your real camera count (sizes the parallel requests)
-```
-
-`DETECTION_DEVICE=auto` picks the GPU when torch sees CUDA, otherwise
-the CPU. If you ask for `gpu` and there is none, the detector logs an
-ERROR and runs the CPU pipeline. With `STRICT_DEVICE=true` it refuses
-to start instead.
-
-### GPU pipeline: unchanged
-
-On the GPU nothing about the architecture changed. Each engine process
-loads `<DETECTION_MODEL>.pt` with Ultralytics (`YOLO(path).to("cuda")`)
-and runs one batched `model.predict(source=frames, imgsz, conf,
-half=False)` per loop over all its cameras, as before. Only the model
-file and `imgsz` now come from `DETECTION_MODEL`. `DETECTION_BACKEND`,
-`DETECTION_PRECISION` and the other `DETECTION_CPU_*` settings are
-ignored on the GPU (with a warning if set).
-
-### CPU pipeline: how it works
+The engine layer is the same for GPU and CPU. `EngineManager` starts
+engine processes and adds cameras to them; a new engine starts when one
+is full; `rebalance()` consolidates cameras every 30 s; self-healing
+restores the engine count after a restart. Each engine loops over its
+cameras:
 
 ```
-RTSP relay ─► RTSPStreamReader (per camera) ─► ROI crop
-                                                   │
-      one engine process, all cameras              ▼
-      ┌──────────────────────────────────────────────────────────────┐
-      │ per camera frame: letterbox (Ultralytics-exact) → blob         │
-      │   → start_async on that camera's OpenVINO infer request       │
-      │ wait for all requests → copy outputs → decode + class-aware    │
-      │ NMS (IoU 0.7, max 300) → boxes back to ROI pixels              │
-      └──────────────────────────────────────────────────────────────┘
-                                                   │  [x1,y1,x2,y2,conf,cls] float64
-                                                   ▼
-                         BYTETracker → triggers → best crops → control hub / OCR
-                         (unchanged: same array the GPU path produces)
+for each camera with a NEW frame (the RTSP reader keeps only the latest; replaced frames = missed)
+    → ROI crop
+→ inference for all of them             ← the only part that differs, below
+→ per camera: tracker → triggers → best crops → OCR tasks / control hub   (unchanged)
 ```
 
-What the detector does on the CPU, and why (`detector/src/inference_backends.py`):
-
-- **The OpenVINO runtime is used directly, not through Ultralytics.**
-  Ultralytics 8.3.x compiles OpenVINO models with device `AUTO`, which
-  moves inference onto the integrated GPU (measured 2-3× slower, plus a
-  ~200 ms stall at the switch). The detector compiles on the named
-  `"CPU"` device, checks `EXECUTION_DEVICES == ['CPU']`, and fails
-  loudly otherwise. It also avoids the patched Ultralytics ONNX backend
-  that prints `[DEBUG] ... ONNX Inference time` on every frame.
-- **ONNX Runtime** always gets `providers=["CPUExecutionProvider"]`
-  explicitly, and the detector verifies it.
-- **FP32 is the default.** It gives the same detections as PyTorch
-  (benchmark: 100% recall, 100% precision, IoU 1.000 over 2000 frames).
-  `INFERENCE_PRECISION_HINT=f32` is pinned, so a CPU with bf16/AMX
-  never lowers precision silently. FP16 gave no speed-up and is not used.
-- **Pre- and post-processing reproduce Ultralytics exactly.** Letterbox
-  uses `INTER_LINEAR` resize and centred 114 padding; the blob is
-  BGR→RGB, `/255`, NCHW float32. The output `(1, 4+nc, N)` is decoded
-  as cx,cy,w,h plus sigmoided class scores, then `conf > DETECTION_CONF_THRESHOLD`,
-  class-aware NMS (7680 px class offset, IoU `DETECTION_IOU_THRESHOLD=0.7`,
-  max `DETECTION_MAX_DET=300`), and the boxes are mapped back through
-  the letterbox and clipped.
-- **Cameras run in parallel, not as one serial batch.** The engine
-  compiles one model with `PERFORMANCE_HINT=THROUGHPUT`,
-  `NUM_STREAMS = cameras on the engine`, and one infer request per
-  camera. Every camera's frame is started asynchronously and the engine
-  waits for all of them. Outputs are copied before a request is reused,
-  because a request's output buffer is overwritten by its next run.
-- **Threads.** The detector does not force `INFERENCE_NUM_THREADS` to
-  the logical core count, which measured 2× slower (15 ms vs 7.2 ms,
-  work spread onto E-cores and hyper-threads); OpenVINO chooses. PyTorch
-  does no work on this path, so `torch.set_num_threads` is not called,
-  and OpenCV is capped at `cv2.setNumThreads(2)` so it doesn't compete
-  with OpenVINO.
-- **Spawn-safe.** OpenVINO and ONNX Runtime are imported, and the model
-  compiled, inside each engine child process, never in the parent.
-- **Warm-up and cache.** Each request is warmed up
-  (`DETECTION_WARMUP_RUNS`) at the real input shape, and compiled
-  models are cached in `OPENVINO_CACHE_DIR` for faster restarts.
-- **Fallback, never silent.** If the ONNX/OpenVINO model is missing or
-  fails to compile, the engine logs an ERROR with the reason and runs
-  `<DETECTION_MODEL>.pt` with PyTorch on the CPU (slower, still
-  correct). Set `DETECTION_BACKEND_FALLBACK=false` to make that a hard
-  failure instead.
-
-#### ROIs and input shapes
-
-Each camera's ROI is cropped before detection, so frames reach the
-model in different aspect ratios.
-
-- **`DETECTION_CPU_SHAPE_MODE=roi` (default, OpenVINO).** Every ROI is
-  letterboxed exactly the way Ultralytics does it for the `.pt` model:
-  ratio `min(size/h, size/w)`, then the smallest 32-aligned rectangle.
-  A full 1920x1080 frame at 480 gives 288x480, the exported shape; a
-  960x1080 ROI gives 480x448. The model is reshaped and compiled
-  **once** per distinct ROI shape (logged as `[SHAPE] compiled ...`,
-  about 0.2 s). So the CPU sees exactly the pixels the GPU path sees,
-  and the detections match for every ROI. This needs an OpenVINO model
-  converted from a *dynamic* ONNX export, which
-  `tools/export_cpu_models.py` produces. A **static** export (anchors
-  baked in for one size) cannot be reshaped: the detector then logs a
-  `[SHAPE]` warning and switches to `fixed`.
-- **`DETECTION_CPU_SHAPE_MODE=fixed`.** Every ROI is letterboxed into
-  the model's one static shape, and the padding absorbs the aspect
-  ratio. This is fine for full frames and wide ROIs. A tall ROI gets
-  far fewer pixels than on the GPU (a 960x1080 ROI is scaled 0.27×
-  instead of 0.44×). The ONNX backend always works this way, because
-  the export is static, and logs a `[SHAPE]` warning for such ROIs.
-
-Measured here, with YOLOv8n and the same clip through `.pt` and
-OpenVINO FP32 (`tools/parity_test.py`): full frame and every ROI tried
-gave 100% / 100% / IoU 1.0000 in `roi` mode. With a static model in
-`fixed` mode, full frames still match exactly, but a portrait ROI fell
-to about 89% recall.
-
-#### Concurrency: one engine for all cameras
-
-Keep `CPU_ENGINE_MODE=single`: one engine process runs OpenVINO for
-all cameras, with one stream and request per camera. Set
-`CPU_EXPECTED_CAMERAS` to your camera count. `DETECTION_CPU_STREAMS=0`
-follows it, and `[CPU-TOPOLOGY]` logs the plan at startup.
-
-If several engine processes run (`multi`/`auto` mode, or more cameras
-than `MAX_CAMERAS_PER_ENGINE`), the detector sets
-`INFERENCE_NUM_THREADS` to physical cores ÷ engines, so the engines
-share the cores instead of each claiming all of them. Under a Docker
-CPU quota, set `CPU_CORES_OVERRIDE` to the same number as
-`DETECTOR_CPU_LIMIT`; the threads are then split from that budget. The
-ONNX backend uses one session per camera, with
-`intra_op_num_threads = cores ÷ sessions` and `inter_op_num_threads = 1`,
-because sessions don't coordinate threads with each other.
-
-#### Capacity and load
-
-Benchmark (i7-12700K, 4 streams, frames/s the CPU can process):
-
-| Model / input | PyTorch | ONNX | OpenVINO FP32 | OpenVINO INT8 |
-|---|---|---|---|---|
-| YOLOv8s 640x384 | 25 | 53 | 49 | 145 |
-| YOLOv8n 640x384 | | | ≈168 (est.) | |
-| YOLOv8n 480x288 | | | ≈280 (est.) | |
-
-Keep `cameras × camera fps ÷ DETECT_EVERY_N_FRAMES` below about
-60-70% of your measured capacity, so RTSP decoding, tracking, JPEG
-encoding, Redis and OCR (if it shares the PC) still have headroom. For
-example, 4 cameras × 25 fps = 100 inferences/s is about 36% of
-`plate_v8n_480`'s ~280/s. `plate_v8s_640` (~49/s at 384x640 FP32) needs
-`DETECT_EVERY_N_FRAMES=4` for the same cameras (25/s, about 50%). The
-detector logs this planned load at startup.
-
-The `[STATS]` line (every 15 batches) now shows the backend, inference
-average and **p95**, and loop average and p95 (numbers are an example):
-
-```
-📊 [STATS] engine=0 cpu/openvino-fp32 last 15 batches | sources=4.0 | infer avg=14.2ms p95=16.0ms | loop avg=21.3ms p95=24.9ms | ...
-```
-
-A p95 far above the average usually means some requests landed on
-E-cores. Try `OPENVINO_SCHEDULING_CORE_TYPE=PCORE_ONLY` or fewer
-streams, then measure again.
-
-#### INT8: only through the accuracy gate
-
-INT8 is **not** accurate enough for plates yet. Against PyTorch it
-reached 90% precision, average IoU 0.89 and worst 0.67, and its crops
-go to OCR. `DETECTION_PRECISION=int8` works, but logs a warning. Adopt
-it only after:
-
-1. Quantizing with `nncf.quantize_with_accuracy_control` on the
-   labelled validation set, calibrated on varied training images (not
-   one video), ideally with the detection head kept in FP32.
-2. Validation mAP50-95 dropping by less than 0.01, and not at all for
-   `motorcycle_plate`.
-3. Re-tuning `TRACKER_TRACK_THRESH` and the other confidence
-   thresholds: INT8 shifted confidences by 0.035 on average.
-
-#### Versions
-
-Use one pinned environment for export, benchmark and production.
-OpenVINO and ONNX Runtime are installed in the detector image from
-`.env`:
-
-```ini
-OPENVINO_VERSION=<exact version from `pip freeze` of the benchmark venv>
-ONNXRUNTIME_VERSION=<same>
-```
-
-Then rebuild with `docker compose build plate_detector`. Empty means
-latest, which is only for a first try. Export and run with the same
-OpenVINO version: a newer runtime reads older IR files, but not the
-other way round. Re-export after upgrading OpenVINO, and re-run the
-parity test after upgrading Python, OpenVINO or ONNX Runtime. If the
-base image already contains `onnxruntime-gpu`, the plain `onnxruntime`
-package is skipped. The startup log prints the OpenVINO version in use.
-
-### Acceptance tests before rollout (CPU)
-
-**1. Parity.** Run the same recorded clip through PyTorch and the CPU
-backend inside the detector image, with the same env and ROI crop as
-the service:
-
-```bash
-docker compose run --rm -v "$PWD/clips:/clips:ro" plate_detector \
-    python tools/parity_test.py --video /clips/gate.mp4 --candidate openvino --streams 4 \
-    --roi 0 0.3 1 0.7          # optional: a camera's ROI (x y w h, fractions)
-# --candidate onnx | --precision int8 | --frames 2000 | --save /clips/out
-```
-
-It matches detections by same class and IoU ≥ 0.5. It **passes** at
-recall and precision ≥ 99.5% and average IoU ≥ 0.98; FP32 should give
-100% / 100% / 1.000. It prints ms/frame for both backends and exits
-non-zero on failure.
-
-**2. Capacity.** Run 4 real RTSP streams for 60 minutes with the full
-pipeline, OCR included. Watch per-camera dropped frames
-(`frames_skipped` in `[STATS]`, `skip_rate` in `[PIPELINE]`), infer
-p95, CPU below about 70% (`docker stats`), and the CPU temperature.
-
-**3. Log checks.**
-
-```bash
-docker compose logs plate_detector | grep "EXECUTION_DEVICES"   # every engine: ['CPU']
-docker compose logs plate_detector | grep -c "\[DEBUG\]"        # 0
-docker compose logs plate_detector | grep -E "FAILED|FALLING BACK"  # nothing
-```
-
-### Detector environment reference (model and compute)
-
-| Variable | Default | Meaning |
+| `.env` | Inside one engine | Cameras per engine (`config.py`) |
 |---|---|---|
-| `COMPOSE_FILE` | `compose.yaml:compose.gpu.yaml` | GPU host: include `compose.gpu.yaml`. CPU host: `compose.yaml` only |
-| `DETECTION_DEVICE` | `gpu` | `gpu` / `cuda:N` / `cpu` / `auto` |
-| `STRICT_DEVICE` | `false` | `true`: a missing GPU is a startup error instead of a CPU fallback |
-| `DETECTION_MODELS_DIR` | `./models/detection` | host folder with the models, mounted at `/models` |
-| `DETECTION_MODEL` | `plate_v8n_480` | `plate_v8n_480` / `plate_v8s_640`; picks files and input size |
-| `DETECTION_MODEL_PATH` | *(empty)* | explicit in-container file for non-standard names (`.pt` for pt, `.onnx`/`.xml` for the CPU backends) |
-| `DETECTION_IMG_SIZE` | `0` | `0` = the model's size; otherwise forces the square PyTorch size |
-| `DETECTION_CONF_THRESHOLD` | `0.25` | detection confidence, all backends |
-| `DETECTION_BACKEND` | `openvino` | CPU only: `openvino` / `onnx` / `pt` |
-| `DETECTION_PRECISION` | `fp32` | CPU/openvino only: `fp32` / `int8` (see the gate above) |
-| `DETECTION_CPU_SHAPE_MODE` | `roi` | `roi` = per-ROI shapes like the GPU path; `fixed` = one static shape |
-| `DETECTION_CPU_INPUT_SIZE` | *(empty)* | `HxW` forces one input shape (implies `fixed`) |
-| `DETECTION_CPU_STREAMS` | `0` | parallel requests per engine; `0` = cameras per engine |
-| `DETECTION_CPU_THREADS` | `0` | OpenVINO `INFERENCE_NUM_THREADS` / ORT intra-op threads; `0` = auto |
-| `OPENVINO_SCHEDULING_CORE_TYPE` | *(empty)* | `PCORE_ONLY` etc. for hybrid CPUs |
-| `OPENVINO_CACHE_DIR` | `/data/openvino_cache` | compiled-model cache (empty = off) |
-| `DETECTION_IOU_THRESHOLD` / `DETECTION_MAX_DET` | `0.7` / `300` | NMS, Ultralytics' defaults |
-| `DETECTION_WARMUP_RUNS` | `3` | warm-up inferences per request |
-| `DETECTION_BACKEND_FALLBACK` | `true` | ONNX/OpenVINO failure: ERROR log + PyTorch on CPU (`false` = fail) |
-| `INSTALL_CPU_RUNTIMES`, `OPENVINO_VERSION`, `ONNXRUNTIME_VERSION` | `true`, *(latest)*, *(latest)* | build args: CPU runtimes in the image, **pin them** |
-| `CPU_ENGINE_MODE`, `CPU_EXPECTED_CAMERAS`, `CPU_CORES_OVERRIDE`, `DETECTOR_CPU_LIMIT` | `single`, `1`, `0`, `0` | engine topology and CPU budget (comments in `.env.example`) |
-| `DETECT_EVERY_N_FRAMES` | `1` | detect on 1 in N frames; the tracker coasts the rest |
-| `CV2_NUM_THREADS` | `0` | `0` = 2 on openvino/onnx |
-| `TORCH_NUM_THREADS` | `0` | only when PyTorch computes on the CPU (`pt` / fallback) |
+| `DETECTION_DEVICE=gpu` | **one** Ultralytics YOLO `.pt` on CUDA; the engine's cameras go into **one batched `predict()`** per loop (the original GPU pipeline) | `MAX_CAMERAS_PER_ENGINE` (6) |
+| `DETECTION_CPU_MODEL=openvino_fp32` | **one Ultralytics YOLO instance per camera** on the OpenVINO FP32 model, `device="intel:cpu"`; all cameras' frames run **in parallel** | `CPU_MAX_CAMERAS_PER_ENGINE` (8) |
+| `DETECTION_CPU_MODEL=openvino_int8` | same, on the INT8 model (box branch FP32) + the benchmark's **INT8 duplicate fix** in Ultralytics' postprocess (`INT8_FIX` in `config.py`) | same |
+| `DETECTION_CPU_MODEL=onnx` | **one ONNX Runtime session per camera**, CPU threads split between them (`cpu_count ÷ cameras`, rebuilt when a camera is added), own letterbox + OpenCV NMS | same |
+
+These are the deployments that measured best in the multi-stream
+benchmark (`tools/bench_multistream.py`), implemented the same way
+(`detector/src/inference_backends.py`):
+
+- **CPU instances are created as cameras are added** (about 0.3 s each
+  after the first). No camera count to configure.
+- **All CPU cameras share one engine process**, as in the benchmark.
+  Keep `CPU_MAX_CAMERAS_PER_ENGINE` at the capacity the benchmark
+  measured: a second CPU engine would compete for the same cores.
+- **OpenVINO never runs on AUTO / the iGPU.** It uses `intel:cpu`; at
+  startup the engine logs `EXECUTION_DEVICES=['CPU']` and recompiles on
+  CPU if it isn't.
+- **ONNX** names `CPUExecutionProvider` explicitly.
+- **Fallback:** if a CPU model is missing or fails to load, the engine
+  logs an ERROR and runs the `.pt` with Ultralytics on CPU (slower,
+  same detections). `BACKEND_FALLBACK_TO_PT = False` makes that a hard
+  failure.
+- **GPU without CUDA:** `DETECTION_DEVICE=gpu` on a box without a GPU
+  logs an ERROR and runs the CPU pipeline (`STRICT_DEVICE = True` in
+  `config.py` makes it a startup error).
+- **OpenVINO / ONNX Runtime versions:** pin `OPENVINO_VERSION` /
+  `ONNXRUNTIME_VERSION` in `.env` to the venv the models were exported
+  and benchmarked with, then `docker compose build plate_detector`.
+  Export and run with the same OpenVINO.
 
 
-## Run it
+## Logs
 
-```bash
-docker network create eyeplate_net        # once, ever — skip if it already exists
-cp .env.example .env                      # then set GPU/CPU, model, streamer (Quick start)
+Every component logs to stdout (`docker compose logs -f <service>`).
+Levels, formats and switches are in each `config.py` (`LOG_LEVEL`,
+`LOG_FORMAT` = `text`/`json`; the `LOG_LEVEL` env var still overrides
+for a quick debug session).
 
-# Only if the platform doesn't already run a shared Redis/MinIO:
-docker compose -f compose.infra.yaml up -d
-docker compose -f compose.infra.yaml --profile tools up -d   # + RedisInsight/Redis Commander
+**Detector performance** (`detector/src/perf_stats.py`, same columns as
+the benchmark):
 
-docker compose up -d --build              # plate_detector + plate_ocr + control_hub
-                                          # (+ mediamtx + camera_stream with the standalone-stream profile)
+```
+⏱️ [PERF] engine=0 cpu/openvino_fp32 camera=3 | fps in=25.0 proc=24.6 | missed=4 (1.6%) coasted=0 |
+         pre=1.9 infer=11.8 (p95 14.2) post=0.9 track=2.1 ms/frame | latency=31 (p95 44) ms | dets/frame=0.85 | lifetime missed=1.2%
+📊 [STATS] engine=0 cpu/openvino_fp32 cameras=4 | last 50 loops in 2.1s | frames/loop=3.9 | processed=96.2/s |
+         missed=6 (1.5%) | infer/frame avg=11.9 p95=14.5 ms | batch avg=13.8 p95=17.0 ms | loop avg=20.4 p95=26.1 ms | ...
 ```
 
-`docker compose` reads `COMPOSE_FILE`, `COMPOSE_PROFILES` and
-`COMPOSE_PATH_SEPARATOR` from `.env`, so one command covers every
-combination. The equivalent by hand is
-`docker compose -f compose.yaml -f compose.gpu.yaml --profile standalone-stream up -d`.
-Add `test-video` to `COMPOSE_PROFILES` to loop `TEST_VIDEO_FILE` into
-the relay as cameras `1`..`6`.
+| Field | Meaning |
+|---|---|
+| `fps in` / `proc` | frames the camera delivered / frames that went through the model |
+| `missed` | frames replaced by a newer one before the engine reached them (dropped) |
+| `coasted` | frames skipped on purpose (`DETECT_EVERY_N_FRAMES > 1`) |
+| `pre / infer / post` | ms per frame (Ultralytics `r.speed`, own timers for ONNX; a GPU batch is split over its frames) |
+| `track` | tracker + triggers + crops + OCR hand-off, ms per frame |
+| `latency` | frame arrival → result handled (avg / p95) |
+| `batch` / `loop` | one inference call / one whole engine loop |
 
-Both services start idle automatically, then self-heal to whatever
-phase they were last in (see "Self-healing" below). After a *fresh*
-`docker compose up` with an empty Redis, both come up idle and wait:
-`plate_detector` for the backend's first `activated` command per
-camera (as in the reference pipeline), and `plate_ocr` for the first
-task. If you're migrating an **already-running** deployment (cameras
-already marked active in the existing `plate:cameras:config`), see
-"Migrating from the existing single-process deployment" below.
+Intervals: `PERF_LOG_INTERVAL_SEC` (10 s), `STATS_EVERY_N_BATCHES` (50).
+`⚠️ [INFER-SLOW]` when a loop exceeds `SLOW_BATCH_WARN_MS`.
+Per-track lines (`[TRACK-NEW]`, `🔁 [OCR-SUBMIT]`, `🔎 [OCR-RESULT]`,
+`✅ [SATISFIED]`, `🚧 [LINE-CROSS]`, `[TRACK-END]`, …) switch off with
+`LOG_TRACK_EVENTS = False`.
+
+**OCR**: `📊 [OCR-STATS]` per worker every `OCR_STATS_LOG_INTERVAL_SEC`
+(tasks/s, ok/invalid/error, valid %, processing and queue-wait avg/p95);
+per-task lines (`[TASK-START]`, `[CAR-OCR]`, `[VOTE]`, `[VALIDATE]`,
+`[TASK-DONE]`) switch off with `LOG_TASK_EVENTS = False`; one-line
+decision trace with `LOG_DECISION_TRACE`.
+
+**Visual debug** (`config.py`, local folders, never MinIO):
+
+| Switch | File | Output |
+|---|---|---|
+| `DEBUG_VIDEO_ENABLED` | `detector/src/config.py` | annotated MP4 per camera in `./debug_video/camera_<id>/` |
+| `DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED` | `detector/src/config.py` | JPEG of the crops sent to OCR, `./debug_video/ocr_submissions/` |
+| `OCR_SAVE_DECISION_DEBUG` | `ocr_service/src/config.py` | JPEG per OCR decision, `./debug_ocr/decisions/` |
+
+See [DEBUGGING.md](DEBUGGING.md) for what each shows.
+
+
+## Testing multiple streams
+
+**1. The benchmark (model level, exactly the script used for the
+decision).** `detector/tools/bench_multistream.py` is your benchmark
+with command-line options. It needs the GPU (pt_gpu is the reference),
+so run it on the GPU machine, inside the detector image (which has
+ultralytics, openvino, onnxruntime and CUDA torch):
+
+```bash
+docker compose run --rm -v "<folder with video2.mp4>:/clips:ro" plate_detector \
+    python tools/bench_multistream.py --video /clips/video2.mp4 --streams 4 8 12
+# --model-dir /models/plate_v8n_480 (default)   --frames 3000   --variants pt_gpu ov_fp32 onnx
+# results: ./debug_video/bench_final/<date_time>/<N>_streams/  (SPEED / ACCURACY tables also printed)
+```
+
+Without Docker, the same file runs on the host with the benchmark venv:
+`python detector/tools/bench_multistream.py --model-dir <...>\plate_v8n_480 --video <...>\video2.mp4 --results <...>\bench_final --streams 4`.
+
+**2. The whole service with N simulated cameras.** The `test-video`
+profile loops `TEST_VIDEO_FILE` into the relay as cameras `1`..`6`:
+
+```bash
+# .env:  COMPOSE_PROFILES=standalone-stream,test-video   TEST_VIDEO_FILE=./video2.mp4
+docker compose up -d --build
+python redis_tools.py set-camera --id 1 --address rtsp://mediamtx:8554/1 --roi 0 0 1 1
+python redis_tools.py activate --id 1        # repeat for 2, 3, 4 ...
+docker compose logs -f plate_detector | grep -E "PERF|STATS|INFER-SLOW"
+```
+
+Read `missed %`, `latency` and `infer p95` per camera, and compare them
+with the benchmark's SPEED table for the same number of streams. Add
+cameras until `missed` rises: that is the box's capacity. Put it in
+`CPU_MAX_CAMERAS_PER_ENGINE` (CPU) or `MAX_CAMERAS_PER_ENGINE` (GPU).
+
+
+## Production
+
+1. **Start from the production template:**
+   ```bash
+   cp .env.prod.example .env
+   ```
+   Every value the backend/DevOps team must provide is `[FILL_IN]`
+   (Redis host/port/db/password/URL, MinIO endpoint/keys/buckets/public
+   URL, the system relay URL, the shared Docker network, image tag,
+   OpenVINO/ONNX Runtime versions). Search for `[FILL_IN]` and replace
+   all of them. The device/model lines are ours to set.
+2. **Production runs only** `plate_detector`, `plate_ocr` and
+   `control_hub`. `COMPOSE_PROFILES` is empty, so the platform's Redis,
+   MinIO and shared RTSP relay are used (see the next section).
+3. Put the models in place (see "Models"), then:
+   ```bash
+   docker compose up -d --build
+   docker compose ps
+   curl localhost:8010/health ; curl localhost:8011/health ; curl localhost:8021/health
+   docker compose logs plate_detector | grep -E "MODEL|EXECUTION_DEVICES|FAILED|FALLING BACK"
+   ```
+   Expect the right `[MODEL]` line, `EXECUTION_DEVICES=['CPU']` on CPU,
+   and no `FAILED` / `FALLING BACK`.
+
+
+## Put this service in its own folder (e.g. `C:\Users\eyerik.com\Desktop\plate-service`)
+
+The service is the `plate-service/` folder of the repo. Two ways:
+
+**A. Git clone, then use only `plate-service/`** (recommended: you can `git pull` updates):
+
+```bat
+cd C:\Users\eyerik.com\Desktop
+git clone -b armin_claude_plate https://github.com/Ampmalekpour/EyePass-AI.git eyepass-ai
+:: the service is now in C:\Users\eyerik.com\Desktop\eyepass-ai\plate-service
+```
+
+To have exactly `C:\Users\eyerik.com\Desktop\plate-service` with only
+the plate service in it (sparse checkout):
+
+```bat
+cd C:\Users\eyerik.com\Desktop
+git clone --no-checkout -b armin_claude_plate https://github.com/Ampmalekpour/EyePass-AI.git plate-service-repo
+cd plate-service-repo
+git sparse-checkout set plate-service
+git checkout armin_claude_plate
+:: service folder: C:\Users\eyerik.com\Desktop\plate-service-repo\plate-service
+:: later updates:  git pull
+```
+
+**B. Copy the folder** (no git in the target): download the branch as
+ZIP from GitHub (branch `armin_claude_plate` → Code → Download ZIP) and
+copy its `plate-service\` contents into
+`C:\Users\eyerik.com\Desktop\plate-service`.
+
+Then, in the service folder:
+
+```bat
+copy .env.example .env            :: or .env.prod.example for production
+:: put the models:  models\detection\plate_v8n_480\...   models\detection\plate_v8s_640\...   models\ocr\...
+docker network create eyeplate_net
+docker compose up -d --build
+```
+
+Everything the service needs is inside that folder (`compose*.yaml`,
+`.env*`, `detector/`, `ocr_service/`, `control-hub/`, `camera-service/`,
+`common/`, `models/`, `redis_tools.py`). It does not use anything from
+the other modules.
 
 
 ## Using the system's streamer instead of the standalone one
 
-**What the standalone streamer is.** With `COMPOSE_PROFILES=standalone-stream`,
-this module runs its **own** RTSP relay: `plate_mediamtx` (MediaMTX)
-and `plate_camera_stream`. `camera_stream` reads
-`plate:cameras:config`, registers each camera in MediaMTX as path
-`<camera_id>`, and reports online/offline on `plate:camera:events` and
-`plate:cameras:details`. That is right for a laptop or a single-module
-test. On a full EyePass deployment, the system already runs **one
-shared** MediaMTX + camera_stream for every module. That shared
-camera_stream scans `*:cameras:config`, so it already serves the plate
-cameras. Running a second relay would open a second connection to
-every camera.
+**What the standalone streamer is.** With `COMPOSE_PROFILES=standalone-stream`
+this module runs its **own** RTSP relay: `plate_mediamtx` (MediaMTX) and
+`plate_camera_stream`. `camera_stream` reads `plate:cameras:config`,
+registers each camera in MediaMTX as path `<camera_id>`, and reports
+online/offline on `plate:camera:events` and `plate:cameras:details`.
+That is right for a laptop or a single-module test. On a full EyePass
+deployment the system already runs **one shared** MediaMTX +
+camera_stream for every module (it scans `*:cameras:config`, so it
+already serves the plate cameras). A second relay would open a second
+connection to every camera.
 
-The detector only needs three things from any streamer:
+The detector needs three things from any streamer:
 
-1. frames at `MTX_RTSP_BASE_URL/<camera_id>`
-   (`backend_bridge.rtsp_url()`);
-2. online/offline events on the Redis channel `plate:camera:events`
+1. frames at `MTX_RTSP_BASE_URL/<camera_id>`;
+2. online/offline events on Redis channel `plate:camera:events`
    (singular `camera`) and details in `plate:cameras:details`, in the
    Redis the detector uses;
 3. a Docker network where the relay's container name resolves.
 
-**Switch to the system's streamer:**
+**Switch:**
 
-1. **Find the system's names.** You need the relay's container name,
-   the Docker network it is on, and the Redis it uses:
+1. **Find the system's names** (relay container, its network, its Redis):
    ```bash
    docker ps --format '{{.Names}}\t{{.Image}}' | grep -iE 'mediamtx|camera|redis|minio'
    docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' <system-mediamtx-container>
    ```
 2. **Edit `.env`:**
    ```ini
-   COMPOSE_PROFILES=                                  # drop standalone-stream (keep test-video/watchdog if used)
-   SHARED_NETWORK=<the system's network>              # or keep eyeplate_net and run the `docker network connect` below
+   COMPOSE_PROFILES=                                    # drop standalone-stream
+   SHARED_NETWORK=<the system's network>
    MTX_RTSP_BASE_URL=rtsp://<system-mediamtx-container>:8554
-   REDIS_HOST=<system redis container>                # the SAME Redis the system camera_stream + backend use
-   REDIS_PORT=6379
+   REDIS_HOST=<system redis container>                  # the SAME Redis as the system camera_stream + backend
    REDIS_URL=redis://<system redis container>:6379/0
    MINIO_ENDPOINT=http://<system minio container>:9000
-   REDIS_MODULE=plate                                 # unchanged: the system camera_stream must see plate:cameras:config
-   TEST_VIDEO_RTSP_BASE_URL=rtsp://<system-mediamtx-container>:8554   # only if you use test-video
+   TEST_VIDEO_RTSP_BASE_URL=rtsp://<system-mediamtx-container>:8554   # only with test-video
    ```
-   To keep `eyeplate_net` instead, attach the system containers to it:
-   `docker network connect eyeplate_net <system-mediamtx-container>`
-   (the same for its Redis/MinIO if they're not reachable yet).
-3. **Remove the standalone containers.** They are not in the active
-   profiles any more, so `docker compose up` would leave them running:
-   ```bash
-   docker rm -f plate_mediamtx plate_camera_stream
-   ```
-4. **Start:** `docker compose up -d`. Only `plate_detector`,
-   `plate_ocr` and `control_hub` (plus any other profiles you kept)
-   start. The detector has no `depends_on` on a relay; it reconnects to
-   whatever `MTX_RTSP_BASE_URL` points at.
+   Or keep `eyeplate_net` and attach the system containers to it:
+   `docker network connect eyeplate_net <system-mediamtx-container>`.
+3. **Remove the standalone containers** (no longer in the profiles, so
+   `up` would leave them running): `docker rm -f plate_mediamtx plate_camera_stream`
+4. **Start:** `docker compose up -d`.
 5. **Verify:**
    ```bash
-   # the relay is reachable from the detector and serves the camera path
-   docker exec plate_detector python -c "import cv2,sys; c=cv2.VideoCapture('rtsp://<system-mediamtx-container>:8554/<camera_id>'); print(c.read()[0])"
-   # the system camera_stream publishes plate camera events
+   docker exec plate_detector python -c "import cv2; c=cv2.VideoCapture('rtsp://<system-mediamtx-container>:8554/<camera_id>'); print(c.read()[0])"
    docker exec <system redis container> redis-cli SUBSCRIBE plate:camera:events
-   # the detector attached the camera and is reading frames
-   docker compose logs -f plate_detector | grep -E "CAMERA-ADD|PIPELINE|STATS"
+   docker compose logs -f plate_detector | grep -E "CAMERA-ADD|PERF"
    ```
-   If `[PIPELINE]` shows no frames: the path name must equal the
-   camera id, and `MTX_RTSP_BASE_URL` must use the container name, not
-   `localhost`.
-
-The ports this module published for its relay (`RTSP_PORT`,
-`WEBRTC_PORT`, `HLS_PORT`, `MTX_API_PORT`, `RTMP_PORT`) are no longer
-used, so they can't clash with the system's.
+   No frames in `[PERF]`: the relay path must equal the camera id, and
+   `MTX_RTSP_BASE_URL` must use the container name, not `localhost`.
 
 **Back to standalone:** put `standalone-stream` back in
-`COMPOSE_PROFILES`, set `MTX_RTSP_BASE_URL=rtsp://mediamtx:8554` (and
-`TEST_VIDEO_RTSP_BASE_URL`), then `docker compose up -d`.
+`COMPOSE_PROFILES`, set `MTX_RTSP_BASE_URL=rtsp://mediamtx:8554`, then
+`docker compose up -d`.
 
 
 ## Upgrading an existing `.env`
 
-These changes need edits to an existing `.env`. Compare it with
-`.env.example`.
-
-- **Add at the top:** `COMPOSE_FILE`, `COMPOSE_PATH_SEPARATOR=:` and
-  `COMPOSE_PROFILES=standalone-stream`. Without `COMPOSE_FILE`, the GPU
-  reservation is not applied, because it moved from `compose.yaml` to
-  `compose.gpu.yaml`. Without `COMPOSE_PROFILES`, the standalone
-  mediamtx/camera_stream no longer start, because they are now a
-  profile.
-- **Models:** rename `best.pt` to `plate_v8n_480.pt` (or whichever it
-  is), set `DETECTION_MODEL`, clear `DETECTION_MODEL_PATH`, and set
-  `DETECTION_IMG_SIZE=0`. An old `DETECTION_MODEL_PATH=/models/best.pt`
-  still works for the GPU/pt path. The CPU backends ignore a `.pt` path.
-- **New:** the CPU pipeline block (`DETECTION_BACKEND` …
-  `DETECTION_BACKEND_FALLBACK`), `OPENVINO_VERSION` /
-  `ONNXRUNTIME_VERSION` / `INSTALL_CPU_RUNTIMES` and
-  `TEST_VIDEO_RTSP_BASE_URL`.
-- **Rebuild** the detector image once for the CPU runtimes:
-  `docker compose build plate_detector`.
+`.env` got much shorter: copy `.env.example` (or `.env.prod.example`)
+to `.env` and re-enter your Redis/MinIO/relay values. Variables removed
+from `.env` are now set in `config.py` and are ignored if left in
+`.env` (the containers no longer read `.env` directly). Renamed:
+`DETECTION_MODEL` → `DETECTION_GPU_MODEL`, `DETECTION_BACKEND` +
+`DETECTION_PRECISION` → `DETECTION_CPU_MODEL`, `OCR_USE_GPU` →
+`OCR_DEVICE`. Models move into per-model folders (see "Models").
+Rebuild once: `docker compose build`.
 
 
 ## Redis contract
@@ -775,8 +624,8 @@ off:
 
 1. Stop the old `eyepass_plate` (single-process) container.
 2. Bring up `plate_detector` + `plate_ocr` (same Redis, same MinIO,
-   the same weights renamed to `plate_v8n_480.pt` or pointed at with
-   `DETECTION_MODEL_PATH`, same `PadOcr/` folder as above).
+   the weights in their model folder, see "Models", same `PadOcr/`
+   folder as above).
 3. On boot, `reconcile_on_startup()` reads `plate:internal:active_cameras`
    — empty on a first run against the old deployment's Redis, since
    that ledger is new. In that case, also run each currently-active
@@ -793,7 +642,7 @@ This delivery was verified with `python3 -m py_compile` across every
 file (clean), an import-level check of every module under
 `detector/src` and `ocr_service/src` against stubbed third-party deps,
 and a real unit test suite (`tests/`, `python3 tests/run_all.py`,
-**71/71 passing**) covering:
+**66/66 passing**) covering:
 
 - `platecore.codec` — task/result pickle round-trips, the
   `DateTimeEncoder` (including its bytes → base64 handling, added
@@ -822,16 +671,15 @@ and a real unit test suite (`tests/`, `python3 tests/run_all.py`,
   camera, and the bounded internal-error auto-restart (detach + delayed
   reattach, retry budget enforced).
 
-- `detector.model_files` / `inference_backends` / `cpu_topology` —
-  `DETECTION_MODEL` → file per backend/precision (and actionable errors
-  for a missing variant), input size from the name / metadata /
-  `export_info.yaml` (never the 480 file for the 640 model), GPU/CPU
-  runtime planning (GPU always `.pt`, missing GPU → CPU or strict
-  error), the Ultralytics-exact letterbox / auto shape / class-aware
-  NMS / box mapping, and the OpenVINO stream/thread split.
+- `detector.model_files` / `inference_backends` / `perf_stats` —
+  manifest-first model lookup (per-model folders, file-name fallback,
+  actionable errors), GPU/CPU runtime planning with model aliases and
+  the missing-GPU fallback, the own-ONNX letterbox + OpenCV NMS math,
+  the INT8 fix's overlap helper, and the missed/processed/latency
+  accounting behind the performance logs.
 
-Parity of the CPU backends against Ultralytics needs real models and
-is `detector/tools/parity_test.py`'s job (see "Acceptance tests").
+Model accuracy and real-time capacity are `detector/tools/bench_multistream.py`'s
+job (see "Testing multiple streams").
 
 `tests/fakes/` ships a minimal in-memory `FakeRedis` (just the subset
 of the redis-py API `platecore/bus.py` actually calls) plus import-time

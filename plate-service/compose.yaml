@@ -4,7 +4,9 @@
 #   docker compose up -d --build
 #
 # One file. Dev vs prod is not a different file, it's different values
-# in .env (LOG_LEVEL, engine/worker counts, memory limits, GPU on/off).
+# in .env: device + model choice (DETECTION_DEVICE / DETECTION_GPU_MODEL /
+# DETECTION_CPU_MODEL / OCR_DEVICE) and deployment (Redis, MinIO, relay,
+# ports). Every other setting is in each service's config.py.
 #
 # Two .env switches select what actually runs (see README "Run it"):
 #
@@ -47,8 +49,10 @@
 
 name: eyeplate-plate
 
+# No env_file: each service gets exactly the variables listed in its
+# `environment:` (all other settings live in each service's config.py).
+# ${...} values below are still read from .env by docker compose.
 x-common: &common
-  env_file: [.env]
   restart: unless-stopped
   networks: [platform]
   logging:
@@ -236,226 +240,33 @@ services:
     init: true
     labels:
       autoheal: "true"     # picked up only if the `watchdog` profile is active
+    # Only the device / model choice and the deployment come from .env.
+    # Every other setting is in detector/src/config.py.
     environment:
       TZ: ${TZ:-UTC}
       PYTHONUNBUFFERED: "1"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-
       REDIS_HOST: ${REDIS_HOST}
       REDIS_PORT: ${REDIS_PORT}
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_URL: ${REDIS_URL:-}
       REDIS_MODULE: ${REDIS_MODULE:-plate}
-
-      # Inside the network the relay is reachable by name. Point this
-      # at your EXISTING mediamtx if plate_detector doesn't share a
-      # network with it directly.
       MTX_RTSP_BASE_URL: ${MTX_RTSP_BASE_URL:-rtsp://mediamtx:8554}
-
-      # ---- compute: GPU or CPU, and which model ---------------------
-      # gpu | cpu | auto | cuda:N. Resolved inside each engine CHILD
-      # process — see detector/src/inference_backends.resolve_runtime().
-      #   gpu -> PyTorch .pt via Ultralytics (unchanged pipeline)
-      #   cpu -> DETECTION_BACKEND (openvino | onnx | pt)
-      DETECTION_DEVICE: ${DETECTION_DEVICE:-auto}
-      STRICT_DEVICE: ${STRICT_DEVICE:-false}
-      TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-0}
-      # plate_v8n_480 | plate_v8s_640 — every file and the input size
-      # follow from this name (detector/src/model_files.py)
-      DETECTION_MODEL: ${DETECTION_MODEL:-plate_v8n_480}
+      # gpu | cpu | auto
+      DETECTION_DEVICE: ${DETECTION_DEVICE:-gpu}
+      # GPU: plate_v8n_480 | plate_v8s_640
+      DETECTION_GPU_MODEL: ${DETECTION_GPU_MODEL:-plate_v8n_480}
+      # CPU: openvino_fp32 | openvino_int8 | onnx
+      DETECTION_CPU_MODEL: ${DETECTION_CPU_MODEL:-openvino_fp32}
       DETECTION_MODEL_ROOT: /models
-      MODEL_PATH: ${DETECTION_MODEL_PATH:-}
-      DETECTION_IMG_SIZE: ${DETECTION_IMG_SIZE:-0}
-      DETECTION_CONF_THRESHOLD: ${DETECTION_CONF_THRESHOLD:-0.25}
-      # ---- CPU pipeline (DETECTION_DEVICE=cpu) -------------------------
-      DETECTION_BACKEND: ${DETECTION_BACKEND:-openvino}
-      DETECTION_PRECISION: ${DETECTION_PRECISION:-fp32}
-      DETECTION_CPU_INPUT_SIZE: ${DETECTION_CPU_INPUT_SIZE:-}
-      DETECTION_CPU_SHAPE_MODE: ${DETECTION_CPU_SHAPE_MODE:-roi}
-      DETECTION_IOU_THRESHOLD: ${DETECTION_IOU_THRESHOLD:-0.7}
-      DETECTION_MAX_DET: ${DETECTION_MAX_DET:-300}
-      DETECTION_CPU_STREAMS: ${DETECTION_CPU_STREAMS:-0}
-      DETECTION_CPU_THREADS: ${DETECTION_CPU_THREADS:-0}
-      DETECTION_WARMUP_RUNS: ${DETECTION_WARMUP_RUNS:-3}
-      DETECTION_BACKEND_FALLBACK: ${DETECTION_BACKEND_FALLBACK:-true}
-      OPENVINO_CACHE_DIR: ${OPENVINO_CACHE_DIR:-/data/openvino_cache}
-      OPENVINO_SCHEDULING_CORE_TYPE: ${OPENVINO_SCHEDULING_CORE_TYPE:-}
-      # run YOLO on 1-in-N frames per camera; tracker coasts the rest via
-      # its own Kalman prediction (see engine.py run loop + config.py).
-      # 1 = every frame (unchanged behavior). Main CPU lever for adding
-      # cameras per engine.
-      DETECT_EVERY_N_FRAMES: ${DETECT_EVERY_N_FRAMES:-1}
-
-      # ---- engine topology / self-healing -----------------------------
-      MAX_CAMERAS_PER_ENGINE: ${MAX_CAMERAS_PER_ENGINE:-6}
-      DEFAULT_ENGINE_COUNT: ${DEFAULT_ENGINE_COUNT:-1}
-      ENGINE_REBALANCE_INTERVAL_SEC: ${ENGINE_REBALANCE_INTERVAL_SEC:-30}
-      ENGINE_SHUTDOWN_TIMEOUT_SEC: ${ENGINE_SHUTDOWN_TIMEOUT_SEC:-30}
-
-      # ---- CPU engine topology (device=="cpu" only; GPU always uses
-      # MAX_CAMERAS_PER_ENGINE above, unmodified) -- see cpu_topology.py.
-      # single = current behavior (one engine batches cameras together).
-      # multi  = one engine PROCESS per camera, same detection/tracker
-      #          settings, real OS-level parallelism instead of batching.
-      # auto   = compute max_cameras_per_engine from core count + the
-      #          measured per-camera cost below.
-      #
-      # CPU_MAX_CONCURRENT_ENGINES is the important one: how many engine
-      # PROCESSES this box can actually run in parallel without
-      # thrashing -- set it to the SAME number as DETECTOR_CPU_LIMIT
-      # below (the Docker-enforced quota this container actually gets),
-      # not the host's raw core count. Do not leave this at the default
-      # 1 once you go past a single camera.
-      CPU_ENGINE_MODE: ${CPU_ENGINE_MODE:-single}
-      CPU_MAX_CONCURRENT_ENGINES: ${CPU_MAX_CONCURRENT_ENGINES:-1}
-      CPU_EXPECTED_CAMERAS: ${CPU_EXPECTED_CAMERAS:-1}
-      CPU_MULTI_CAMERAS_PER_ENGINE: ${CPU_MULTI_CAMERAS_PER_ENGINE:-1}
-      CPU_MULTI_TORCH_THREADS: ${CPU_MULTI_TORCH_THREADS:-0}
-      CPU_RESERVE_CORES: ${CPU_RESERVE_CORES:-1}
-      CPU_MS_PER_CAMERA_FRAME: ${CPU_MS_PER_CAMERA_FRAME:-28.0}
-      CAMERA_ASSUMED_FPS: ${CAMERA_ASSUMED_FPS:-25.0}
-      CPU_AUTO_SAFETY_MARGIN: ${CPU_AUTO_SAFETY_MARGIN:-0.7}
-      # os.cpu_count() inside this container reports the HOST's full
-      # logical core count (14, in the box this was tuned against),
-      # regardless of the DETECTOR_CPU_LIMIT quota below -- a CFS quota
-      # throttles CPU-seconds, it does not change what the container can
-      # see. Leaving this unset while a quota (or sibling services) is
-      # in play is what produces wild, bursty [INFER-SLOW] latencies
-      # (150ms one call, 1800ms the next) instead of a clean slowdown:
-      # the thread pool is sized for cores the container never actually
-      # gets. Set this to the same value as DETECTOR_CPU_LIMIT.
-      CPU_CORES_OVERRIDE: ${CPU_CORES_OVERRIDE:-0}
-      # cv2's own thread pool (resize/crop/warp) is separate from
-      # torch's -- left uncapped it also grabs every core, on top of
-      # (and invisible to) everything above. 0 = derive a small value
-      # from this engine's own torch thread count.
-      CV2_NUM_THREADS: ${CV2_NUM_THREADS:-0}
-      # FFmpeg's own internal decode thread count, PER CAMERA STREAM --
-      # also separate from torch/cv2, also uncapped by default (multi-
-      # threads H.264/H.265 software decode across every core it can
-      # see). 1-2 is plenty for one 1080p/25fps stream; 0 = FFmpeg's
-      # own default (all cores).
-      RTSP_FFMPEG_THREADS: ${RTSP_FFMPEG_THREADS:-1}
-
-      # ---- camera health --------------------------------------------
-      HEARTBEAT_TIMEOUT_SEC: ${HEARTBEAT_TIMEOUT_SEC:-15}
-      CAMERA_OFFLINE_GRACE_SECONDS: ${CAMERA_OFFLINE_GRACE_SECONDS:-10}
-
-      # ---- internal-processing-error auto-restart (existing plate
-      # behavior, ported verbatim from alpr_api.py) --------------------
-      ERROR_RESTART_MAX_RETRIES: ${ERROR_RESTART_MAX_RETRIES:-1}
-      ERROR_RESTART_DELAY_SEC: ${ERROR_RESTART_DELAY_SEC:-3}
-      ERROR_RESTART_COUNTER_RESET_AFTER_SEC: ${ERROR_RESTART_COUNTER_RESET_AFTER_SEC:-600}
-
-      # ---- trigger / track criteria (verbatim thresholds) ------------
-      MIN_TRACK_AGE_FOR_CROSSING: ${MIN_TRACK_AGE_FOR_CROSSING:-5}
-      MIN_CONFIDENCE_FOR_CROSSING: ${MIN_CONFIDENCE_FOR_CROSSING:-0.40}
-      CROSSING_COOLDOWN_FRAMES: ${CROSSING_COOLDOWN_FRAMES:-30}
-      ROI_ENTRY_CONFIRMATION_FRAMES: ${ROI_ENTRY_CONFIRMATION_FRAMES:-3}
-      MIN_CONFIDENCE_FOR_ROI: ${MIN_CONFIDENCE_FOR_ROI:-0.35}
-      STOP_TIME_SECONDS: ${STOP_TIME_SECONDS:-3.0}
-      STOP_VELOCITY_THRESHOLD: ${STOP_VELOCITY_THRESHOLD:-8.0}
-      STOP_MIN_SAMPLES: ${STOP_MIN_SAMPLES:-10}
-      # (OCR_CONF_SKIP_THRESHOLD / OCR_FINALIZE_TIMEOUT_SEC moved to the
-      # control hub: PLATE_SATISFIED_CONF / PLATE_FINALIZE_TIMEOUT_SEC)
-
-      # ---- control hub: crop submission (see platecore/hub.py) -----
-      SUBMIT_TIMEOUT_SEC: ${SUBMIT_TIMEOUT_SEC:-15.0}
-      TRACK_UPDATE_INTERVAL_SEC: ${TRACK_UPDATE_INTERVAL_SEC:-5.0}
-
-      # ---- trigger history buffers (previously bare literals in triggers.py) --
-      TRIGGER_POSITION_HISTORY_MAX: ${TRIGGER_POSITION_HISTORY_MAX:-30}
-      TRIGGER_CONFIDENCE_HISTORY_MAX: ${TRIGGER_CONFIDENCE_HISTORY_MAX:-10}
-      TRIGGER_VELOCITY_WINDOW: ${TRIGGER_VELOCITY_WINDOW:-10}
-
-      # ---- quality gates (verbatim from video_processor.py) -----------
-      SHARPNESS_MIN_THRESHOLD: ${SHARPNESS_MIN_THRESHOLD:-100.0}
-      RESOLUTION_MIN_AREA: ${RESOLUTION_MIN_AREA:-1000}
-      CLASS_0_ASPECT_RATIO_MIN: ${CLASS_0_ASPECT_RATIO_MIN:-1.5}
-      CLASS_0_ASPECT_RATIO_MAX: ${CLASS_0_ASPECT_RATIO_MAX:-7.5}
-      GENERIC_ASPECT_RATIO_MIN: ${GENERIC_ASPECT_RATIO_MIN:-1.0}
-      GENERIC_ASPECT_RATIO_MAX: ${GENERIC_ASPECT_RATIO_MAX:-5.5}
-
-      # ---- track aggregation & buffers (verbatim) ---------------------
-      DEFAULT_ABSENT_FRAMES: ${DEFAULT_ABSENT_FRAMES:-30}
-      DEFAULT_MIN_SEEN_FRAMES: ${DEFAULT_MIN_SEEN_FRAMES:-8}
-      DEFAULT_MIN_CROPS_TO_FINALIZE: ${DEFAULT_MIN_CROPS_TO_FINALIZE:-1}
-      DEFAULT_N_BEST_CROPS: ${DEFAULT_N_BEST_CROPS:-5}
-      DEFAULT_CONF_DIGITS: ${DEFAULT_CONF_DIGITS:-2}
-
-      # ---- tracker (BYTETracker / tracker.py's PlateTrackerConfig — full
-      # surface; previously only track_buffer was reachable) ------------
-      TRACKER_TRACK_THRESH: ${TRACKER_TRACK_THRESH:-0.5}
-      TRACKER_MATCH_THRESH: ${TRACKER_MATCH_THRESH:-0.99}
-      TRACKER_TRACK_BUFFER: ${TRACKER_TRACK_BUFFER:-60}
-      TRACKER_NMS_THRESH: ${TRACKER_NMS_THRESH:-0.5}
-      TRACKER_MOT20: ${TRACKER_MOT20:-false}
-      TRACKER_SECOND_THRESH: ${TRACKER_SECOND_THRESH:-0.5}
-      TRACKER_DUPLICATE_THRESH: ${TRACKER_DUPLICATE_THRESH:-0.15}
-      TRACKER_PREDICT_UNCONFIRMED: ${TRACKER_PREDICT_UNCONFIRMED:-true}
-      TRACKER_UNCONFIRMED_THRESH: ${TRACKER_UNCONFIRMED_THRESH:-0.9}
-      TRACKER_UNCONFIRMED_MAX_MISS: ${TRACKER_UNCONFIRMED_MAX_MISS:-5}
-      TRACKER_NEW_TRACK_VEL_STD_SCALE: ${TRACKER_NEW_TRACK_VEL_STD_SCALE:-3.0}
-      TRACKER_SEED_VELOCITY_ON_FIRST_UPDATE: ${TRACKER_SEED_VELOCITY_ON_FIRST_UPDATE:-true}
-      TRACKER_SEED_MAX_RATIO: ${TRACKER_SEED_MAX_RATIO:-1.5}
-      TRACKER_RESEED_AFTER_GAP: ${TRACKER_RESEED_AFTER_GAP:-3.0}
-      TRACKER_RECOVERY_ENABLED: ${TRACKER_RECOVERY_ENABLED:-true}
-      TRACKER_RECOVERY_THRESH: ${TRACKER_RECOVERY_THRESH:-0.7}
-      TRACKER_RECOVERY_EXPANSION: ${TRACKER_RECOVERY_EXPANSION:-0.5}
-      TRACKER_RECOVERY_BASE_RADIUS: ${TRACKER_RECOVERY_BASE_RADIUS:-1.5}
-      TRACKER_RECOVERY_RADIUS_GROWTH: ${TRACKER_RECOVERY_RADIUS_GROWTH:-0.4}
-      TRACKER_RECOVERY_MAX_RADIUS: ${TRACKER_RECOVERY_MAX_RADIUS:-4.0}
-      TRACKER_RECOVERY_SHAPE_WEIGHT: ${TRACKER_RECOVERY_SHAPE_WEIGHT:-0.3}
-      TRACKER_RECOVERY_CLASS_PENALTY: ${TRACKER_RECOVERY_CLASS_PENALTY:-0.15}
-      TRACKER_GMC_ENABLED: ${TRACKER_GMC_ENABLED:-true}
-      TRACKER_GMC_MIN_PAIRS: ${TRACKER_GMC_MIN_PAIRS:-2}
-      TRACKER_GMC_MAX_SHIFT_RATIO: ${TRACKER_GMC_MAX_SHIFT_RATIO:-0.25}
-      TRACKER_MAX_REMOVED_HISTORY: ${TRACKER_MAX_REMOVED_HISTORY:-512}
-
-      # ---- RTSP reader (previously bare literals) ----------------------
-      RTSP_OPEN_TIMEOUT_MS: ${RTSP_OPEN_TIMEOUT_MS:-5000}
-      RTSP_READ_TIMEOUT_MS: ${RTSP_READ_TIMEOUT_MS:-5000}
-      RTSP_FFMPEG_STIMEOUT_US: ${RTSP_FFMPEG_STIMEOUT_US:-5000000}
-      RTSP_RECONNECT_BACKOFF_SEC: ${RTSP_RECONNECT_BACKOFF_SEC:-0.2}
-      RTSP_READ_FAIL_BACKOFF_SEC: ${RTSP_READ_FAIL_BACKOFF_SEC:-0.5}
-      RTSP_READER_JOIN_TIMEOUT_SEC: ${RTSP_READER_JOIN_TIMEOUT_SEC:-2.0}
-
-      # ---- engine loop / heartbeat --------------------------------------
-      SLOW_BATCH_WARN_MS: ${SLOW_BATCH_WARN_MS:-150.0}
-      PIPELINE_STATS_LOG_INTERVAL_SEC: ${PIPELINE_STATS_LOG_INTERVAL_SEC:-5.0}
-      HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-10}
-      HEARTBEAT_TTL_SEC: ${HEARTBEAT_TTL_SEC:-30}
-
-      # ---- debug output (local bind volume — never MinIO) -----------
-      DEBUG_VIDEO_ENABLED: ${DETECTOR_DEBUG_VIDEO_ENABLED:-false}
-      DEBUG_VIDEO_DIR: /debug
-      DEBUG_VIDEO_SEGMENT_SECONDS: ${DEBUG_VIDEO_SEGMENT_SECONDS:-240}
-      DEBUG_VIDEO_FPS: ${DEBUG_VIDEO_FPS:-12}
-      DEBUG_VIDEO_MAX_SEGMENTS: ${DEBUG_VIDEO_MAX_SEGMENTS:-12}
-      DEBUG_VIDEO_SCALE: ${DEBUG_VIDEO_SCALE:-1.0}
-      DEBUG_VIDEO_EVERY_N: ${DEBUG_VIDEO_EVERY_N:-1}
-      DEBUG_VIDEO_CODEC: ${DEBUG_VIDEO_CODEC:-mp4v}
-      DEBUG_VIDEO_EXT: ${DEBUG_VIDEO_EXT:-.mp4}
-      DEBUG_VIDEO_JSONL: ${DEBUG_VIDEO_JSONL:-true}
-      DEBUG_VIDEO_GHOST_FRAMES: ${DEBUG_VIDEO_GHOST_FRAMES:-45}
-      DEBUG_VIDEO_EVENT_LINES: ${DEBUG_VIDEO_EVENT_LINES:-14}
-      DEBUG_VIDEO_TRAIL: ${DEBUG_VIDEO_TRAIL:-30}
-      DEBUG_VIDEO_PANEL_WIDTH: ${DEBUG_VIDEO_PANEL_WIDTH:-430}
-      DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED: ${DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED:-false}
-      DEBUG_OCR_SUBMISSION_MONTAGE_DIR: /debug/ocr_submissions
-      DEBUG_OCR_SUBMISSION_MONTAGE_MAX_FILES: ${DEBUG_OCR_SUBMISSION_MONTAGE_MAX_FILES:-200}
-
-      LOG_FORMAT: ${LOG_FORMAT:-text}
-      API_PORT: "8010"
 
     # No depends_on on mediamtx: the relay may be this module's standalone
     # one or the whole system's (not part of this project), and the RTSP
     # reader reconnects on its own either way.
 
     volumes:
-      # Model weights, mounted rather than baked so swapping the model
-      # needs no rebuild. Operator supplies plate_v8n_480.pt /
-      # plate_v8s_640.pt and their ONNX/OpenVINO variants here.
+      # Model folders (plate_v8n_480/, plate_v8s_640/ — README "Models"),
+      # mounted read-only so swapping a model needs no rebuild.
       - ${DETECTION_MODELS_DIR:-./models/detection}:/models:ro
       # NOTE: previously also mounted a `detector_data:/data` named
       # docker volume here for "durable local state" — nothing in this
@@ -476,21 +287,13 @@ services:
       interval: 15s
       timeout: 5s
       retries: 4
-      start_period: 120s        # model load + CUDA init / OpenVINO compile on first boot
+      start_period: 180s        # model load + CUDA init / OpenVINO compile on first boot
     stop_grace_period: 60s      # must exceed ENGINE_SHUTDOWN_TIMEOUT_SEC
     deploy:
       resources:
-        # Hard, kernel-enforced CPU quota for this container (all of its
-        # engine subprocesses combined) -- Docker Compose translates
-        # `limits.cpus` into `--cpus` even outside swarm mode. This is
-        # the real backstop: no matter what the in-process thread math
-        # in cpu_topology.py gets told, this container physically
-        # cannot take more than DETECTOR_CPU_LIMIT cores' worth of CPU
-        # time away from plate_ocr's worker pool, mediamtx, the video
-        # publishers, or anything else on this host (backend, frontend,
-        # ...). Set CPU_CORES_OVERRIDE above to this SAME number so the
-        # planner's own math agrees with what's actually enforced here.
-        # Unset/0 = unlimited (today's prior behavior).
+        # Hard CPU quota for this container (all engine processes
+        # together), so the detector can't starve plate_ocr, the relay or
+        # anything else on the host. Unset/0 = unlimited.
         limits:
           cpus: "${DETECTOR_CPU_LIMIT:-0}"
         # The GPU reservation is added by compose.gpu.yaml (COMPOSE_FILE
@@ -502,7 +305,7 @@ services:
   # detection capacity now that they talk over Redis instead of an
   # in-process queue pair. Self-healing: reads its last known
   # phase + worker_count from Redis on boot. CPU-only by default (see
-  # ocr_service/requirements.txt / OCR_USE_GPU).
+  # ocr_service/requirements.txt / OCR_DEVICE).
   # -------------------------------------------------------------------
   plate_ocr:
     <<: *common
@@ -524,55 +327,28 @@ services:
     init: true
     labels:
       autoheal: "true"
+    # Only the device and the deployment come from .env; every other
+    # setting is in ocr_service/src/config.py.
     environment:
       TZ: ${TZ:-UTC}
       PYTHONUNBUFFERED: "1"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-
       REDIS_HOST: ${REDIS_HOST}
       REDIS_PORT: ${REDIS_PORT}
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_URL: ${REDIS_URL:-}
       REDIS_MODULE: ${REDIS_MODULE:-plate}
-
-      # ---- MinIO ------------------------------------------------------
+      # cpu | gpu
+      OCR_DEVICE: ${OCR_DEVICE:-cpu}
+      # ---- MinIO (platecore/minio_store.py) ---------------------------
       AWS_S3_ENDPOINT_URL: ${MINIO_ENDPOINT}
       MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
       AWS_ACCESS_KEY_ID_FULL: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY_FULL: ${MINIO_ROOT_PASSWORD}
-      AWS_S3_REGION_NAME: us-east-1
+      AWS_S3_REGION_NAME: ${MINIO_REGION:-us-east-1}
       AWS_S3_USE_SSL: ${MINIO_SECURE:-False}
       AWS_PUBLIC_BUCKET_NAME: ${MINIO_PUBLIC_BUCKET:-eyepass-public-bucket}
       AWS_PRIVATE_BUCKET_NAME: ${MINIO_PRIVATE_BUCKET:-eyepass-private-bucket}
-
-      # ---- models -----------------------------------------------------
-      OCR_MODELS_DIR: /models/ocr
-      OCR_USE_GPU: ${OCR_USE_GPU:-false}
-      OCR_CONF_THRESHOLD: ${OCR_CONF_THRESHOLD:-0.7}
-      OCR_SAVE_ALL_CROPS: ${OCR_SAVE_ALL_CROPS:-false}
-      OCR_CLAHE_CLIP_LIMIT: ${OCR_CLAHE_CLIP_LIMIT:-2.0}
-      OCR_CLAHE_GRID_SIZE: ${OCR_CLAHE_GRID_SIZE:-8}
-      OCR_MOTOR_MIN_BOX_AREA_RATIO: ${OCR_MOTOR_MIN_BOX_AREA_RATIO:-0.05}
-
-      # ---- worker pool / self-healing ----------------------------------
-      DEFAULT_WORKER_COUNT: ${OCR_DEFAULT_WORKER_COUNT:-3}
-      WORKER_LOAD_TIMEOUT_SEC: ${OCR_WORKER_LOAD_TIMEOUT_SEC:-180}
-      WORKER_SHUTDOWN_TIMEOUT_SEC: ${OCR_WORKER_SHUTDOWN_TIMEOUT_SEC:-30}
-      WATCHDOG_INTERVAL_SEC: ${OCR_WATCHDOG_INTERVAL_SEC:-5}
-      OCR_IDLE_POLL_INTERVAL_SEC: ${OCR_IDLE_POLL_INTERVAL_SEC:-0.2}
-      OCR_TASK_POP_RETRY_BACKOFF_SEC: ${OCR_TASK_POP_RETRY_BACKOFF_SEC:-1.0}
-      HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-10}
-      HEARTBEAT_TTL_SEC: ${HEARTBEAT_TTL_SEC:-30}
-
-      # ---- debug output (local bind volume — never MinIO) -------------
-      LOG_DECISION_TRACE: ${LOG_DECISION_TRACE:-true}
-      OCR_DEBUG_ROOT_DIR: /debug
-      OCR_SAVE_DECISION_DEBUG: ${OCR_SAVE_DECISION_DEBUG:-false}
-      OCR_DECISION_DEBUG_DIR: /debug/decisions
-      OCR_DECISION_DEBUG_MAX_FILES: ${OCR_DECISION_DEBUG_MAX_FILES:-200}
-
-      LOG_FORMAT: ${LOG_FORMAT:-text}
-      API_PORT: "8011"
     volumes:
       # Operator supplies the PaddleOCR model folders here — see the
       # README's "What you need to provide" table for the exact names
@@ -593,7 +369,7 @@ services:
     stop_grace_period: 45s      # must exceed WORKER_SHUTDOWN_TIMEOUT_SEC
     # Hard CPU quota for this container's whole worker pool
     # (DEFAULT_WORKER_COUNT PaddleOCR processes above, 3 by default) --
-    # previously unbounded, so on OCR_USE_GPU=false these workers
+    # previously unbounded, so on OCR_DEVICE=cpu these workers
     # competed for the same cores as plate_detector's engines with no
     # limit on either side. See plate_detector's own deploy block for
     # why this matters. Unset/0 = unlimited (prior behavior).
@@ -621,32 +397,16 @@ services:
     init: true
     labels:
       autoheal: "true"
+    # Only the deployment comes from .env; the policy is in control-hub/src/config.py.
     environment:
       TZ: ${TZ:-UTC}
       PYTHONUNBUFFERED: "1"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_FORMAT: ${LOG_FORMAT:-text}
       REDIS_HOST: ${REDIS_HOST}
       REDIS_PORT: ${REDIS_PORT}
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_URL: ${REDIS_URL:-}
       REDIS_MODULE: ${REDIS_MODULE:-plate}
-      HUB_HEALTH_PORT: "8020"
-
-      # ---- policy (defaults reproduce the previous pipeline's gates;
-      # see control-hub/README.md for every knob) ---------------------
-      PLATE_SATISFIED_CONF: ${PLATE_SATISFIED_CONF:-0.85}
-      PLATE_CONSENSUS_MIN: ${PLATE_CONSENSUS_MIN:-3}
-      PLATE_TRIGGER_MAX_WAIT_SEC: ${PLATE_TRIGGER_MAX_WAIT_SEC:-3.0}
-      PLATE_TRIGGER_TASK_WAIT_SEC: ${PLATE_TRIGGER_TASK_WAIT_SEC:-15.0}
-      PLATE_PERIODIC_INTERVAL_SEC: ${PLATE_PERIODIC_INTERVAL_SEC:-3.0}
-      PLATE_PERIODIC_FIRST_DELAY_SEC: ${PLATE_PERIODIC_FIRST_DELAY_SEC:-1.0}
-      PLATE_FINALIZE_TIMEOUT_SEC: ${PLATE_FINALIZE_TIMEOUT_SEC:-30.0}
-      PLATE_FINAL_MIN_SEEN_FRAMES: ${PLATE_FINAL_MIN_SEEN_FRAMES:-8}
-      PLATE_FINAL_MIN_CROPS: ${PLATE_FINAL_MIN_CROPS:-1}
-      PLATE_TRACK_STALE_SEC: ${PLATE_TRACK_STALE_SEC:-120}
-      PLATE_LATE_RESULT_GRACE_SEC: ${PLATE_LATE_RESULT_GRACE_SEC:-300}
-      PLATE_LATE_RESULT_POLICY: ${PLATE_LATE_RESULT_POLICY:-republish_if_changed}   # | drop
     ports:
       - "${HUB_API_PORT:-8021}:8020"      # /health, /tracks
     stop_grace_period: 15s
