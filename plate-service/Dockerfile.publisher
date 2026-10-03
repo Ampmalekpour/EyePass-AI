@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY publish_loop.sh /publish_loop.sh
-RUN chmod +x /publish_loop.sh
+# strip Windows CRLF (a CRLF checkout breaks the #!/bin/sh line:
+# "exec /publish_loop.sh: no such file or directory")
+RUN sed -i 's/\r$//' /publish_loop.sh && chmod +x /publish_loop.sh
 
 ENTRYPOINT ["/publish_loop.sh"]

@@ -92,12 +92,8 @@ services:
       - "${HLS_PORT:-8888}:8888/tcp"
       - "${MTX_API_PORT:-9997}:9997"
       - "${RTMP_PORT:-1935}:1935"
-    healthcheck:
-      test: [ "CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:9997/v3/config/global/get >/dev/null || exit 1" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    # no healthcheck: the mediamtx image has no shell/wget, so any check
+    # would always report "unhealthy" (camera_stream polls its API instead)
 
   camera_stream:
     <<: *common
