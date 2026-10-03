@@ -299,7 +299,7 @@ profile loops `TEST_VIDEO_FILE` into the relay as cameras `1`..`6`:
 ```bash
 # .env:  COMPOSE_PROFILES=standalone-stream,test-video   TEST_VIDEO_FILE=./video2.mp4
 docker compose up -d --build
-python redis_tools.py set-camera --id 1 --address rtsp://mediamtx:8554/1 --roi 0 0 1 1
+python redis_tools.py set-camera --id 1 --address publisher --roi 0 0 1 1   # "publisher": the test clip is PUSHED into the relay
 python redis_tools.py activate --id 1        # repeat for 2, 3, 4 ...
 docker compose logs -f plate_detector | grep -E "PERF|STATS|INFER-SLOW"
 ```
