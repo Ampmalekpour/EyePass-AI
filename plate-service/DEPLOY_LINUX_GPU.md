@@ -176,6 +176,18 @@ nano .env
 Use container **names** (not `localhost`) for Redis, MinIO and
 mediamtx: the services reach them over `SHARED_NETWORK`.
 
+**Everything is set in `.env`; `compose.yaml` never needs editing.**
+Besides the `[FILL_IN]` values, `.env` has a *CONTAINERS / OPERATIONS*
+section with working defaults you may change: project name, container
+names (if they clash with something on the server), image names (to
+push to your registry), `HOST_BIND_IP` (`127.0.0.1` keeps the health
+ports private to the server), restart policy, Docker log rotation,
+`LOG_LEVEL` / `LOG_FORMAT`, plus ports, folders, CPU limits and
+`GPU_COUNT`. Compose stops with `set X in .env` if a required value is
+missing, and each service stops at startup if a `[FILL_IN]` is left.
+After changing `.env`: `docker compose up -d` (add `--build` when the
+base image, image tag or OpenVINO/ONNX Runtime versions change).
+
 Start:
 
 ```bash

@@ -25,19 +25,19 @@
 # last phase from Redis after a restart.
 # =====================================================================
 
-name: eyeplate-plate
+name: ${COMPOSE_PROJECT_NAME:-eyeplate-plate}
 
 # No env_file: each service gets exactly the variables listed in its
 # `environment:` (all other settings live in each service's config.py).
 # ${...} values below are still read from .env by docker compose.
 x-common: &common
-  restart: unless-stopped
+  restart: ${RESTART_POLICY:-unless-stopped}
   networks: [platform]
   logging:
     driver: json-file
     options:
-      max-size: "20m"
-      max-file: "5"
+      max-size: "${LOG_MAX_SIZE:-20m}"
+      max-file: "${LOG_MAX_FILE:-5}"
 
 services:
   # -------------------------------------------------------------------
@@ -57,8 +57,8 @@ services:
         INSTALL_CPU_RUNTIMES: ${INSTALL_CPU_RUNTIMES:-true}
         OPENVINO_VERSION: ${OPENVINO_VERSION:-}
         ONNXRUNTIME_VERSION: ${ONNXRUNTIME_VERSION:-}
-    image: eyeplate/plate-detector:${IMAGE_TAG:?set IMAGE_TAG in .env}
-    container_name: plate_detector
+    image: ${DETECTOR_IMAGE:-eyeplate/plate-detector}:${IMAGE_TAG:?set IMAGE_TAG in .env}
+    container_name: ${DETECTOR_CONTAINER_NAME:-plate_detector}
     # PID-1 reaper for the spawned engine subprocesses, so a crashed
     # engine does not linger as a zombie.
     init: true
@@ -83,6 +83,8 @@ services:
       # CPU: openvino_fp32 | openvino_int8 | onnx
       DETECTION_CPU_MODEL: ${DETECTION_CPU_MODEL:-openvino_fp32}
       DETECTION_MODEL_ROOT: /models
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
 
     # No depends_on on the relay: it belongs to the platform; the RTSP
     # reader reconnects on its own.
@@ -104,7 +106,7 @@ services:
       # straight off your own disk.
       - ${DEBUG_VIDEO_HOST_DIR:-./debug_video}:/debug
     ports:
-      - "${DETECTOR_API_PORT:-8010}:8010"
+      - "${HOST_BIND_IP:-0.0.0.0}:${DETECTOR_API_PORT:-8010}:8010"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3).status==200 else 1)"]
       interval: 15s
@@ -145,8 +147,8 @@ services:
         # this is a zero-risk change — set OCR_BASE_IMAGE in .env to
         # actually switch to a lighter image. See DEBUGGING.md.
         BASE_IMAGE: ${OCR_BASE_IMAGE:?set OCR_BASE_IMAGE in .env}
-    image: eyeplate/plate-ocr:${IMAGE_TAG:?set IMAGE_TAG in .env}
-    container_name: plate_ocr
+    image: ${OCR_IMAGE:-eyeplate/plate-ocr}:${IMAGE_TAG:?set IMAGE_TAG in .env}
+    container_name: ${OCR_CONTAINER_NAME:-plate_ocr}
     init: true
     labels:
       autoheal: "true"
@@ -163,6 +165,8 @@ services:
       REDIS_MODULE: ${REDIS_MODULE:-plate}
       # cpu | gpu
       OCR_DEVICE: ${OCR_DEVICE:-cpu}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
       # ---- MinIO (platecore/minio_store.py) ---------------------------
       AWS_S3_ENDPOINT_URL: ${MINIO_ENDPOINT:?set MINIO_ENDPOINT in .env}
       MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:?set MINIO_PUBLIC_URL in .env}
@@ -183,7 +187,7 @@ services:
       # storage-split rule as the detector's debug video).
       - ${OCR_DEBUG_HOST_DIR:-./debug_ocr}:/debug
     ports:
-      - "${OCR_API_PORT:-8011}:8011"
+      - "${HOST_BIND_IP:-0.0.0.0}:${OCR_API_PORT:-8011}:8011"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=3).status==200 else 1)"]
       interval: 15s
@@ -216,8 +220,8 @@ services:
     <<: *common
     build:
       context: ./control-hub
-    image: eyeplate/control-hub:${IMAGE_TAG:?set IMAGE_TAG in .env}
-    container_name: plate_control_hub
+    image: ${HUB_IMAGE:-eyeplate/control-hub}:${IMAGE_TAG:?set IMAGE_TAG in .env}
+    container_name: ${HUB_CONTAINER_NAME:-plate_control_hub}
     init: true
     labels:
       autoheal: "true"
@@ -231,8 +235,10 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       REDIS_URL: ${REDIS_URL:-}
       REDIS_MODULE: ${REDIS_MODULE:-plate}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
     ports:
-      - "${HUB_API_PORT:-8021}:8020"      # /health, /tracks
+      - "${HOST_BIND_IP:-0.0.0.0}:${HUB_API_PORT:-8021}:8020"      # /health, /tracks
     stop_grace_period: 15s
 
   # -------------------------------------------------------------------
@@ -244,7 +250,7 @@ services:
   # -------------------------------------------------------------------
   autoheal:
     image: willfarrell/autoheal:latest
-    container_name: plate_autoheal
+    container_name: ${AUTOHEAL_CONTAINER_NAME:-plate_autoheal}
     profiles: [watchdog]
     environment:
       AUTOHEAL_CONTAINER_LABEL: autoheal
@@ -252,7 +258,7 @@ services:
       AUTOHEAL_START_PERIOD: "180"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-unless-stopped}
     networks: [platform]
 
 networks:
