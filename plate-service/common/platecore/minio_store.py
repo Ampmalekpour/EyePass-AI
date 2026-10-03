@@ -28,21 +28,29 @@ from botocore.config import Config
 
 logger = setup_logger("platecore.minio")
 
-MINIO_ENDPOINT = os.getenv("AWS_S3_ENDPOINT_URL", os.getenv("MINIO_ENDPOINT", "http://minio:9000"))
+# Environment keys (set in .env, passed through unchanged by compose.yaml):
+#   MINIO_ENDPOINT        MinIO S3 API URL, e.g. http://minio:9000
+#   MINIO_ACCESS_KEY      access key (read + write on both buckets)
+#   MINIO_SECRET_KEY      secret key
+#   MINIO_REGION          region (MinIO default us-east-1)
+#   MINIO_SECURE          true = https to MinIO
+#   MINIO_VERIFY          true = verify MinIO's TLS certificate
+#   MINIO_PUBLIC_BUCKET   public bucket
+#   MINIO_PRIVATE_BUCKET  private bucket (plate / vehicle images)
+#   MINIO_PUBLIC_URL      base URL written into stored image links
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
+MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
+MINIO_USE_SSL = _env_bool("MINIO_SECURE")
+MINIO_VERIFY = _env_bool("MINIO_VERIFY")
+PUBLIC_BUCKET = os.getenv("MINIO_PUBLIC_BUCKET", "eyepass-public-bucket")
+PRIVATE_BUCKET = os.getenv("MINIO_PRIVATE_BUCKET", "eyepass-private-bucket")
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
-
-MINIO_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID_FULL", os.getenv("MINIO_ACCESS_KEY", "admin"))
-MINIO_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY_FULL", os.getenv("MINIO_SECRET_KEY", "admin123456"))
-
-MINIO_REGION = os.getenv("AWS_S3_REGION_NAME", "us-east-1")
-MINIO_USE_SSL = os.getenv("AWS_S3_USE_SSL", os.getenv("MINIO_SECURE", "False")).lower() == "true"
-MINIO_VERIFY = os.getenv("AWS_S3_VERIFY", "False").lower() == "true"
-
-# Defaults match the reference deployment's existing bucket names
-# (docker-compose.standalone.yml) so an in-place migration needs no
-# MinIO-side changes.
-PUBLIC_BUCKET = os.getenv("AWS_PUBLIC_BUCKET_NAME", "eyepass-public-bucket")
-PRIVATE_BUCKET = os.getenv("AWS_PRIVATE_BUCKET_NAME", "eyepass-private-bucket")
 
 _client = None
 

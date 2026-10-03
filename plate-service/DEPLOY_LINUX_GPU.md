@@ -167,7 +167,7 @@ nano .env
 |---|---|
 | `SHARED_NETWORK` | the Docker network Redis / MinIO / mediamtx are on (`docker network ls`, `docker inspect <redis container>`) |
 | `REDIS_*` | the same Redis Django and camera_stream use (container name, port, db, password) |
-| `MINIO_*` | MinIO endpoint, access/secret key, buckets, public URL |
+| `MINIO_*` | MinIO endpoint, access/secret key, https on/off, buckets, public URL |
 | `MTX_RTSP_BASE_URL` | `rtsp://<mediamtx container>:8554` |
 | `AI_BASE_IMAGE`, `OCR_BASE_IMAGE` | the loaded base image, e.g. `base_image_gpu:latest` |
 | `IMAGE_TAG` | a version label for the built images |
