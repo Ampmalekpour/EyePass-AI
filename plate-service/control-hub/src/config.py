@@ -38,6 +38,10 @@ def _env(name: str, default: str) -> str:
 # This hub serves ONE module — the one it ships with (plate-service/). It
 # reads the same REDIS_MODULE the module's other services use, so its
 # keys always match theirs.
+_left = sorted(k for k, v in os.environ.items() if "[FILL_IN]" in (v or ""))
+if _left:
+    raise SystemExit(f"FATAL: .env still has [FILL_IN] for: {', '.join(_left)} — set real values and restart.")
+
 HUB_MODULE = _env("REDIS_MODULE", "plate")
 HUB_MODULES: List[str] = [HUB_MODULE]
 

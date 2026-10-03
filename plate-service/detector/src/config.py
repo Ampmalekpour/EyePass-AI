@@ -255,3 +255,4 @@ DEBUG_OCR_SUBMISSION_MONTAGE_DIR = os.path.join(DEBUG_ROOT, "ocr_submissions")
 DEBUG_OCR_SUBMISSION_MONTAGE_MAX_FILES = 200
 
 logging_setup.configure(LOG_LEVEL, LOG_FORMAT)
+logging_setup.fail_on_placeholders()

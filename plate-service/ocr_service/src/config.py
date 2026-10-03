@@ -102,3 +102,4 @@ OCR_DECISION_DEBUG_DIR = os.path.join(OCR_DEBUG_ROOT_DIR, "decisions")
 OCR_DECISION_DEBUG_MAX_FILES = 200
 
 logging_setup.configure(LOG_LEVEL, LOG_FORMAT)
+logging_setup.fail_on_placeholders()

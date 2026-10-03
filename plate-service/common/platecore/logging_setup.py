@@ -90,3 +90,16 @@ def setup_logger(name: str) -> logging.Logger:
     logger.addHandler(handler)
     logger.propagate = False
     return logger
+
+
+def fail_on_placeholders(marker: str = "[FILL_IN]") -> None:
+    """Stop at startup if any environment value is still the .env
+    template placeholder — a forgotten [FILL_IN] would otherwise only
+    show up later as a confusing connection error."""
+    import os
+    import sys
+    left = sorted(k for k, v in os.environ.items() if marker in (v or ""))
+    if left:
+        sys.stderr.write(f"FATAL: .env still has {marker} for: {', '.join(left)} — "
+                         f"set real values (grep -n '\\[FILL_IN\\]' .env) and restart.\n")
+        raise SystemExit(2)
