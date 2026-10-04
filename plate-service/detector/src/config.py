@@ -148,6 +148,12 @@ ENGINE_SHUTDOWN_TIMEOUT_SEC = 30.0
 # Torch threads for the .pt model on CPU (fallback only). 0 = cpu_count - 1.
 # (an env var of the same name overrides it — debugging only, not an .env knob)
 TORCH_NUM_THREADS = int(os.getenv("TORCH_NUM_THREADS", "0") or 0)
+# Torch threads when the CPU model is OpenVINO/ONNX. Torch computes nothing
+# there, but Ultralytics still runs its pre/post-processing (normalise, NMS)
+# through torch — with torch's default (all cores) in every camera thread it
+# fights the inference runtime for the cores (measured: loop 20-45% slower,
+# p95 much worse). 1 = no contention. 0 = leave torch's default.
+CPU_TORCH_NUM_THREADS = 1
 CAMERA_ASSUMED_FPS = 25.0         # tracker time base (see engine.add_camera)
 
 # ============================================================================
