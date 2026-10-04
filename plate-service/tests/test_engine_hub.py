@@ -133,16 +133,6 @@ class AutoCadenceTests(unittest.TestCase):
         eng._apply_cadence("removed")
         self.assertEqual(eng.detect_interval, 1.0)
 
-    def test_fixed_fps_pins_the_rate(self):
-        eng = self.make(2)
-        eng.capacity_profile = None
-        saved, config.DETECT_FIXED_FPS = config.DETECT_FIXED_FPS, 15.2
-        try:
-            eng._apply_cadence("t")
-        finally:
-            config.DETECT_FIXED_FPS = saved
-        self.assertAlmostEqual(eng.detect_interval, config.CAMERA_ASSUMED_FPS / 15.2, places=6)
-
     def test_disabled_or_no_profile_is_a_noop(self):
         eng = self.make(8)
         eng.capacity_profile = None

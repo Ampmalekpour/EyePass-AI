@@ -877,10 +877,7 @@ class Engine:
         n_cams = len(self.cameras)
         base = float(max(1, int(config.DETECT_EVERY_N_FRAMES)))
         old = self.detect_interval
-        fixed = float(config.DETECT_FIXED_FPS)
-        if fixed > 0:
-            iv, loop_ms, fits = max(base, config.CAMERA_ASSUMED_FPS / fixed), 0.0, True
-        elif config.CAPACITY_AUTO_DEGRADE and self.capacity_profile and n_cams:
+        if config.CAPACITY_AUTO_DEGRADE and self.capacity_profile and n_cams:
             max_iv = max(base, config.CAMERA_ASSUMED_FPS / float(config.DETECT_MIN_FPS))
             iv, loop_ms, fits = capacity.pick_detect_interval(self.capacity_profile, n_cams, base, max_iv)
         else:
@@ -899,11 +896,7 @@ class Engine:
             tr.buffer_size = int(config.CAMERA_ASSUMED_FPS / iv / 30.0 * tr.track_buffer)
             tr.max_time_lost = tr.buffer_size
         fps = config.CAMERA_ASSUMED_FPS / iv
-        if fixed > 0:
-            self.logger.warning("📌 [CAPACITY] engine=%s: detection PINNED to %.1f fps per camera "
-                                "(config.DETECT_FIXED_FPS, test mode — not derived from the capacity test)",
-                                self.engine_id, fps)
-        elif iv > old:
+        if iv > old:
             self.logger.warning(
                 "🐢 [CAPACITY] engine=%s: %d cameras need ~%.0f ms per loop at full rate, real-time allows %.0f ms "
                 "(%s) → detection lowered to %.1f fps per camera (of %.0f; every %.2f frames, tracker coasts the rest)%s",

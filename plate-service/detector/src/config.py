@@ -148,12 +148,6 @@ CAPACITY_FRAME_SIZE = (1080, 1920)   # (h, w) of the dummy frames (your cameras'
 # (false = warn only). DETECT_MIN_FPS is the floor.
 CAPACITY_AUTO_DEGRADE = _env("CAPACITY_AUTO_DEGRADE", "true").lower() in ("1", "true", "yes", "on")
 DETECT_MIN_FPS = 8.0
-# TEST: pin every camera's detection rate to this many fps, whatever the machine
-# can do (0 = off -> automatic, see above). The camera still delivers its full
-# rate; frames in between are coasted by the tracker, exactly as when
-# auto-degrade lowers the rate — so a fast PC can reproduce what a slow one
-# will do (e.g. 15.2 = what the i3-7100 simulation chose for 4 cameras).
-DETECT_FIXED_FPS = 0.0
 
 # ============================================================================
 # 3. ENGINES (EngineManager)
