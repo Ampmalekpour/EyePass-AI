@@ -56,6 +56,7 @@ import numpy as np
 
 import config
 import capacity
+import sysinfo
 import inference_backends
 from perf_stats import EnginePerf
 from debug_recorder import DebugConfig, DebugRecorder
@@ -851,6 +852,12 @@ class Engine:
                 return
             capacity.clear(self.bus)
             profile = capacity.calibrate(self.backend, self.logger, self.engine_id)
+            try:
+                profile["system"] = sysinfo.collect()
+                for line in sysinfo.render(profile, profile["system"]):
+                    self.logger.info(line)
+            except Exception:
+                self.logger.exception("hardware report failed (calibration result is unaffected)")
             capacity.publish(self.bus, profile)
             self.capacity_profile = profile
             self.backend.reset_streams()   # instances are re-created as cameras are added

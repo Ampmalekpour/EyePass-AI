@@ -117,17 +117,18 @@ class AutoCadenceTests(unittest.TestCase):
         eng._apply_cadence("t")
         self.assertEqual(eng.detect_interval, 1.0)
         eng.cameras["4"] = {"tracker": self.tracker(), "fid": 100}
-        eng._apply_cadence("camera 4 added")          # 5 cameras: 1.05 frames = 23.8 fps
-        self.assertAlmostEqual(eng.detect_interval, 1.05)
+        eng._apply_cadence("camera 4 added")          # 5 cameras: 29.4 ms / 28 ms budget
+        self.assertAlmostEqual(eng.detect_interval, 29.4 / 28.0, delta=0.001)
         eng.cameras["5"] = {"tracker": self.tracker(), "fid": 100}
-        eng._apply_cadence("camera 5 added")          # 6 cameras: 31.4 ms -> 1.15 frames = 21.7 fps
-        self.assertAlmostEqual(eng.detect_interval, 1.15)
+        eng._apply_cadence("camera 5 added")          # 6 cameras: 31.4 ms / 28 ms
+        iv = 31.4 / 28.0
+        self.assertAlmostEqual(eng.detect_interval, iv, delta=0.001)
         tr = eng.cameras["0"]["tracker"]              # lost-track window keeps its wall-clock length
-        self.assertEqual(tr.max_time_lost, int(config.CAMERA_ASSUMED_FPS / 1.15 / 30 * 30))
+        self.assertEqual(tr.max_time_lost, int(config.CAMERA_ASSUMED_FPS / eng.detect_interval / 30 * 30))
         # detect frames are staggered over one interval
         due = [c["_next_due"] for c in eng.cameras.values()]
         self.assertEqual(due, sorted(due))
-        self.assertAlmostEqual(due[1] - due[0], 1.15 / 6)
+        self.assertAlmostEqual(due[1] - due[0], eng.detect_interval / 6)
         del eng.cameras["5"], eng.cameras["4"]
         eng._apply_cadence("removed")
         self.assertEqual(eng.detect_interval, 1.0)
