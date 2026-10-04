@@ -131,12 +131,14 @@ CAPACITY_STOP_AFTER_FAILS = 2        # stop the sweep after this many consecutiv
 CAPACITY_WARMUP_ROUNDS = 3           # untimed loops per camera count
 CAPACITY_ROUNDS = 20                 # timed loops per camera count (p95 over these)
 CAPACITY_FRAME_SIZE = (1080, 1920)   # (h, w) of the dummy frames (your cameras' resolution)
-# When the cameras exceed the measured capacity, raise the detection interval
-# (DETECT_EVERY_N_FRAMES) automatically — the smallest N that fits, at most
-# DETECT_EVERY_N_MAX — instead of missing frames; back to the configured N when
-# they fit again. Every change is logged (🐢 / 🐇). False = warn only.
-CAPACITY_AUTO_DEGRADE = True
-DETECT_EVERY_N_MAX = 4
+# When the cameras exceed the measured capacity, lower the detection rate per
+# camera smoothly (25 -> 23.4 -> 20 -> ... fps; any value, not just 25/12.5/8.3)
+# to exactly what fits, instead of missing frames at random; back up as soon as
+# they fit again. The tracker coasts the frames in between. Every change is
+# logged (🐢 / 🐇). Switch it in .env: CAPACITY_AUTO_DEGRADE=true|false
+# (false = warn only). DETECT_MIN_FPS is the floor.
+CAPACITY_AUTO_DEGRADE = _env("CAPACITY_AUTO_DEGRADE", "true").lower() in ("1", "true", "yes", "on")
+DETECT_MIN_FPS = 8.0
 
 # ============================================================================
 # 3. ENGINES (EngineManager)
