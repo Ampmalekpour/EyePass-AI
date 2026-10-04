@@ -161,6 +161,7 @@ def main():
             "topology": engine_manager.snapshot(),
             "camera_status": bridge.status_snapshot(),
             "device_preference": config.DETECTION_DEVICE,
+            "realtime_capacity": bridge.capacity_profile(),
             "runtime": runtime.describe(),
         }
 

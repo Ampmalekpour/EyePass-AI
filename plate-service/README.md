@@ -225,6 +225,69 @@ benchmark (`tools/bench_multistream.py`), implemented the same way
   Export and run with the same OpenVINO.
 
 
+## Real-time capacity (CPU)
+
+**Rule:** real-time means every camera is served at ≥ `REALTIME_MIN_FPS`
+(25). With N = `DETECT_EVERY_N_FRAMES`, one inference loop for n cameras
+must finish within
+
+```
+budget = N × 1000 / REALTIME_MIN_FPS × CAPACITY_SAFETY_MARGIN   →   1 × 40 ms × 0.7 = 28 ms
+```
+
+The margin leaves room for what the measurement leaves out (RTSP decoding,
+tracking, OCR hand-off). Loop time is not linear in n (model instances
+compete for the cores), so it is measured, not computed.
+
+**At startup, engine 0 calibrates** (CPU engines, before any camera is
+attached): it runs the real inference path for 1, 2, 3, … cameras on dummy
+frames and prints the table. The largest n that fits the budget, with all
+smaller counts also fitting, is the machine's real-time capacity for the
+chosen model (`openvino_fp32`, `openvino_int8` or `onnx` each get their own):
+
+```
+🧪 [CAPACITY] engine=0 cpu/openvino_fp32 | calibrating real-time capacity on Intel(R) Core(TM) i7-12700K (20 logical cores)
+🧪 [CAPACITY] real-time = ≥25 fps per camera → one loop must finish in 28.0 ms (40.0 ms frame period × 0.70 safety margin) ...
+🧪 [CAPACITY] engine=0 cpu/openvino_fp32 |  1 camera : loop avg   11.2 ms  p95   13.0 ms  →  76.9 fps/camera  ✅ real-time
+🧪 [CAPACITY] engine=0 cpu/openvino_fp32 |  4 cameras: loop avg   22.0 ms  p95   25.1 ms  →  39.8 fps/camera  ✅ real-time
+🧪 [CAPACITY] engine=0 cpu/openvino_fp32 |  5 cameras: loop avg   31.5 ms  p95   36.0 ms  →  27.8 fps/camera  ❌ too slow (budget 28.0 ms)
+🏁 [CAPACITY] engine=0 cpu/openvino_fp32 | ✅ REAL-TIME CAPACITY: 4 cameras at ≥25 fps (model openvino_fp32, input 288x480; measured in 21 s)
+```
+(numbers are an example)
+
+**Every camera that is attached afterwards is checked against it**
+(`backend_bridge`):
+
+```
+✅ [CAPACITY] camera 3 attached: 3/4 real-time cameras (openvino_fp32 @ ≥25 fps) — 1 more fit
+🚨 [CAPACITY] camera 5 attached: 5 cameras > real-time capacity 4 (openvino_fp32 @ ≥25 fps) — NOT real-time, expect missed frames on every camera ...
+```
+
+The profile (capacity, the full table, CPU model, cores, container CPU
+limit, budget) is stored in Redis at `plate:internal:detector:capacity`
+(look at it in Redis Commander) and shown under `realtime_capacity` in
+`GET :8010/health`. Settings are in `detector/src/config.py`, section
+*2b. REAL-TIME CAPACITY* (`REALTIME_MIN_FPS`, `CAPACITY_SAFETY_MARGIN`,
+`CAPACITY_MAX_CAMERAS_TESTED`, `CAPACITY_ROUNDS`, `CAPACITY_FRAME_SIZE`,
+`CAPACITY_CALIBRATION_ENABLED`).
+
+Things to know:
+- **It warns, it does not refuse.** A camera over capacity is still
+  attached (and logged with 🚨). Rejecting it is a separate decision.
+- **Startup takes longer:** about 10–60 s (the first OpenVINO instance
+  compiles first). Cameras added meanwhile are attached right after.
+- **Measured on an idle machine,** without decoding or OCR: that is what
+  the safety margin is for. Confirm with the live `⏱️ [PERF]` numbers
+  (`missed %`); if real runs miss frames at the stated capacity, lower
+  `CAPACITY_SAFETY_MARGIN` (e.g. 0.6) and restart.
+- **Device-wide, measured by engine 0 only.** Engines started later (when
+  one engine is full) do not re-measure, because that would run under load.
+  Keep all CPU cameras in one engine (`CPU_MAX_CAMERAS_PER_ENGINE`).
+- **GPU engines are not calibrated** (the key is cleared).
+- **Set `CAPACITY_FRAME_SIZE`** to your cameras' resolution: the resize
+  from the camera frame to the model input is part of the cost.
+
+
 ## Logs
 
 Every component logs to stdout (`docker compose logs -f <service>`).

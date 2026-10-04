@@ -33,6 +33,7 @@ import config  # noqa: E402
 import inference_backends as ib  # noqa: E402
 import model_files as mf  # noqa: E402
 from perf_stats import EnginePerf  # noqa: E402
+import capacity  # noqa: E402
 
 LOG = logging.getLogger("test")
 
@@ -180,6 +181,72 @@ class PerfStatsTest(unittest.TestCase):
         p.batch_done(1, 10, 12, [5], 0, 1, 1, 1)
         p.maybe_log_engine(L(), 1)
         self.assertIn("[STATS]", lines[-1])
+
+
+class _FakeBackend:
+    """infer(n frames) sleeps n * per_frame_ms (+ a contention penalty)."""
+    label = "cpu/fake"
+    imgsz_label = "288x480"
+
+    class spec:
+        variant = "openvino_fp32"
+
+    def __init__(self, per_frame_ms):
+        self.per_frame_ms, self.streams, self.resets = per_frame_ms, 0, 0
+
+    def ensure_streams(self, n):
+        self.streams = max(self.streams, n)
+
+    def infer(self, frames):
+        import time
+        time.sleep(len(frames) * self.per_frame_ms / 1000.0)
+        return [None] * len(frames), []
+
+
+class CapacityTest(unittest.TestCase):
+    def setUp(self):
+        self._saved = {k: getattr(config, k) for k in (
+            "CAPACITY_ROUNDS", "CAPACITY_WARMUP_ROUNDS", "CAPACITY_FRAME_SIZE", "CAPACITY_MAX_CAMERAS_TESTED",
+            "REALTIME_MIN_FPS", "CAPACITY_SAFETY_MARGIN", "DETECT_EVERY_N_FRAMES", "CAPACITY_STOP_AFTER_FAILS")}
+        config.CAPACITY_ROUNDS, config.CAPACITY_WARMUP_ROUNDS = 3, 0
+        config.CAPACITY_FRAME_SIZE, config.CAPACITY_MAX_CAMERAS_TESTED = (32, 32), 8
+        config.REALTIME_MIN_FPS, config.CAPACITY_SAFETY_MARGIN = 25.0, 0.7
+        config.DETECT_EVERY_N_FRAMES, config.CAPACITY_STOP_AFTER_FAILS = 1, 2
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(config, k, v)
+
+    def test_budget(self):
+        self.assertAlmostEqual(capacity.budget_ms(), 28.0)
+        config.DETECT_EVERY_N_FRAMES = 2
+        self.assertAlmostEqual(capacity.budget_ms(), 56.0)
+
+    def test_calibrate_finds_largest_fitting_count(self):
+        # 10 ms per camera: 1 -> 10, 2 -> 20 (fit 28), 3 -> 30 (miss), 4 -> 40 (miss) -> stop
+        prof = capacity.calibrate(_FakeBackend(10.0), LOG)
+        self.assertEqual(prof["max_cameras"], 2)
+        self.assertEqual([r["n"] for r in prof["table"]], [1, 2, 3, 4])
+        self.assertEqual([r["ok"] for r in prof["table"]], [True, True, False, False])
+        self.assertFalse(prof["max_is_lower_bound"])
+        self.assertEqual(prof["budget_ms"], 28.0)
+
+    def test_nothing_fits_and_everything_fits(self):
+        self.assertEqual(capacity.calibrate(_FakeBackend(60.0), LOG)["max_cameras"], 0)
+        prof = capacity.calibrate(_FakeBackend(0.5), LOG)
+        self.assertEqual((prof["max_cameras"], prof["max_is_lower_bound"]), (8, True))
+
+    def test_check_camera(self):
+        prof = {"max_cameras": 4, "variant": "openvino_int8", "target_fps": 25.0}
+        lvl, msg = capacity.check_camera(prof, 3, "c3")
+        self.assertEqual(lvl, "info")
+        self.assertIn("3/4", msg)
+        lvl, msg = capacity.check_camera(prof, 5, "c5")
+        self.assertEqual(lvl, "warning")
+        self.assertIn("🚨", msg)
+        self.assertEqual(capacity.check_camera(None, 5, "x"), (None, ""))
+        lvl, _ = capacity.check_camera({**prof, "max_is_lower_bound": True}, 9, "c9")
+        self.assertEqual(lvl, "info")
 
 
 if __name__ == "__main__":
