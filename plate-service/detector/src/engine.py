@@ -247,8 +247,16 @@ class Engine:
                 torch.set_num_threads(n)
                 self.logger.info(f"[INIT] CPU/pt fallback: torch threads={n} cv2 threads={config.CV2_NUM_THREADS}")
             else:
+                tn = int(config.CPU_TORCH_NUM_THREADS)
+                if tn > 0:
+                    try:
+                        import torch
+                        torch.set_num_threads(tn)
+                    except ImportError:
+                        tn = 0
                 self.logger.info(f"[INIT] CPU/{self.backend.kind}: one model instance per camera, "
-                                 f"cv2 threads={config.CV2_NUM_THREADS}")
+                                 f"cv2 threads={config.CV2_NUM_THREADS} "
+                                 f"torch threads={tn or 'default'} (pre/post-processing only)")
 
         # track lifecycle config
         self.ABSENT_N = int(absent_n)
