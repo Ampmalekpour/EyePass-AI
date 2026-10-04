@@ -306,6 +306,16 @@ Things to know:
   from the camera frame to the model input is part of the cost.
 
 
+### Simulating a small CPU machine (e.g. i3-7100: 2 cores / 4 threads)
+
+`compose.cpu-sim.yaml` pins `plate_detector` to 4 logical CPUs (`SIM_CPUSET`,
+default `0-3`) and caps oneDNN/OpenVINO at AVX2 (`SIM_MAX_ISA`, no VNNI).
+Add it to `COMPOSE_FILE` in `.env` (`compose.yaml:compose.infra.yaml:compose.cpu-sim.yaml`),
+`docker compose up -d --force-recreate plate_detector`, and read the startup report
+(`Usable now: 4 logical cores`). It imitates core count and instruction sets, **not**
+clock/IPC: your CPU's cores are faster, so expect the real machine to be about
+1.5–2× slower per core than the simulation. Give Docker/WSL at least those CPUs.
+
 ## Logs
 
 Every component logs to stdout (`docker compose logs -f <service>`).

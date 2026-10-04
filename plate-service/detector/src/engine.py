@@ -251,7 +251,7 @@ class Engine:
             if self.backend.kind == "pt":
                 # PyTorch only computes on the CPU in the .pt fallback.
                 import torch
-                n = config.TORCH_NUM_THREADS or max(1, (os.cpu_count() or 4) - 1)
+                n = config.TORCH_NUM_THREADS or max(1, config.usable_cpu_count() - 1)
                 torch.set_num_threads(n)
                 self.logger.info(f"[INIT] CPU/pt fallback: torch threads={n} cv2 threads={config.CV2_NUM_THREADS}")
             else:

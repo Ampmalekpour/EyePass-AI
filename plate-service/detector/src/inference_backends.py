@@ -115,6 +115,14 @@ def resolve_runtime(device_pref: str, gpu_model: str, cpu_model: str, cpu_model_
 # ====================================================================
 # Shared pieces
 # ====================================================================
+def _usable_cpus() -> int:
+    """Logical CPUs this process may use (docker cpuset/affinity aware)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except Exception:
+        return os.cpu_count() or 1
+
+
 def _ultra_dets(r) -> np.ndarray:
     b = r.boxes
     if b is None or len(b) == 0:
@@ -489,10 +497,10 @@ class OnnxOwnBackend(_PerStreamBackend):
         self.ort = ort
         log.info(f"[INIT] own ONNX Runtime {ort.__version__} engine {os.path.basename(spec.path)} | input "
                  f"{self.input_hw[0]}x{self.input_hw[1]} | one session per camera, "
-                 f"{s.onnx_cpu_threads or os.cpu_count()} CPU threads split between them")
+                 f"{s.onnx_cpu_threads or _usable_cpus()} CPU threads split between them")
 
     def _threads(self, n_total: int) -> int:
-        return max(1, (self.s.onnx_cpu_threads or os.cpu_count() or 4) // max(1, n_total))
+        return max(1, (self.s.onnx_cpu_threads or _usable_cpus()) // max(1, n_total))
 
     def _new_instance(self, n_total: int):
         so = self.ort.SessionOptions()

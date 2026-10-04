@@ -63,7 +63,7 @@ def device_info() -> Dict[str, Any]:
                 limit = round(int(quota) / int(period), 2)
     except Exception:
         pass
-    return {"cpu": model, "logical_cores": os.cpu_count() or 0, "cpu_limit_cores": limit}
+    return {"cpu": model, "logical_cores": config.usable_cpu_count(), "cpu_limit_cores": limit}
 
 
 def budget_for(interval: float) -> float:
