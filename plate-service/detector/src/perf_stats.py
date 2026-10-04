@@ -24,7 +24,7 @@ Per engine (📊 [STATS], every config.STATS_EVERY_N_BATCHES loops):
 from __future__ import annotations
 
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -57,6 +57,7 @@ class EnginePerf:
         self.label = label
         self.cam_interval = float(cam_interval_sec)
         self.engine_every_n = max(1, int(engine_every_n))
+        self.target_fps: Optional[float] = None   # detection rate the engine aims for per camera (set by the engine)
         self.cams: Dict[str, _CamWin] = {}
         self.totals: Dict[str, Dict[str, int]] = {}
         self._last_cam_flush = time.time()
@@ -125,10 +126,17 @@ class EnginePerf:
             seen = w.processed + w.missed + w.coasted
             miss_pct = 100.0 * w.missed / seen if seen else 0.0
             t = self.totals.get(cid, {})
+            got = w.processed / el
+            if self.target_fps:
+                ratio = got / self.target_fps
+                rate = (f"detect target={self.target_fps:.1f} got={got:.1f} fps ({ratio:.0%}) "
+                        f"{'✅' if ratio >= 0.9 else '⚠️'} | ")
+            else:
+                rate = ""
             tot_seen = t.get("processed", 0) + t.get("missed", 0)
             logger.info(
                 f"⏱️ [PERF] engine={self.engine_id} {self.label} camera={cid} | "
-                f"fps in={w.captured / el:.1f} proc={w.processed / el:.1f} | "
+                f"fps in={w.captured / el:.1f} proc={got:.1f} | {rate}"
                 f"missed={w.missed} ({miss_pct:.1f}%) coasted={w.coasted} | "
                 f"pre={_avg(w.pre):.1f} infer={_avg(w.inf):.1f} (p95 {_p95(w.inf):.1f}) "
                 f"post={_avg(w.post):.1f} track={_avg(w.track):.1f} ms/frame | "

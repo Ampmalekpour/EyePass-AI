@@ -885,6 +885,7 @@ class Engine:
         # spread the cameras' detect frames over one interval
         for k, cam in enumerate(self.cameras.values()):
             cam["_next_due"] = cam.get("fid", 0) + k * iv / max(1, n_cams)
+        self.perf.target_fps = config.CAMERA_ASSUMED_FPS / iv
         if abs(iv - old) < 1e-9:
             return
         self.detect_interval = iv
