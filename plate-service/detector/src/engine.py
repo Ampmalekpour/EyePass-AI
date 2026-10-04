@@ -55,6 +55,7 @@ import cv2
 import numpy as np
 
 import config
+import capacity
 import inference_backends
 from perf_stats import EnginePerf
 from debug_recorder import DebugConfig, DebugRecorder
@@ -809,9 +810,42 @@ class Engine:
         }
         rec.write(full_frame, ctx)
 
+    # ---------------- real-time capacity (see capacity.py) ----------------
+    def _startup_capacity(self):
+        """Engine 0 measures how many cameras this machine serves in real
+        time (before any camera is attached) and publishes the profile to
+        Redis; the bridge checks every attached camera against it. Other
+        engines start while engine 0's cameras are running, so measuring
+        there would be wrong (and would steal CPU from live cameras)."""
+        try:
+            if not config.CAPACITY_CALIBRATION_ENABLED or not self.backend.label.startswith("cpu"):
+                if self.engine_id == 0:
+                    capacity.clear(self.bus)
+                    self.logger.info("🧪 [CAPACITY] not calibrated (%s)",
+                                     "disabled in config" if not config.CAPACITY_CALIBRATION_ENABLED
+                                     else "GPU engine: capacity is a CPU measurement")
+                return
+            if self.engine_id != 0:
+                prof = capacity.load(self.bus)
+                self.logger.info("🧪 [CAPACITY] engine=%s: not re-measured while other engines run; "
+                                 "device real-time capacity = %s cameras (measured by engine 0)",
+                                 self.engine_id, prof.get("max_cameras") if prof else "unknown")
+                return
+            capacity.clear(self.bus)
+            profile = capacity.calibrate(self.backend, self.logger, self.engine_id)
+            capacity.publish(self.bus, profile)
+            self.backend.reset_streams()   # instances are re-created as cameras are added
+        except Exception as e:
+            self.logger.exception(f"🧪 [CAPACITY] calibration failed ({e}) — continuing without a capacity profile")
+            try:
+                self.backend.reset_streams()
+            except Exception:
+                pass
+
     # ---------------- engine main loop ----------------
     def run(self):
         self.logger.info("Engine loop started")
+        self._startup_capacity()
         try:
             self.backend.warmup()
         except Exception as e:

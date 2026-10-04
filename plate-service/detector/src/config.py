@@ -111,6 +111,28 @@ CV2_NUM_THREADS = 2
 DETECT_EVERY_N_FRAMES = 1
 
 # ============================================================================
+# 2b. REAL-TIME CAPACITY (CPU) — how many cameras can this machine serve?
+# ============================================================================
+# Real-time = every camera is served at >= REALTIME_MIN_FPS. For an engine
+# with n cameras that means one inference loop must finish within
+#     budget = DETECT_EVERY_N_FRAMES * 1000 / REALTIME_MIN_FPS * CAPACITY_SAFETY_MARGIN  ms
+# (25 fps, N=1, margin 0.7 -> 28 ms). The margin leaves room for what the
+# calibration does not include: RTSP decoding, tracking, OCR hand-off.
+# At startup engine 0 measures the real loop time for 1, 2, 3, ... cameras on
+# this machine with this model and prints the capacity table (🧪 [CAPACITY]);
+# the largest n that fits the budget is the device's real-time capacity,
+# stored in Redis (<module>:internal:detector:capacity). Every camera that is
+# attached afterwards is checked against it (✅ / 🚨 [CAPACITY]).
+REALTIME_MIN_FPS = 25.0
+CAPACITY_SAFETY_MARGIN = 0.7
+CAPACITY_CALIBRATION_ENABLED = True
+CAPACITY_MAX_CAMERAS_TESTED = 12     # upper bound of the sweep
+CAPACITY_STOP_AFTER_FAILS = 2        # stop the sweep after this many consecutive misses
+CAPACITY_WARMUP_ROUNDS = 3           # untimed loops per camera count
+CAPACITY_ROUNDS = 20                 # timed loops per camera count (p95 over these)
+CAPACITY_FRAME_SIZE = (1080, 1920)   # (h, w) of the dummy frames (your cameras' resolution)
+
+# ============================================================================
 # 3. ENGINES (EngineManager)
 # ============================================================================
 # Cameras per engine process. A new engine starts past this many.

@@ -287,6 +287,10 @@ class DetectorBackend:
     def ensure_streams(self, n: int):
         pass
 
+    def reset_streams(self):
+        """Drop the per-camera instances (they are re-created as cameras
+        are added). No-op for the batched .pt backend."""
+
     def warmup(self):
         pass
 
@@ -381,6 +385,12 @@ class _PerStreamBackend(DetectorBackend):
         self.pool = ThreadPoolExecutor(max_workers=len(self.instances), thread_name_prefix=self.kind)
         self.log.info("[INIT] %s: %d instance(s) ready (one per camera) in %.0f ms",
                       self.label, len(self.instances), (time.perf_counter() - t0) * 1000)
+
+    def reset_streams(self):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+            self.pool = None
+        self.instances = []
 
     def warmup(self):
         self.ensure_streams(1)

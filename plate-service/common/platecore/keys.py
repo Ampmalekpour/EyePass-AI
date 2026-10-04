@@ -110,6 +110,13 @@ class RedisKeys:
         return f"{self.module}:internal:detector:state"
 
     @property
+    def detector_capacity(self) -> str:
+        """STRING (JSON): the real-time capacity profile engine 0 measured
+        at startup — max cameras at >= REALTIME_MIN_FPS, the per-camera-count
+        table, device info. Read by the bridge on every camera attach."""
+        return f"{self.module}:internal:detector:capacity"
+
+    @property
     def ocr_state(self) -> str:
         """HASH {phase, worker_count, updated_at} for the OCR service's
         self-healing checkpoint."""

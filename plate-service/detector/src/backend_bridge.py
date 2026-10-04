@@ -64,6 +64,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
+import capacity
 import config
 from platecore.active_state import ActiveCameraState
 from platecore.bus import RedisBus
@@ -192,6 +193,8 @@ class DetectorBridge:
         )
         with self._running_lock:
             self._running_cameras.add(str(camera_id))
+            cameras_after = len(self._running_cameras)
+        self._log_capacity(camera_id, cameras_after)
         # Written immediately, same timing as alpr_api.py's _start_core
         # (right after handing the camera to the engine, not waiting for
         # its first confirmed frame) — Django only cares "did we accept
@@ -199,6 +202,22 @@ class DetectorBridge:
         self.bus.write_ai_status(camera_id, "running")
         logger.info("Attached camera %s -> %s", camera_id, job.video_path)
         return True
+
+    def capacity_profile(self) -> Optional[dict]:
+        """The real-time capacity profile engine 0 measured at startup
+        (capacity.py), or None (GPU, disabled, not measured yet)."""
+        return capacity.load(self.bus)
+
+    def _log_capacity(self, camera_id: str, cameras_after: int):
+        """✅ / 🚨 line: does this machine serve this many cameras in real time?"""
+        try:
+            level, msg = capacity.check_camera(self.capacity_profile(), cameras_after, camera_id)
+            if level == "warning":
+                logger.warning(msg)
+            elif level == "info":
+                logger.info(msg)
+        except Exception:
+            logger.debug("capacity check failed", exc_info=True)
 
     def _detach(self, camera_id: str):
         self.engine_manager.remove_camera(camera_id)
