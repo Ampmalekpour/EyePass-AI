@@ -89,14 +89,15 @@ def loop_ms(profile: Dict[str, Any], cameras: int) -> float:
 
 
 def pick_detect_interval(profile: Dict[str, Any], cameras: int, base: float, max_interval: float):
-    """Detection interval (in camera frames, any value >= base) at which
-    `cameras` cameras exactly fit the budget, rounded up to 0.05 and capped at
-    `max_interval`. 1.25 = detect 4 of every 5 frames (20 of 25 fps).
-    Returns (interval, loop_ms, fits)."""
+    """Detection interval (camera frames between two detections of a camera)
+    at which `cameras` cameras exactly fit the budget — computed from the
+    calibration table, no fixed steps: interval = loop_ms(cameras) / budget
+    for one frame period (1.25 = detect 4 of every 5 frames = 20 of 25 fps).
+    Never below `base`, capped at `max_interval`. Returns (interval, loop_ms, fits)."""
     import math
     lm = loop_ms(profile, cameras)
-    need = lm / budget_for(1.0)
-    interval = max(float(base), math.ceil(need * 20 - 1e-9) / 20.0)
+    need = math.ceil(lm / budget_for(1.0) * 1000.0 - 1e-6) / 1000.0     # 3 decimals, rounded up
+    interval = max(float(base), need)
     if interval > max_interval:
         return float(max(base, max_interval)), lm, False
     return interval, lm, True

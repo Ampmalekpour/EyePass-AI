@@ -271,15 +271,26 @@ class CadenceTest(unittest.TestCase):
     def test_pick(self):
         pick = lambda cams, base=1.0, mx=3.125: capacity.pick_detect_interval(INT8_TABLE, cams, base, mx)
         self.assertEqual(pick(4)[::2], (1.0, True))
-        # 5 cameras: p95 29.4 ms vs 28 ms -> only a little slower: 1.05 frames (23.8 fps)
-        self.assertEqual(pick(5)[::2], (1.05, True))
-        # 8 cameras ~41.9 ms -> 1.5 frames (16.7 fps)
-        self.assertEqual(pick(8)[::2], (1.5, True))
-        self.assertEqual(pick(12)[::2], (2.25, True))
+        # computed from the measured loop time, no fixed steps: p95 / 28 ms
+        for cams, p95 in ((5, 29.4), (6, 31.4)):
+            iv, lm, fits = pick(cams)
+            self.assertTrue(fits)
+            self.assertAlmostEqual(iv, p95 / 28.0, delta=0.001)
+        iv, _, fits = pick(8)                       # scaled from 6 cameras: 31.4 * 8/6
+        self.assertAlmostEqual(iv, 31.4 * 8 / 6 / 28.0, delta=0.001)
         # beyond the floor (DETECT_MIN_FPS): capped, not fitting
         self.assertEqual(pick(40)[::2], (3.125, False))
         # a configured base interval is never lowered
         self.assertEqual(pick(2, base=3.0)[::2], (3.0, True))
+
+    def test_hardware_report(self):
+        import sysinfo
+        prof = {"backend": "cpu/openvino_int8", "variant": "openvino_int8", "input": "288x480", "max_cameras": 4,
+                "table": [{"n": n, "avg_ms": a, "p95_ms": p} for n, a, p in
+                          [(1, 4.9, 7.3), (2, 9.8, 12.1), (3, 13.3, 14.6), (4, 18.4, 19.9), (5, 25.0, 29.4)]]}
+        text = "\n".join(sysinfo.render(prof, sysinfo.collect()))
+        for needle in ("CEILING", "SAFE USE", "PLANNING TABLE", "WHAT TO DO", "cameras at full"):
+            self.assertIn(needle, text)
 
 if __name__ == "__main__":
     unittest.main()
