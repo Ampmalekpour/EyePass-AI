@@ -102,6 +102,7 @@ are**. Everything else is set in each service's `config.py`:
 | `DETECTION_DEVICE` | `gpu` · `cpu` · `auto` |
 | `DETECTION_GPU_MODEL` | `plate_v8n_480` · `plate_v8s_640` (or `v8n` / `v8s`) |
 | `DETECTION_CPU_MODEL` | `openvino_fp32` · `openvino_int8` · `onnx` |
+| `CAPACITY_AUTO_DEGRADE` | `true` · `false` — CPU only: lower the per-camera detection rate when over the measured capacity (`false` = warn only) |
 | `OCR_DEVICE` | `cpu` · `gpu` |
 | `COMPOSE_PROFILES` | empty · `watchdog` (autoheal) |
 | Redis / MinIO / relay / network / base image / ports / folders | deployment values, marked `[FILL_IN]` |
@@ -286,20 +287,23 @@ Things to know:
 - **Device-wide, measured by engine 0 only.** Engines started later (when
   one engine is full) do not re-measure, because that would run under load.
   Keep all CPU cameras in one engine (`CPU_MAX_CAMERAS_PER_ENGINE`).
-- **Over capacity, the engine degrades by itself** (`CAPACITY_AUTO_DEGRADE`,
-  `DETECT_EVERY_N_MAX` in `config.py`). It picks the smallest detection
-  interval N for which the attached cameras fit the budget (N × 28 ms) and
-  logs it; the tracker coasts the frames in between and the lost-track
-  window keeps its length in seconds. Cameras stay covered at a lower
-  detection rate instead of losing 20–40% of their frames at random. It
-  goes back to the configured N when cameras are removed:
+- **Over capacity, the engine lowers the detection rate by itself.**
+  Switch: `CAPACITY_AUTO_DEGRADE=true|false` in `.env` (`false` = warn
+  only). The rate drops **smoothly**, to what fits: the engine computes the
+  interval between two detections of a camera from the measured loop time
+  (e.g. 8 cameras → 1.5 frames = 16.7 fps, 5 cameras → 1.05 frames = 23.8
+  fps; not just 25 / 12.5 / 8.3). The floor is `DETECT_MIN_FPS` in
+  `config.py` (8). The tracker coasts the frames in between, the cameras'
+  detect frames are staggered, and the lost-track window keeps its length
+  in seconds. Cameras stay covered at a lower rate instead of losing 20–40%
+  of their frames at random; the rate goes back up as cameras are removed:
 
   ```
-  🐢 [CAPACITY] engine=0: 8 cameras need ~42 ms per loop but real-time at ≥25 fps allows 56 ms (camera 8 added) → detecting every 2nd frame per camera (12.5 detections/s each, tracker coasts the rest)
-  🐇 [CAPACITY] engine=0: 4 cameras fit real-time again (camera 5 removed) → detecting every  frame (25.0 detections/s per camera)
+  🐢 [CAPACITY] engine=0: 8 cameras need ~42 ms per loop at full rate, real-time allows 28 ms (camera 8 added) → detection lowered to 16.7 fps per camera (of 25; every 1.50 frames, tracker coasts the rest)
+  🐇 [CAPACITY] engine=0: 4 cameras (camera 5 removed) → detection 25.0 fps per camera (full rate)
   ```
-  `False` = warn only. If even `DETECT_EVERY_N_MAX` is not enough the 🐢 line
-  says so (use fewer cameras or a lighter model).
+  If even the floor is not enough the 🐢 line says so (use fewer cameras or
+  a lighter model).
 - **GPU engines are not calibrated** (the key is cleared).
 - **Set `CAPACITY_FRAME_SIZE`** to your cameras' resolution: the resize
   from the camera frame to the model input is part of the cost.

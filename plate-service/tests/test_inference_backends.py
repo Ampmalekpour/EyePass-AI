@@ -269,18 +269,17 @@ class CadenceTest(unittest.TestCase):
         self.assertAlmostEqual(capacity.loop_ms(INT8_TABLE, 8), 31.4 * 8 / 6)
 
     def test_pick(self):
-        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 4, 1, 4)[::2], (1, True))
-        # 5 cameras: p95 29.4 > 28 (N=1) but <= 56 (N=2)
-        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 5, 1, 4)[::2], (2, True))
-        # 8 cameras ~ 41.9 ms -> N=2 (56 ms)
-        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 8, 1, 4)[::2], (2, True))
-        # 12 cameras ~ 62.8 ms -> N=3 (84 ms)
-        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 12, 1, 4)[::2], (3, True))
-        # too many for the maximum N: capped, not fitting
-        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 40, 1, 4)[::2], (4, False))
-        # a configured base N is never lowered
-        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 2, 3, 4)[::2], (3, True))
-
+        pick = lambda cams, base=1.0, mx=3.125: capacity.pick_detect_interval(INT8_TABLE, cams, base, mx)
+        self.assertEqual(pick(4)[::2], (1.0, True))
+        # 5 cameras: p95 29.4 ms vs 28 ms -> only a little slower: 1.05 frames (23.8 fps)
+        self.assertEqual(pick(5)[::2], (1.05, True))
+        # 8 cameras ~41.9 ms -> 1.5 frames (16.7 fps)
+        self.assertEqual(pick(8)[::2], (1.5, True))
+        self.assertEqual(pick(12)[::2], (2.25, True))
+        # beyond the floor (DETECT_MIN_FPS): capped, not fitting
+        self.assertEqual(pick(40)[::2], (3.125, False))
+        # a configured base interval is never lowered
+        self.assertEqual(pick(2, base=3.0)[::2], (3.0, True))
 
 if __name__ == "__main__":
     unittest.main()

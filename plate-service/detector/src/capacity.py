@@ -66,9 +66,9 @@ def device_info() -> Dict[str, Any]:
     return {"cpu": model, "logical_cores": os.cpu_count() or 0, "cpu_limit_cores": limit}
 
 
-def budget_for(n_every: int) -> float:
-    """Loop budget (ms) when detecting every `n_every`-th frame."""
-    return max(1, int(n_every)) * 1000.0 / float(config.REALTIME_MIN_FPS) * float(config.CAPACITY_SAFETY_MARGIN)
+def budget_for(interval: float) -> float:
+    """Loop budget (ms) when each camera is detected every `interval` frames."""
+    return max(1.0, float(interval)) * 1000.0 / float(config.REALTIME_MIN_FPS) * float(config.CAPACITY_SAFETY_MARGIN)
 
 
 def loop_ms(profile: Dict[str, Any], cameras: int) -> float:
@@ -88,14 +88,18 @@ def loop_ms(profile: Dict[str, Any], cameras: int) -> float:
     return float(last["p95_ms"]) * cameras / max(1, last["n"])
 
 
-def pick_detect_every_n(profile: Dict[str, Any], cameras: int, base_n: int, max_n: int):
-    """Smallest detection interval N in [base_n, max_n] for which `cameras`
-    cameras fit the real-time budget. Returns (N, loop_ms, fits)."""
+def pick_detect_interval(profile: Dict[str, Any], cameras: int, base: float, max_interval: float):
+    """Detection interval (in camera frames, any value >= base) at which
+    `cameras` cameras exactly fit the budget, rounded up to 0.05 and capped at
+    `max_interval`. 1.25 = detect 4 of every 5 frames (20 of 25 fps).
+    Returns (interval, loop_ms, fits)."""
+    import math
     lm = loop_ms(profile, cameras)
-    for k in range(max(1, base_n), max(base_n, max_n) + 1):
-        if lm <= budget_for(k):
-            return k, lm, True
-    return max(base_n, max_n), lm, False
+    need = lm / budget_for(1.0)
+    interval = max(float(base), math.ceil(need * 20 - 1e-9) / 20.0)
+    if interval > max_interval:
+        return float(max(base, max_interval)), lm, False
+    return interval, lm, True
 
 
 def _p95(v: List[float]) -> float:

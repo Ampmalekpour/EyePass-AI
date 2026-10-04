@@ -72,7 +72,7 @@ def make_engine(leave_scene=True):
     eng.STAGE_PRIORITY = {"leave_scene": 3, "cross_line": 2, "stop_roi": 2, "periodic": 1}
     eng.perf = engine_mod.EnginePerf(0, "test", 10.0, 50)
     eng.STAGE_EMOJI = {"periodic": "🔁", "cross_line": "🚧", "stop_roi": "🛑", "leave_scene": "🏁"}
-    eng.detect_every_n, eng.capacity_profile = 1, None
+    eng.detect_interval, eng.capacity_profile = 1.0, None
     eng.MIN_SEEN_FRAMES = 8
     eng.MIN_CROPS_TO_FINALIZE = 1
     eng.writers = {}
@@ -103,40 +103,47 @@ class AutoCadenceTests(unittest.TestCase):
     TABLE = {"table": [{"n": n, "p95_ms": p} for n, p in
                        [(1, 7.3), (2, 12.1), (3, 14.6), (4, 19.9), (5, 29.4), (6, 31.4)]]}
 
+    def tracker(self):
+        return type("T", (), {"track_buffer": 30, "buffer_size": 30, "max_time_lost": 30})()
+
     def make(self, n_cams):
         eng = make_engine()
         eng.capacity_profile = self.TABLE
-        tracker = lambda: type("T", (), {"track_buffer": 30, "buffer_size": 30, "max_time_lost": 30})()
-        eng.cameras = {str(i): {"tracker": tracker(), "_detect_offset": 99} for i in range(n_cams)}
+        eng.cameras = {str(i): {"tracker": self.tracker(), "fid": 100} for i in range(n_cams)}
         return eng
 
-    def test_degrades_then_recovers(self):
+    def test_degrades_smoothly_then_recovers(self):
         eng = self.make(4)
         eng._apply_cadence("t")
-        self.assertEqual(eng.detect_every_n, 1)
-        eng.cameras["4"] = {"tracker": type("T", (), {"track_buffer": 30, "buffer_size": 30, "max_time_lost": 30})(),
-                            "_detect_offset": 0}
-        eng._apply_cadence("camera 4 added")          # 5 cameras: p95 29.4 > 28 ms
-        self.assertEqual(eng.detect_every_n, 2)
-        # lost-track window keeps its wall-clock length (steps are 2 frames now)
-        self.assertEqual(eng.cameras["0"]["tracker"].max_time_lost, int(config.CAMERA_ASSUMED_FPS / 2 / 30 * 30))
-        self.assertEqual([c["_detect_offset"] for c in eng.cameras.values()], [0, 1, 2, 3, 4])
-        del eng.cameras["4"]
-        eng._apply_cadence("camera 4 removed")
-        self.assertEqual(eng.detect_every_n, 1)
+        self.assertEqual(eng.detect_interval, 1.0)
+        eng.cameras["4"] = {"tracker": self.tracker(), "fid": 100}
+        eng._apply_cadence("camera 4 added")          # 5 cameras: 1.05 frames = 23.8 fps
+        self.assertAlmostEqual(eng.detect_interval, 1.05)
+        eng.cameras["5"] = {"tracker": self.tracker(), "fid": 100}
+        eng._apply_cadence("camera 5 added")          # 6 cameras: 31.4 ms -> 1.15 frames = 21.7 fps
+        self.assertAlmostEqual(eng.detect_interval, 1.15)
+        tr = eng.cameras["0"]["tracker"]              # lost-track window keeps its wall-clock length
+        self.assertEqual(tr.max_time_lost, int(config.CAMERA_ASSUMED_FPS / 1.15 / 30 * 30))
+        # detect frames are staggered over one interval
+        due = [c["_next_due"] for c in eng.cameras.values()]
+        self.assertEqual(due, sorted(due))
+        self.assertAlmostEqual(due[1] - due[0], 1.15 / 6)
+        del eng.cameras["5"], eng.cameras["4"]
+        eng._apply_cadence("removed")
+        self.assertEqual(eng.detect_interval, 1.0)
 
     def test_disabled_or_no_profile_is_a_noop(self):
         eng = self.make(8)
         eng.capacity_profile = None
         eng._apply_cadence("t")
-        self.assertEqual(eng.detect_every_n, 1)
+        self.assertEqual(eng.detect_interval, 1.0)
         eng.capacity_profile = self.TABLE
         saved, config.CAPACITY_AUTO_DEGRADE = config.CAPACITY_AUTO_DEGRADE, False
         try:
             eng._apply_cadence("t")
         finally:
             config.CAPACITY_AUTO_DEGRADE = saved
-        self.assertEqual(eng.detect_every_n, 1)
+        self.assertEqual(eng.detect_interval, 1.0)
 
 
 class PlateEngineHubTests(unittest.TestCase):

@@ -82,6 +82,8 @@ services:
       DETECTION_GPU_MODEL: ${DETECTION_GPU_MODEL:-plate_v8n_480}
       # CPU: openvino_fp32 | openvino_int8 | onnx
       DETECTION_CPU_MODEL: ${DETECTION_CPU_MODEL:-openvino_fp32}
+      # CPU: lower every camera's detection rate to what the measured capacity allows
+      CAPACITY_AUTO_DEGRADE: ${CAPACITY_AUTO_DEGRADE:-true}
       DETECTION_MODEL_ROOT: /models
       LOG_LEVEL: ${LOG_LEVEL:-}
       LOG_FORMAT: ${LOG_FORMAT:-}
