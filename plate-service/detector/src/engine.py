@@ -226,6 +226,12 @@ class Engine:
 
         self.logger = setup_logger(f"Engine{self.engine_id}")
 
+        # Detection cadence actually in use: config.DETECT_EVERY_N_FRAMES, raised
+        # automatically on CPU when the cameras exceed the measured real-time
+        # capacity (config.CAPACITY_AUTO_DEGRADE, see _apply_cadence()).
+        self.detect_every_n = max(1, int(config.DETECT_EVERY_N_FRAMES))
+        self.capacity_profile = None
+
         # ---- detection backend (GPU: .pt/Ultralytics; CPU: OpenVINO/ONNX)
         # Built HERE, in the engine child process — openvino/onnxruntime
         # are imported and the model compiled inside the child, never in
@@ -410,7 +416,7 @@ class Engine:
         # seconds than TRACKER_TRACK_BUFFER was tuned for. Passing the
         # true step rate (camera fps / N) keeps that wall-clock window
         # the same regardless of N.
-        step_rate = config.CAMERA_ASSUMED_FPS / max(1, config.DETECT_EVERY_N_FRAMES)
+        step_rate = config.CAMERA_ASSUMED_FPS / self.detect_every_n
         tracker = BYTETracker(build_tracker_config(), frame_rate=step_rate, name=camera_id)
 
         self.cameras[camera_id] = {
@@ -427,8 +433,8 @@ class Engine:
             # _detect_offset staggers cameras so their detect frames don't
             # all land on the same loop iteration; _last_tracker_fid lets us
             # compute the real elapsed-frame dt for the next tracker.update().
-            "_detect_offset": len(self.cameras) % max(1, config.DETECT_EVERY_N_FRAMES),
-            "_last_tracker_fid": -(len(self.cameras) % max(1, config.DETECT_EVERY_N_FRAMES)),
+            "_detect_offset": len(self.cameras),
+            "_last_tracker_fid": -1,
             "_last_captured": None,
         }
         # CPU backends: one model instance per camera (no-op on the GPU)
@@ -436,6 +442,7 @@ class Engine:
             self.backend.ensure_streams(len(self.cameras))
         except Exception as e:
             self.logger.exception(f"[CAMERA-ADD] camera={camera_id}: could not create its model instance: {e}")
+        self._apply_cadence(f"camera {camera_id} added")
 
         self._dbg_log(camera_id, "CAMERA", f"camera added -> {url}",
                       data={"roi": roi, "line_points": line_points, "stop_roi": stop_roi, "triggers": triggers})
@@ -459,6 +466,7 @@ class Engine:
                 self.logger.exception(f"camera={camera_id} track={tid}: ending on removal failed")
         self.cameras.pop(camera_id, None)
         self.perf.forget(camera_id)
+        self._apply_cadence(f"camera {camera_id} removed")
         try:
             cam["reader"].stop()
         except Exception:
@@ -835,6 +843,7 @@ class Engine:
                 return
             if self.engine_id != 0:
                 prof = capacity.load(self.bus)
+                self.capacity_profile = prof
                 self.logger.info("🧪 [CAPACITY] engine=%s: not re-measured while other engines run; "
                                  "device real-time capacity = %s cameras (measured by engine 0)",
                                  self.engine_id, prof.get("max_cameras") if prof else "unknown")
@@ -842,6 +851,7 @@ class Engine:
             capacity.clear(self.bus)
             profile = capacity.calibrate(self.backend, self.logger, self.engine_id)
             capacity.publish(self.bus, profile)
+            self.capacity_profile = profile
             self.backend.reset_streams()   # instances are re-created as cameras are added
         except Exception as e:
             self.logger.exception(f"🧪 [CAPACITY] calibration failed ({e}) — continuing without a capacity profile")
@@ -849,6 +859,43 @@ class Engine:
                 self.backend.reset_streams()
             except Exception:
                 pass
+
+    def _apply_cadence(self, why: str):
+        """CPU: keep the cameras inside the measured real-time capacity by
+        raising the detection interval N (the tracker coasts the frames in
+        between) instead of letting frames be missed. Back to the configured
+        N as soon as the cameras fit again. No-op without a profile / on GPU."""
+        # spread the cameras' detect frames over the N iterations
+        for k, cam in enumerate(self.cameras.values()):
+            cam["_detect_offset"] = k
+        if not config.CAPACITY_AUTO_DEGRADE or not self.capacity_profile or not self.cameras:
+            return
+        base = max(1, int(config.DETECT_EVERY_N_FRAMES))
+        n_cams = len(self.cameras)
+        k, loop_ms, fits = capacity.pick_detect_every_n(
+            self.capacity_profile, n_cams, base, max(base, int(config.DETECT_EVERY_N_MAX)))
+        if k == self.detect_every_n:
+            return
+        old, self.detect_every_n = self.detect_every_n, k
+        for cam in self.cameras.values():
+            # a tracker "step" now spans k camera frames -> keep the lost-track
+            # window the same in wall-clock time (see add_camera)
+            tr = cam["tracker"]
+            tr.buffer_size = int(config.CAMERA_ASSUMED_FPS / k / 30.0 * tr.track_buffer)
+            tr.max_time_lost = tr.buffer_size
+        fps = config.CAMERA_ASSUMED_FPS / k
+        if k > old:
+            self.logger.warning(
+                "🐢 [CAPACITY] engine=%s: %d cameras need ~%.0f ms per loop but real-time at ≥%.0f fps allows %.0f ms "
+                "(%s) → detecting every %d%s frame per camera (%.1f detections/s each, tracker coasts the rest)%s",
+                self.engine_id, n_cams, loop_ms, config.REALTIME_MIN_FPS, capacity.budget_for(k), why, k,
+                {2: "nd", 3: "rd"}.get(k, "th"), fps,
+                "" if fits else f" — STILL over capacity at the maximum N={k} (config.DETECT_EVERY_N_MAX): "
+                                f"expect missed frames; use fewer cameras or a lighter model")
+        else:
+            self.logger.info("🐇 [CAPACITY] engine=%s: %d cameras fit real-time again (%s) → detecting every "
+                             "%s frame (%.1f detections/s per camera)", self.engine_id, n_cams, why,
+                             "" if k == 1 else f"{k}th", fps)
 
     # ---------------- engine main loop ----------------
     def run(self):
@@ -942,8 +989,12 @@ class Engine:
                 # iteration via the tracker's existing ghost-track fallback
                 # in _write_debug_frame(), drawing each track's last known
                 # box so playback doesn't drop to 1/N fps.
-                N = max(1, config.DETECT_EVERY_N_FRAMES)
-                do_detect = (cam["fid"] - cam["_last_tracker_fid"]) >= N
+                # staggered: camera k detects on frames where (fid + k) % N == 0,
+                # so the cameras' detect frames spread over the N loop
+                # iterations; gap >= 2N is the starvation guard.
+                N = self.detect_every_n
+                gap = cam["fid"] - cam["_last_tracker_fid"]
+                do_detect = gap >= N and (gap >= 2 * N or (cam["fid"] + cam["_detect_offset"]) % N == 0)
 
                 if not do_detect:
                     self.perf.frame_coasted(camera_id)

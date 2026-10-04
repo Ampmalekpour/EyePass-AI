@@ -249,5 +249,38 @@ class CapacityTest(unittest.TestCase):
         self.assertEqual(lvl, "info")
 
 
+INT8_TABLE = {"table": [{"n": n, "p95_ms": p} for n, p in
+                        [(1, 7.3), (2, 12.1), (3, 14.6), (4, 19.9), (5, 29.4), (6, 31.4)]]}
+
+
+class CadenceTest(unittest.TestCase):
+    """Auto-degrade: smallest detection interval N that fits the budget."""
+
+    def setUp(self):
+        self._saved = {k: getattr(config, k) for k in ("REALTIME_MIN_FPS", "CAPACITY_SAFETY_MARGIN")}
+        config.REALTIME_MIN_FPS, config.CAPACITY_SAFETY_MARGIN = 25.0, 0.7
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(config, k, v)
+
+    def test_loop_ms_measured_and_scaled(self):
+        self.assertEqual(capacity.loop_ms(INT8_TABLE, 4), 19.9)
+        self.assertAlmostEqual(capacity.loop_ms(INT8_TABLE, 8), 31.4 * 8 / 6)
+
+    def test_pick(self):
+        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 4, 1, 4)[::2], (1, True))
+        # 5 cameras: p95 29.4 > 28 (N=1) but <= 56 (N=2)
+        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 5, 1, 4)[::2], (2, True))
+        # 8 cameras ~ 41.9 ms -> N=2 (56 ms)
+        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 8, 1, 4)[::2], (2, True))
+        # 12 cameras ~ 62.8 ms -> N=3 (84 ms)
+        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 12, 1, 4)[::2], (3, True))
+        # too many for the maximum N: capped, not fitting
+        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 40, 1, 4)[::2], (4, False))
+        # a configured base N is never lowered
+        self.assertEqual(capacity.pick_detect_every_n(INT8_TABLE, 2, 3, 4)[::2], (3, True))
+
+
 if __name__ == "__main__":
     unittest.main()

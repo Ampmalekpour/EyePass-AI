@@ -195,7 +195,7 @@ for each camera with a NEW frame (the RTSP reader keeps only the latest; replace
 | `.env` | Inside one engine | Cameras per engine (`config.py`) |
 |---|---|---|
 | `DETECTION_DEVICE=gpu` | **one** Ultralytics YOLO `.pt` on CUDA; the engine's cameras go into **one batched `predict()`** per loop (the original GPU pipeline) | `MAX_CAMERAS_PER_ENGINE` (6) |
-| `DETECTION_CPU_MODEL=openvino_fp32` | **one Ultralytics YOLO instance per camera** on the OpenVINO FP32 model, `device="intel:cpu"`; all cameras' frames run **in parallel** | `CPU_MAX_CAMERAS_PER_ENGINE` (8) |
+| `DETECTION_CPU_MODEL=openvino_fp32` | **one Ultralytics YOLO instance per camera** on the OpenVINO FP32 model, `device="intel:cpu"`; all cameras' frames run **in parallel** | `CPU_MAX_CAMERAS_PER_ENGINE` (16) |
 | `DETECTION_CPU_MODEL=openvino_int8` | same, on the INT8 model (box branch FP32) + the benchmark's **INT8 duplicate fix** in Ultralytics' postprocess (`INT8_FIX` in `config.py`) | same |
 | `DETECTION_CPU_MODEL=onnx` | **one ONNX Runtime session per camera**, CPU threads split between them (`cpu_count ÷ cameras`, rebuilt when a camera is added), own letterbox + OpenCV NMS | same |
 
@@ -283,6 +283,20 @@ Things to know:
 - **Device-wide, measured by engine 0 only.** Engines started later (when
   one engine is full) do not re-measure, because that would run under load.
   Keep all CPU cameras in one engine (`CPU_MAX_CAMERAS_PER_ENGINE`).
+- **Over capacity, the engine degrades by itself** (`CAPACITY_AUTO_DEGRADE`,
+  `DETECT_EVERY_N_MAX` in `config.py`). It picks the smallest detection
+  interval N for which the attached cameras fit the budget (N × 28 ms) and
+  logs it; the tracker coasts the frames in between and the lost-track
+  window keeps its length in seconds. Cameras stay covered at a lower
+  detection rate instead of losing 20–40% of their frames at random. It
+  goes back to the configured N when cameras are removed:
+
+  ```
+  🐢 [CAPACITY] engine=0: 8 cameras need ~42 ms per loop but real-time at ≥25 fps allows 56 ms (camera 8 added) → detecting every 2nd frame per camera (12.5 detections/s each, tracker coasts the rest)
+  🐇 [CAPACITY] engine=0: 4 cameras fit real-time again (camera 5 removed) → detecting every  frame (25.0 detections/s per camera)
+  ```
+  `False` = warn only. If even `DETECT_EVERY_N_MAX` is not enough the 🐢 line
+  says so (use fewer cameras or a lighter model).
 - **GPU engines are not calibrated** (the key is cleared).
 - **Set `CAPACITY_FRAME_SIZE`** to your cameras' resolution: the resize
   from the camera frame to the model input is part of the cost.
