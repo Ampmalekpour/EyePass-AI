@@ -141,7 +141,7 @@ services:
 
   # -------------------------------------------------------------------
   # Test clips (profile `test-video`): loop TEST_VIDEO_FILE into the relay
-  # as camera paths 1..6. TEST_VIDEO_RTSP_BASE_URL is the relay they
+  # as camera paths 1..8. TEST_VIDEO_RTSP_BASE_URL is the relay they
   # publish to — this module's own mediamtx by default, or the system's.
   # (No depends_on: publish_loop.sh waits and retries on its own, and the
   # relay may not be part of this compose project at all.)
@@ -212,6 +212,30 @@ services:
     profiles: [ test-video ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/6
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_7:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_7
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/7
+      VIDEO_FILE: /media/video.mp4
+    volumes:
+      - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro
+    restart: unless-stopped
+    networks: [ platform ]
+
+  plate_video_publisher_8:
+    build: { context: ., dockerfile: Dockerfile.publisher }
+    container_name: plate_video_publisher_8
+    profiles: [ test-video ]
+    environment:
+      MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/8
       VIDEO_FILE: /media/video.mp4
     volumes:
       - ${TEST_VIDEO_FILE:-./test_video.mp4}:/media/video.mp4:ro

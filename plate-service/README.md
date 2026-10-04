@@ -294,7 +294,7 @@ Without Docker, the same file runs on the host with the benchmark venv:
 `python detector/tools/bench_multistream.py --model-dir <...>\plate_v8n_480 --video <...>\video2.mp4 --results <...>\bench_final --streams 4`.
 
 **2. The whole service with N simulated cameras.** The `test-video`
-profile loops `TEST_VIDEO_FILE` into the relay as cameras `1`..`6`:
+profile loops `TEST_VIDEO_FILE` into the relay as cameras `1`..`8`:
 
 ```bash
 # .env:  COMPOSE_PROFILES=standalone-stream,test-video   TEST_VIDEO_FILE=./video2.mp4
