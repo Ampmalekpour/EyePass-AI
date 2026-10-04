@@ -66,6 +66,38 @@ def device_info() -> Dict[str, Any]:
     return {"cpu": model, "logical_cores": os.cpu_count() or 0, "cpu_limit_cores": limit}
 
 
+def budget_for(n_every: int) -> float:
+    """Loop budget (ms) when detecting every `n_every`-th frame."""
+    return max(1, int(n_every)) * 1000.0 / float(config.REALTIME_MIN_FPS) * float(config.CAPACITY_SAFETY_MARGIN)
+
+
+def loop_ms(profile: Dict[str, Any], cameras: int) -> float:
+    """p95 loop time (ms) for `cameras` cameras: measured when n is in the
+    calibration table, else scaled proportionally from the largest n measured
+    (the measured cost is ~linear in n)."""
+    rows = profile.get("table") or []
+    if not rows:
+        return 0.0
+    cameras = max(1, int(cameras))
+    for r in rows:
+        if r["n"] == cameras:
+            return float(r["p95_ms"])
+    last = rows[-1]
+    if cameras < rows[0]["n"]:
+        return float(rows[0]["p95_ms"])
+    return float(last["p95_ms"]) * cameras / max(1, last["n"])
+
+
+def pick_detect_every_n(profile: Dict[str, Any], cameras: int, base_n: int, max_n: int):
+    """Smallest detection interval N in [base_n, max_n] for which `cameras`
+    cameras fit the real-time budget. Returns (N, loop_ms, fits)."""
+    lm = loop_ms(profile, cameras)
+    for k in range(max(1, base_n), max(base_n, max_n) + 1):
+        if lm <= budget_for(k):
+            return k, lm, True
+    return max(base_n, max_n), lm, False
+
+
 def _p95(v: List[float]) -> float:
     return float(np.percentile(v, 95))
 
@@ -182,6 +214,8 @@ def check_camera(profile: Optional[Dict[str, Any]], cameras_after: int, camera_i
         return "info", (f"ℹ️ [CAPACITY] camera {camera_id} attached: {cameras_after} cameras is above the range "
                         f"that was measured (all {cap} tested counts were real-time, {what}) — unverified")
     return "warning", (f"🚨 [CAPACITY] camera {camera_id} attached: {cameras_after} cameras > real-time capacity "
-                       f"{cap} ({what}) — NOT real-time, expect missed frames on every camera. "
-                       f"See the 🧪 table in the engine-0 startup log, or lower the load "
-                       f"(fewer cameras / DETECT_EVERY_N_FRAMES / lighter model)")
+                       f"{cap} ({what}) — NOT real-time at every frame. "
+                       + ("the engine lowers its detection rate to compensate (see the 🐢 line). "
+                          if config.CAPACITY_AUTO_DEGRADE else "")
+                       + "See the 🧪 table in the engine-0 startup log, or lower the load "
+                         "(fewer cameras / DETECT_EVERY_N_FRAMES / lighter model)")

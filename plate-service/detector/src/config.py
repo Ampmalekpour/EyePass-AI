@@ -131,6 +131,12 @@ CAPACITY_STOP_AFTER_FAILS = 2        # stop the sweep after this many consecutiv
 CAPACITY_WARMUP_ROUNDS = 3           # untimed loops per camera count
 CAPACITY_ROUNDS = 20                 # timed loops per camera count (p95 over these)
 CAPACITY_FRAME_SIZE = (1080, 1920)   # (h, w) of the dummy frames (your cameras' resolution)
+# When the cameras exceed the measured capacity, raise the detection interval
+# (DETECT_EVERY_N_FRAMES) automatically — the smallest N that fits, at most
+# DETECT_EVERY_N_MAX — instead of missing frames; back to the configured N when
+# they fit again. Every change is logged (🐢 / 🐇). False = warn only.
+CAPACITY_AUTO_DEGRADE = True
+DETECT_EVERY_N_MAX = 4
 
 # ============================================================================
 # 3. ENGINES (EngineManager)
@@ -141,7 +147,7 @@ CAPACITY_FRAME_SIZE = (1080, 1920)   # (h, w) of the dummy frames (your cameras'
 #        the capacity measured with tools/bench_multistream.py so ALL cameras
 #        share one process — two CPU engines would compete for the same cores.
 MAX_CAMERAS_PER_ENGINE = 6
-CPU_MAX_CAMERAS_PER_ENGINE = 8
+CPU_MAX_CAMERAS_PER_ENGINE = 16   # CPU: ONE engine serves all cameras (extra engines would only share the same cores)
 DEFAULT_ENGINE_COUNT = 1          # engines started idle on a fresh boot
 ENGINE_REBALANCE_INTERVAL_SEC = 30.0
 ENGINE_SHUTDOWN_TIMEOUT_SEC = 30.0
