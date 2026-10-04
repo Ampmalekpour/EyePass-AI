@@ -21,6 +21,15 @@ import os
 from platecore import logging_setup
 
 
+def usable_cpu_count() -> int:
+    """Logical CPUs this process may really use (honours docker `cpuset`/affinity;
+    os.cpu_count() would report the whole host)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except Exception:
+        return os.cpu_count() or 1
+
+
 def _env(name: str, default: str) -> str:
     v = os.getenv(name)
     return default if v is None or v.strip() == "" else v.strip()

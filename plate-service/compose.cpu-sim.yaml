@@ -1,0 +1,25 @@
+# =====================================================================
+# Test overlay: make plate_detector behave like a small CPU machine
+# ---------------------------------------------------------------------
+# Default = Intel Core i3-7100 class: 2 cores / 4 threads, AVX2 only
+# (no AVX-512, no VNNI). Add it to COMPOSE_FILE in .env:
+#
+#   COMPOSE_FILE=compose.yaml:compose.infra.yaml:compose.cpu-sim.yaml
+#
+# then: docker compose up -d --force-recreate plate_detector
+# and read the startup report ("Usable now: 4 logical cores").
+#
+# What it can and cannot imitate:
+#   cores / threads      yes  (cpuset pins the container to SIM_CPUSET)
+#   instruction sets     yes  (ONEDNN_MAX_CPU_ISA caps oneDNN/OpenVINO at AVX2)
+#   clock / IPC          NO   - your CPU's cores are faster than an i7-7100's:
+#                               expect the real i3 to be ~1.5-2x slower
+#                               per core than this simulation.
+# Pick threads that are real hyper-thread siblings where you can
+# (on most Intel CPUs 0,1 = one core, 2,3 = the next).
+# =====================================================================
+services:
+  plate_detector:
+    cpuset: "${SIM_CPUSET:-0-3}"
+    environment:
+      ONEDNN_MAX_CPU_ISA: ${SIM_MAX_ISA:-AVX2}
