@@ -1,17 +1,17 @@
 # plate-service on a Linux CPU server (4 test cameras)
 
 Target: a Linux box with Docker + Compose, no GPU (e.g. Core i3-7100, 2 cores / 4 threads).
-Everything runs from the repository root, which is the `plate-service` folder (the `plate_for_sanat` repo is a copy of it).
+Everything runs from the `plate-service` folder of branch `plate_for_sanat` (repo Ampmalekpour/EyePass-AI).
 
 ## 1. Get the code
 ```bash
-git clone <repo-url> plate_for_sanat        # private repo: use a token or an SSH key
-cd plate_for_sanat
+git clone --branch plate_for_sanat --single-branch https://github.com/Ampmalekpour/EyePass-AI.git plate_for_sanat   # private: user + token
+cd plate_for_sanat/plate-service
 ```
 
 ## 2. Put in the files that are not in git
 ```
-plate_for_sanat/
+plate_for_sanat/plate-service/
 ├── video2.mp4                                   H.264 test clip (re-encode: ffmpeg -i in.mp4 -c:v libx264 -preset veryfast -an video2.mp4)
 └── models/
     ├── detection/plate_v8n_480/                 the model folder (export_info.yaml, *_int8_box_openvino_model/, *_fp32_openvino_model/, *.onnx, *.pt)
@@ -19,7 +19,7 @@ plate_for_sanat/
 ```
 Copy from your PC with scp (PowerShell/cmd/Linux alike):
 ```
-scp -r models video2.mp4 USER@SERVER:~/plate_for_sanat/
+scp -r models video2.mp4 USER@SERVER:~/plate_for_sanat/plate-service/
 ```
 
 ## 3. Build the CPU base image once (about 15-30 min)
