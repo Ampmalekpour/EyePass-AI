@@ -1,17 +1,17 @@
 # plate-service on a Linux CPU server (4 test cameras)
 
 Target: a Linux box with Docker + Compose, no GPU (e.g. Core i3-7100, 2 cores / 4 threads).
-Everything runs from the `plate-service` folder of this repository.
+Everything runs from the repository root, which is the `plate-service` folder (the `plate_for_sanat` repo is a copy of it).
 
 ## 1. Get the code
 ```bash
 git clone <repo-url> plate_for_sanat        # private repo: use a token or an SSH key
-cd plate_for_sanat/plate-service
+cd plate_for_sanat
 ```
 
 ## 2. Put in the files that are not in git
 ```
-plate-service/
+plate_for_sanat/
 ├── video2.mp4                                   H.264 test clip (re-encode: ffmpeg -i in.mp4 -c:v libx264 -preset veryfast -an video2.mp4)
 └── models/
     ├── detection/plate_v8n_480/                 the model folder (export_info.yaml, *_int8_box_openvino_model/, *_fp32_openvino_model/, *.onnx, *.pt)
@@ -19,7 +19,7 @@ plate-service/
 ```
 Copy from your PC with scp (PowerShell/cmd/Linux alike):
 ```
-scp -r models video2.mp4 USER@SERVER:~/plate_for_sanat/plate-service/
+scp -r models video2.mp4 USER@SERVER:~/plate_for_sanat/
 ```
 
 ## 3. Build the CPU base image once (about 15-30 min)
