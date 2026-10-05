@@ -16,6 +16,8 @@
 # =====================================================================
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
+# slow / flaky link to PyPI: long timeout + many retries (default is 15 s x 5)
+ENV PIP_DEFAULT_TIMEOUT=180 PIP_RETRIES=15 PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Upgrade pip and install Cython
 RUN apt-get update && apt-get install -y python3 python3-pip python3-distutils python3-venv
