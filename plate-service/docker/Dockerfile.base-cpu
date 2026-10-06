@@ -1,5 +1,5 @@
 # =====================================================================
-# base_image_cpu — CPU base image for plate-detector and plate-ocr
+# base_image_cpu - CPU base image for plate-detector and plate-ocr
 # ---------------------------------------------------------------------
 # The operator's CPU Dockerfile + what the CPU pipeline needs:
 #   * openvino      (openvino_fp32 / openvino_int8 models)
