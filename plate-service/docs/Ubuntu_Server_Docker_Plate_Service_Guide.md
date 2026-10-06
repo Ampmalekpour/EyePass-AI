@@ -39,9 +39,10 @@ A step-by-step record of everything we did together: installing the server, inst
 10. Stop, start, reset (Part 17)
 11. Change settings or code later (Part 18)
 12. Start automatically at boot (Part 19)
-13. Command reference
-14. Troubleshooting
-15. Not done yet
+13. Daily basics: power off, health, updates, accounts (Part 20)
+14. Command reference
+15. Troubleshooting
+16. Not done yet
 
 ---
 
@@ -854,6 +855,132 @@ Notes:
 
 ---
 
+## Part 20: Daily basics on the server (SERVER)
+
+The small things you need every day: switching the server off and on, checking it is healthy, updates, accounts and the clock.
+
+### Turn the server off or restart it safely
+
+| Goal | Command |
+| --- | --- |
+| power off now | `sudo shutdown -h now` (same as `sudo poweroff`) |
+| restart now | `sudo reboot` |
+| power off in 30 minutes | `sudo shutdown -h +30` |
+| power off at a clock time | `sudo shutdown -h 23:00` |
+| cancel a scheduled shutdown or reboot | `sudo shutdown -c` |
+
+Safe order:
+
+1. (Optional, cleaner) stop the stack first: `sudo systemctl stop plate-service`, wait until it returns (up to about 30 seconds). If you skip this, the shutdown stops the containers anyway.
+2. Run `sudo shutdown -h now`. Your SSH window ends with `Connection closed`.
+3. Wait until the fans and the power light have stopped before you unplug anything or press the power button again.
+
+Do not just pull the power cable. Redis writes to disk about once a second, so an unclean power cut can lose the last second of data, and the file system may need a check at the next boot.
+
+To switch it on: press the power button. Wait **3 to 5 minutes** (Ubuntu boots, Docker starts, then the detector and OCR load their models). With the boot service from Part 19 the cameras start by themselves.
+
+After switching on, check:
+
+```bash
+uptime
+systemctl status plate-service --no-pager
+cd ~/plate-service
+docker compose ps
+```
+
+If you cannot connect over SSH after a restart, the IP may have changed. Read it on the server's own screen with `hostname -I`, or in the router's list of connected devices. Reserve the IP in the router so it stays the same (see "Not done yet").
+
+### Is the server healthy? A quick check
+
+| Goal | Command |
+| --- | --- |
+| how long it has been running | `uptime` |
+| memory | `free -h` |
+| disk | `df -h /` |
+| live CPU (q to leave) | `top` |
+| CPU and memory per container (one snapshot) | `docker stats --no-stream` |
+| failed services | `systemctl --failed` |
+| errors since the last boot | `journalctl -p err -b --no-pager \| tail -n 30` |
+| who is logged in now | `who` |
+| recent logins | `last -n 10` |
+| CPU temperature (install once: `sudo apt install -y lm-sensors`) | `sensors` |
+| does a reboot wait for you? | `cat /var/run/reboot-required` (the file exists only if a reboot is needed) |
+
+### Updates
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
+Do it when the cameras are idle, because upgrading Docker restarts the Docker service and the containers restart with it. If `/var/run/reboot-required` exists, run `sudo reboot`. Afterwards check `docker compose ps`.
+
+### Accounts, sudo and the docker group
+
+| Goal | Command |
+| --- | --- |
+| change your password | `passwd` |
+| which groups am I in? | `id` |
+| add me to the docker group | `sudo usermod -aG docker $USER` and then log out and back in (`exit`, then `ssh` again) |
+
+`sudo` asks for your own password. The password does not show while you type.
+
+The error `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` means the current login is not in the `docker` group yet. A new login fixes it (or `newgrp docker` for one window; then `exit` twice to close SSH). The boot service is not affected: it runs as root.
+
+### Time and name
+
+| Goal | Command |
+| --- | --- |
+| clock, time zone, time sync | `timedatectl` |
+| set the time zone | `sudo timedatectl set-timezone Asia/Tehran` |
+| hostname and OS | `hostnamectl` |
+
+Container logs are stamped in UTC.
+
+### systemd services in short
+
+| Goal | Command |
+| --- | --- |
+| status | `systemctl status NAME --no-pager` |
+| start / stop / restart | `sudo systemctl start NAME`, `stop NAME`, `restart NAME` |
+| start at boot on / off | `sudo systemctl enable NAME`, `disable NAME` |
+| its log | `journalctl -u NAME --no-pager -n 50` |
+| all services that run | `systemctl list-units --type=service --state=running` |
+
+Names we use: `plate-service`, `docker`, `ssh`.
+
+### Long jobs and dropped connections
+
+Containers keep running when SSH closes. But a long command in the SSH window (a big `docker load`, an apt upgrade) is stopped when the connection drops. Use `tmux` for those:
+
+```bash
+sudo apt install -y tmux
+tmux new -s work          # start a session and run the long command inside it
+# detach with Ctrl+B, then D. Reconnect later:
+tmux attach -t work
+tmux ls                   # list sessions
+exit                      # inside tmux: ends the session
+```
+
+If an `scp` from your PC is interrupted, run it again.
+
+### Where things are on the server
+
+| What | Where |
+| --- | --- |
+| the code, `.env`, compose files | `~/plate-service` |
+| models and the test video | `~/plate-service/models`, `~/plate-service/video2.mp4` |
+| debug videos (when enabled) | `~/plate-service/debug_video` |
+| the Redis data (camera configs, queues) | Docker volume `eyeplate_redis_data` (`docker volume ls`) |
+| the boot service | `/etc/systemd/system/plate-service.service` |
+| Docker's log size limit | `/etc/docker/daemon.json` |
+| the `rt` helper and the shortcuts | `~/.bashrc` |
+| all Docker data (images, volumes) | `/var/lib/docker` |
+
+What to keep a copy of on your PC: the `plate_for_sanat` folder (code, models, video, `.env`) and `E:\docker_images\sanat_plate_images`. With those you can rebuild the server's stack from nothing (Parts 12 and 13).
+
+---
+
 ## Command reference
 
 ### Network, on the server
@@ -963,6 +1090,9 @@ Run `docker compose down` before `docker image prune -a`, because it removes ima
 | Windows boots after the install | In BIOS, put the **ubuntu** entry first in the boot order |
 | `apt update` fails | Check the cable, then `ping 8.8.8.8` and `ping google.com` |
 | `permission denied ... docker.sock` | `newgrp docker`, or `exit` and SSH in again |
+| `rt list` or `docker ...`: `permission denied while trying to connect to the docker API` | This login is not in the `docker` group yet. Run `id`; if `docker` is missing, `sudo usermod -aG docker $USER`, then `exit` and SSH in again (Part 20) |
+| `rt: command not found` | The helper was only defined in an older SSH session. Add it to `~/.bashrc` (Part 13, Shortcuts) and run `source ~/.bashrc` |
+| the boot service shows `active (exited)` | That is normal. It only starts the containers and ends. Look at `docker compose ps` for the real state |
 | `Unable to locate package docker-ce` | The repository step failed, redo step 3 of Part 8 |
 | SSH `Connection timed out` | Wrong IP, or the PC is on a different network |
 | SSH `Connection refused` | SSH service is not running (see the SSH table) |
