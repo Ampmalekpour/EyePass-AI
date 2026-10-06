@@ -38,9 +38,10 @@ A step-by-step record of everything we did together: installing the server, inst
 9. Settings reference (Part 16)
 10. Stop, start, reset (Part 17)
 11. Change settings or code later (Part 18)
-12. Command reference
-13. Troubleshooting
-14. Not done yet
+12. Start automatically at boot (Part 19)
+13. Command reference
+14. Troubleshooting
+15. Not done yet
 
 ---
 
@@ -758,6 +759,98 @@ The same pattern works for `plate_ocr` and `control_hub`. This has not been test
 ```
 scp C:\Users\eyerik.com\Desktop\plate_for_sanat\plate-service\compose.yaml sanatmadan@192.168.30.180:~/plate-service/
 ```
+
+---
+
+## Part 19: Start everything automatically when the server turns on (SERVER)
+
+Goal: switch the server on, wait a few minutes, and the cameras are being processed, with nobody logged in.
+
+### Why it can already mostly work
+
+- Docker itself starts at boot (`sudo systemctl enable docker` in Part 8).
+- Every plate-service container has `restart: unless-stopped`, so Docker brings back the containers that were running when the server went down.
+- Redis keeps its data on disk (`appendonly yes`) in the `eyeplate_redis_data` volume, and the detector replays the list of active cameras from Redis when it starts. So the cameras you activated come back on their own.
+
+This breaks in one case: after `docker compose down` the containers no longer exist, so there is nothing for Docker to restart. A manually stopped container also stays stopped. That is why we add a systemd service that runs `docker compose up -d` at every boot.
+
+### Install the boot service (SERVER, once)
+
+Check Docker starts at boot (expect `enabled`):
+
+```bash
+systemctl is-enabled docker
+```
+
+Create the service. The folder is `/home/sanatmadan/plate-service`; change the path if yours differs.
+
+```bash
+sudo tee /etc/systemd/system/plate-service.service > /dev/null <<'EOF'
+[Unit]
+Description=plate-service (docker compose stack)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/sanatmadan/plate-service
+Environment=HOME=/root
+ExecStart=/usr/bin/docker compose up -d --no-build redis mediamtx video_publisher plate_video_publisher_2 plate_video_publisher_3 plate_video_publisher_4 plate_detector plate_ocr control_hub
+ExecStop=/usr/bin/docker compose stop
+TimeoutStartSec=300
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now plate-service
+systemctl status plate-service --no-pager
+```
+
+The same file is in the repo as `deploy/plate-service.service`. In `systemctl status` expect `active (exited)`; that is normal for this kind of service, because it only starts the containers and then ends. Press **q** if the output stops at `(END)`.
+
+### Test it (SERVER, then YOUR PC)
+
+Make sure the cameras are activated first (`rt list`, Part 14). Then:
+
+```bash
+sudo reboot
+```
+
+Wait 3 to 5 minutes (the detector and OCR load their models), then from YOUR PC:
+
+```
+ssh sanatmadan@192.168.30.180
+cd ~/plate-service
+docker compose ps
+docker compose logs --tail 20 plate_detector
+rt list
+```
+
+You should see every container `Up`/`healthy` and `[PERF]` lines coming for each camera. If `rt` is not defined, paste the helper from Part 13.
+
+### Everyday control
+
+| Goal | Command |
+| --- | --- |
+| stack status | `systemctl status plate-service --no-pager` and `docker compose ps` |
+| stop the stack (until you start it again or the server reboots) | `sudo systemctl stop plate-service` |
+| start it again | `sudo systemctl start plate-service` |
+| restart everything | `sudo systemctl restart plate-service` |
+| turn the auto-start off | `sudo systemctl disable plate-service` |
+| turn it on again | `sudo systemctl enable plate-service` |
+| the boot service's own log | `journalctl -u plate-service --no-pager -n 50` |
+
+Notes:
+
+- `sudo reboot` and `sudo shutdown -h now` stop the containers gracefully first, and they come back at the next boot.
+- With the boot service enabled, `docker compose down` is no longer a problem: the next boot recreates the containers. Cameras that were registered with `set-camera` and activated stay in Redis, unless you used `down -v`, which wipes Redis. After `down -v`, register and activate the cameras again.
+- If you change the service list (for example you add a fifth publisher), edit `ExecStart` in `/etc/systemd/system/plate-service.service` and run `sudo systemctl daemon-reload`.
+- If the server should also switch **itself** on after a power cut, enable "Restore on AC Power Loss / Power On" in the BIOS (the exact name depends on the board).
+- This service was written for this guide and has **not** been tested on your server yet. If it fails, run `journalctl -u plate-service --no-pager -n 50` and send me the output.
 
 ---
 

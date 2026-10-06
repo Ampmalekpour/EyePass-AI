@@ -1,0 +1,26 @@
+# systemd unit: start the whole plate-service stack at boot.
+#
+#   sudo cp deploy/plate-service.service /etc/systemd/system/plate-service.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now plate-service
+#
+# Edit WorkingDirectory if the folder is not /home/sanatmadan/plate-service.
+# `systemctl stop plate-service` stops the stack, `start` brings it back.
+[Unit]
+Description=plate-service (docker compose stack)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/sanatmadan/plate-service
+Environment=HOME=/root
+ExecStart=/usr/bin/docker compose up -d --no-build redis mediamtx video_publisher plate_video_publisher_2 plate_video_publisher_3 plate_video_publisher_4 plate_detector plate_ocr control_hub
+ExecStop=/usr/bin/docker compose stop
+TimeoutStartSec=300
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target
