@@ -292,7 +292,7 @@ API_PORT = 8010
 # OCR round-trip. Expensive — enable only while looking at it.
 DEBUG_VIDEO_ENABLED = False
 DEBUG_VIDEO_DIR = DEBUG_ROOT
-DEBUG_VIDEO_SEGMENT_SECONDS = 240.0
+DEBUG_VIDEO_SEGMENT_SECONDS = 60.0     # each piece is closed (finalized) after this long; 0 = never roll
 DEBUG_VIDEO_FPS = 12.0              # nominal fps of the file (see the next two switches)
 # True: only frames that were actually run through the detector are written
 # (every Nth frame when DETECT_EVERY_N_FRAMES / auto-degrade skips frames).
@@ -305,8 +305,10 @@ DEBUG_VIDEO_FPS_FOLLOWS_DETECTION = True
 DEBUG_VIDEO_MAX_SEGMENTS = 12
 DEBUG_VIDEO_SCALE = 1.0
 DEBUG_VIDEO_EVERY_N = 1
-DEBUG_VIDEO_CODEC = "mp4v"
-DEBUG_VIDEO_EXT = ".mp4"
+# MJPG in .avi stays playable even if the process is killed mid-segment (tested with
+# kill -9); an mp4v .mp4 has no index until it is closed and is lost in that case.
+DEBUG_VIDEO_CODEC = "MJPG"
+DEBUG_VIDEO_EXT = ".avi"
 DEBUG_VIDEO_JSONL = True
 DEBUG_VIDEO_GHOST_FRAMES = 45
 DEBUG_VIDEO_EVENT_LINES = 14
