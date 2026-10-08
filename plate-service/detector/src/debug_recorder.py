@@ -162,6 +162,7 @@ class DebugRecorder:
         self.jsonl_fh = None
         self.segment_path: Optional[str] = None
         self.segment_started = 0.0
+        self.segment_frames = 0
         self.segment_index = 0
         self.out_size: Optional[Tuple[int, int]] = None
 
@@ -218,6 +219,7 @@ class DebugRecorder:
         self.writer = writer
         self.segment_path = path
         self.segment_started = time.time()
+        self.segment_frames = 0
         self.out_size = (w, h)
         self.segment_index += 1
 
@@ -242,8 +244,11 @@ class DebugRecorder:
                 pass
             try:
                 size_mb = os.path.getsize(self.segment_path) / 1e6 if self.segment_path else 0.0
+                secs = max(time.time() - self.segment_started, 1e-6)
                 msg = (f"[DEBUG-REC][{self.camera_id}] segment CLOSED "
-                       f"{os.path.basename(self.segment_path or '')} ({size_mb:.0f} MB)")
+                       f"{os.path.basename(self.segment_path or '')} ({size_mb:.0f} MB, "
+                       f"{self.segment_frames} frames in {secs:.1f} s = "
+                       f"{self.segment_frames / secs:.1f} fps written, file fps {self.cfg.fps:.2f})")
                 if self.logger:
                     self.logger.info(msg)
                 else:
@@ -348,6 +353,7 @@ class DebugRecorder:
 
             self.writer.write(canvas)
             self.frames_written += 1
+            self.segment_frames += 1
         except Exception as e:
             self._fail(f"render/write error: {e}")
             return
