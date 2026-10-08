@@ -1,0 +1,17 @@
+# =====================================================================
+# Dev overlay: run the detector's Python source straight from the host
+# ---------------------------------------------------------------------
+# Mounts ./detector/src over /app and ./common/platecore over
+# /app/platecore, so a change to config.py (or any .py) needs only
+# "copy the file + docker compose restart plate_detector" - no image
+# rebuild and no multi-GB image transfer.
+#
+#   COMPOSE_FILE=compose.yaml:compose.infra.yaml:compose.src-mount.yaml
+#
+# Remove it from COMPOSE_FILE to run the code baked into the image.
+# =====================================================================
+services:
+  plate_detector:
+    volumes:
+      - ./detector/src:/app
+      - ./common/platecore:/app/platecore
