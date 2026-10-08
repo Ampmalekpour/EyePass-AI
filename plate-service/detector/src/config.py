@@ -293,7 +293,15 @@ API_PORT = 8010
 DEBUG_VIDEO_ENABLED = False
 DEBUG_VIDEO_DIR = DEBUG_ROOT
 DEBUG_VIDEO_SEGMENT_SECONDS = 240.0
-DEBUG_VIDEO_FPS = 12.0
+DEBUG_VIDEO_FPS = 12.0              # nominal fps of the file (see the next two switches)
+# True: only frames that were actually run through the detector are written
+# (every Nth frame when DETECT_EVERY_N_FRAMES / auto-degrade skips frames).
+# False: the skipped frames are written too, drawn from the tracker's last boxes.
+DEBUG_VIDEO_ONLY_DETECTED_FRAMES = True
+# True: the file's fps follows the detection rate (CAMERA_ASSUMED_FPS / interval,
+# e.g. 25 / 3 = 8.33 fps), so it plays back in real time. DEBUG_VIDEO_FPS is
+# then only the starting value. False: always DEBUG_VIDEO_FPS.
+DEBUG_VIDEO_FPS_FOLLOWS_DETECTION = True
 DEBUG_VIDEO_MAX_SEGMENTS = 12
 DEBUG_VIDEO_SCALE = 1.0
 DEBUG_VIDEO_EVERY_N = 1

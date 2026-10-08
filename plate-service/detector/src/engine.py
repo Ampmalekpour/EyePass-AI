@@ -886,6 +886,9 @@ class Engine:
         for k, cam in enumerate(self.cameras.values()):
             cam["_next_due"] = cam.get("fid", 0) + k * iv / max(1, n_cams)
         self.perf.target_fps = config.CAMERA_ASSUMED_FPS / iv
+        dcfg = getattr(self, "debug_cfg", None)
+        if dcfg is not None and config.DEBUG_VIDEO_FPS_FOLLOWS_DETECTION:
+            dcfg.fps = config.CAMERA_ASSUMED_FPS / iv     # the next segment is written at the detection rate
         if abs(iv - old) < 1e-9:
             return
         self.detect_interval = iv
@@ -1007,7 +1010,7 @@ class Engine:
                 if not do_detect:
                     self.perf.frame_coasted(camera_id)
                     rec = cam.get("debug")
-                    if rec is not None and rec.enabled:
+                    if rec is not None and rec.enabled and not config.DEBUG_VIDEO_ONLY_DETECTED_FRAMES:
                         try:
                             self._write_debug_frame(
                                 cam=cam, camera_id=camera_id, full_frame=frame,
