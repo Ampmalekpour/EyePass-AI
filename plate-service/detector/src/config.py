@@ -188,11 +188,21 @@ ERROR_RESTART_COUNTER_RESET_AFTER_SEC = 600.0
 MIN_TRACK_AGE_FOR_CROSSING = 5
 MIN_CONFIDENCE_FOR_CROSSING = 0.40
 CROSSING_COOLDOWN_FRAMES = 30
-ROI_ENTRY_CONFIRMATION_FRAMES = 3
-MIN_CONFIDENCE_FOR_ROI = 0.35
-STOP_TIME_SECONDS = 3.0
-STOP_VELOCITY_THRESHOLD = 8.0  # px/s
-STOP_MIN_SAMPLES = 10
+# ---- stop ROI ("stopped inside the stop region") ------------------------
+# A plate is "stopped" when it has been inside the stop ROI for at least
+# STOP_TIME_SECONDS (counted from the confirmed entry) and has moved no more
+# than STOP_VELOCITY_THRESHOLD px/s over the last STOP_VELOCITY_WINDOW_SEC
+# seconds. Eased from 2 / 3 frames, 0.35, 3 s, 8 px/s, 10 samples, whole stay.
+ROI_ENTRY_CONFIRMATION_FRAMES = 2   # detection frames inside before the entry counts
+MIN_CONFIDENCE_FOR_ROI = 0.30       # average detection confidence needed to count as inside
+STOP_TIME_SECONDS = 2.0             # time in the ROI before a stop can be reported
+STOP_MIN_SAMPLES = 6                # position samples needed in the ROI
+STOP_VELOCITY_THRESHOLD = 20.0      # px/s, net movement over the window (frame pixels)
+# Speed is measured over the LAST this-many seconds (net displacement, so box
+# jitter does not count as movement). A car that drove through the ROI and then
+# stopped is detected once it has been still for this long. 0 = the old rule:
+# path length averaged over the whole stay since entry.
+STOP_VELOCITY_WINDOW_SEC = 1.5
 TRIGGER_POSITION_HISTORY_MAX = 30
 TRIGGER_CONFIDENCE_HISTORY_MAX = 10
 TRIGGER_VELOCITY_WINDOW = 10

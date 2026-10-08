@@ -150,5 +150,33 @@ class RoiTests(unittest.TestCase):
         self.assertIsNone(events["stopped_roi"])
 
 
+class StopVelocityTests(unittest.TestCase):
+    def test_moving_then_stopped_is_a_stop_with_the_window_rule(self):
+        from triggers import _roi_velocity
+        saved = config.STOP_VELOCITY_WINDOW_SEC
+        try:
+            config.STOP_VELOCITY_WINDOW_SEC = 1.5
+            # drives 600 px in 3 s, then sits still for 2 s
+            pos = [(100 + 200 * i, 50) for i in range(4)] + [(700, 50)] * 5
+            ts = [0.0, 1.0, 2.0, 3.0] + [3.5, 4.0, 4.5, 5.0, 5.5]
+            self.assertLessEqual(_roi_velocity(pos, ts), config.STOP_VELOCITY_THRESHOLD)
+            config.STOP_VELOCITY_WINDOW_SEC = 0          # old rule: whole stay
+            self.assertGreater(_roi_velocity(pos, ts), config.STOP_VELOCITY_THRESHOLD)
+        finally:
+            config.STOP_VELOCITY_WINDOW_SEC = saved
+
+    def test_still_moving_is_not_a_stop(self):
+        from triggers import _roi_velocity
+        pos = [(100 + 40 * i, 50) for i in range(10)]
+        ts = [0.5 * i for i in range(10)]            # 80 px/s
+        self.assertGreater(_roi_velocity(pos, ts), config.STOP_VELOCITY_THRESHOLD)
+
+    def test_jitter_is_not_movement(self):
+        from triggers import _roi_velocity
+        pos = [(300 + (i % 2) * 2, 50) for i in range(12)]
+        ts = [0.25 * i for i in range(12)]
+        self.assertLessEqual(_roi_velocity(pos, ts), config.STOP_VELOCITY_THRESHOLD)
+
+
 if __name__ == "__main__":
     unittest.main()
