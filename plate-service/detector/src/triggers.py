@@ -139,6 +139,30 @@ def normalize_stop_roi(stop_roi):
         return np.array([], dtype=np.int32)
 
 
+def _roi_velocity(positions, timestamps) -> float:
+    """Speed (px/s) of the plate inside the stop ROI.
+
+    STOP_VELOCITY_WINDOW_SEC > 0: net displacement over the last window
+    seconds (jitter of the box does not count; a car that has stopped is
+    recognised once it was still for that long).
+    STOP_VELOCITY_WINDOW_SEC = 0: the original rule, path length over the
+    whole stay since entry."""
+    pos = np.array(positions, dtype=float)
+    ts = np.array(timestamps, dtype=float)
+    if len(pos) < 2:
+        return 0.0
+    window = float(getattr(config, "STOP_VELOCITY_WINDOW_SEC", 0.0) or 0.0)
+    if window > 0:
+        keep = ts >= ts[-1] - window
+        if keep.sum() >= 2:
+            p, t = pos[keep], ts[keep]
+            dt = float(t[-1] - t[0])
+            return float(np.linalg.norm(p[-1] - p[0]) / dt) if dt > 0 else 0.0
+    total_dist = float(np.sum(np.linalg.norm(np.diff(pos, axis=0), axis=1)))
+    total_time = float(ts[-1] - ts[0])
+    return total_dist / total_time if total_time > 0 else 0.0
+
+
 def process_track_triggers(
     trigger_states: Dict[int, TriggerTrackState],
     line_points: Tuple[Tuple[float, float], Tuple[float, float]],
@@ -264,15 +288,7 @@ def process_track_triggers(
                 elapsed = current_time - state.roi_entry_time
 
                 if elapsed >= config.STOP_TIME_SECONDS and not state.stop_reported:
-                    positions = np.array(state.roi_position_buffer)
-                    timestamps = np.array(state.roi_timestamp_buffer)
-
-                    total_dist = 0.0
-                    for i in range(1, len(positions)):
-                        total_dist += np.linalg.norm(positions[i] - positions[i - 1])
-
-                    total_time = timestamps[-1] - timestamps[0]
-                    avg_velocity = total_dist / total_time if total_time > 0 else 0.0
+                    avg_velocity = _roi_velocity(state.roi_position_buffer, state.roi_timestamp_buffer)
 
                     if avg_velocity <= config.STOP_VELOCITY_THRESHOLD:
                         events["stopped_roi"] = {
