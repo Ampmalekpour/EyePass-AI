@@ -240,6 +240,16 @@ class DebugRecorder:
                 self.writer.release()
             except Exception:
                 pass
+            try:
+                size_mb = os.path.getsize(self.segment_path) / 1e6 if self.segment_path else 0.0
+                msg = (f"[DEBUG-REC][{self.camera_id}] segment CLOSED "
+                       f"{os.path.basename(self.segment_path or '')} ({size_mb:.0f} MB)")
+                if self.logger:
+                    self.logger.info(msg)
+                else:
+                    print(msg, flush=True)
+            except Exception:
+                pass
         self.writer = None
         if self.jsonl_fh is not None:
             try:
