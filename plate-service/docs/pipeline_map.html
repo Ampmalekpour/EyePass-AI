@@ -117,6 +117,32 @@ td.v{white-space:nowrap;font-weight:600;color:var(--amber)}
 .flowtitle{font-size:14px;font-weight:600;margin:0 0 8px;color:var(--muted)}
 @media (max-width:640px){ .step .who{float:none;display:inline-block;margin:0 0 4px} }
 @media print{ nav{display:none} .svgbox{overflow:visible} }
+.flowsvg{display:block;background:var(--panel)}
+.flowsvg .nd{stroke-width:1.5}
+.flowsvg .tt{font:12.5px system-ui,sans-serif;fill:var(--ink)}
+.flowsvg .tt.b{font-weight:600}
+.flowsvg .ed{fill:none;stroke-width:1.6;stroke-linejoin:round}
+.flowsvg .e-n{stroke:var(--muted)} .flowsvg .e-y{stroke:var(--green)} .flowsvg .e-x{stroke:var(--red)}
+.flowsvg .e-d{stroke:var(--purple)} .flowsvg .e-l{stroke:var(--amber);stroke-dasharray:6 4}
+.flowsvg .mk-n{fill:var(--muted)} .flowsvg .mk-y{fill:var(--green)} .flowsvg .mk-x{fill:var(--red)} .flowsvg .mk-d{fill:var(--purple)} .flowsvg .mk-l{fill:var(--amber)}
+.flowsvg .lb{font:11.5px system-ui,sans-serif;fill:var(--muted);paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
+.flowsvg .lb-y{fill:var(--green);font-weight:600} .flowsvg .lb-x{fill:var(--red);font-weight:600}
+.flowsvg .lb-d{fill:var(--purple)} .flowsvg .lb-l{fill:var(--amber)}
+.flowsvg .lane-band{fill:transparent;stroke:var(--line);stroke-width:1} .flowsvg .lane-band.alt{fill:color-mix(in srgb,var(--soft) 60%,transparent)}
+.flowsvg .lane-name{font:600 13px system-ui,sans-serif;fill:var(--muted)}
+.flowsvg .chart-title{font:600 14px system-ui,sans-serif;fill:var(--muted)}
+.flowsvg .c-blue{fill:var(--blue-bg);stroke:var(--blue)} .flowsvg .c-green{fill:var(--green-bg);stroke:var(--green)}
+.flowsvg .c-amber{fill:var(--amber-bg);stroke:var(--amber)} .flowsvg .c-purple{fill:var(--purple-bg);stroke:var(--purple)}
+.flowsvg .c-red{fill:var(--red-bg);stroke:var(--red)} .flowsvg .c-grey{fill:var(--soft);stroke:var(--line)} .flowsvg .c-teal{fill:var(--teal-bg);stroke:var(--teal)}
+
+.chartbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:12px 0 4px;overflow:hidden}
+.chartbar{display:flex;gap:6px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--soft);font-size:12.5px;color:var(--muted)}
+.chartbar b{color:var(--ink);font-size:13px;margin-right:auto}
+.chartbar button{font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:2px 9px;cursor:pointer}
+.chartscroll{overflow:auto;max-height:86vh}
+.key{display:flex;gap:16px;flex-wrap:wrap;margin:8px 0 0;font-size:12.5px;color:var(--muted);align-items:center}
+.key i{display:inline-block;width:26px;height:0;border-top:2px solid;vertical-align:middle;margin-right:5px}
+.key .ky{border-color:var(--green)} .key .kn{border-color:var(--red)} .key .kd{border-color:var(--purple)} .key .kl{border-color:var(--amber);border-top-style:dashed} .key .kg{border-color:var(--muted)}
 </style>
 </head>
 <body>
@@ -135,23 +161,12 @@ td.v{white-space:nowrap;font-weight:600;color:var(--amber)}
 </header>
 
 <nav><div class="in">
-  <a href="#map">1 Services</a>
-  <a href="#boot">2 Startup</a>
-  <a href="#camera">3 Camera lifecycle</a>
-  <a href="#frame">4 Frame loop</a>
-  <a href="#seq">5 One vehicle, end to end</a>
-  <a href="#ocr">6 OCR worker</a>
-  <a href="#hub">7 Control hub</a>
-  <a href="#redis">8 Redis keys</a>
-  <a href="#images">9 Images</a>
-  <a href="#timeouts">10 All timeouts</a>
-  <a href="#findings">11 Findings</a>
+  <a href="#map">1 Services</a><a href="#overview">2 Whole pipeline</a><a href="#boot">3 Startup</a><a href="#camera">4 Cameras</a>
+  <a href="#frame">5 Detector</a><a href="#ocr">6 OCR</a><a href="#hub">7 Control hub</a><a href="#seq">8 Sequence</a>
+  <a href="#redis">9 Redis keys</a><a href="#images">10 Images</a><a href="#timeouts">11 Timeouts</a><a href="#findings">12 Findings</a>
   <button id="theme" type="button">Theme</button>
 </div></nav>
-
 <main>
-
-<!-- ============================================================= 1 -->
 <section id="map">
   <h2><span class="no">1</span>Services and how they talk</h2>
   <p class="lead">Seven runtime pieces. Redis is the only bus: nothing calls another service directly except the video path
@@ -300,165 +315,588 @@ td.v{white-space:nowrap;font-weight:600;color:var(--amber)}
   </svg>
   </div>
 </section>
-
-<!-- ============================================================= 2 -->
-<section id="boot">
-  <h2><span class="no">2</span>Startup — what happens when containers come up</h2>
-  <p class="lead">Each service starts independently and waits for Redis. Nothing starts processing frames until a camera is activated
-  (or the saved ledger of active cameras is replayed).</p>
-  <div class="cols">
-    <div>
-      <p class="flowtitle">plate_detector</p>
-      <div class="flow" id="f-boot-det"></div>
-    </div>
-    <div>
-      <p class="flowtitle">plate_ocr</p>
-      <div class="flow" id="f-boot-ocr"></div>
-      <p class="flowtitle" style="margin-top:18px">plate_control_hub</p>
-      <div class="flow" id="f-boot-hub"></div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================================================= 3 -->
-<section id="camera">
-  <h2><span class="no">3</span>Camera lifecycle — register, activate, offline, restart</h2>
-  <p class="lead">Camera configuration and the on/off command arrive through Redis. The "active" decision is stored first
-  (a durable ledger), so a crash or reboot resumes exactly the same set of cameras.</p>
-  <div class="flow" id="f-camera"></div>
-</section>
-
-<!-- ============================================================= 4 -->
-<section id="frame">
-  <h2><span class="no">4</span>Detector frame loop — from pixels to a task for OCR</h2>
-  <p class="lead">One loop per engine. It never blocks on Redis or OCR: events and tasks go to an in-memory outbox that a separate thread delivers.</p>
-  <div class="cols">
-    <div>
-      <p class="flowtitle">A. Reader thread (one per camera)</p>
-      <div class="flow" id="f-reader"></div>
-      <p class="flowtitle" style="margin-top:18px">C. Triggers (per track, per detected frame)</p>
-      <div class="flow" id="f-triggers"></div>
-    </div>
-    <div>
-      <p class="flowtitle">B. Engine loop (all cameras of the engine)</p>
-      <div class="flow" id="f-loop"></div>
-    </div>
-  </div>
-  <p class="flowtitle" style="margin-top:22px">D. Sending crops to OCR (<code>_try_submit</code>) and ending a track</p>
-  <div class="cols">
-    <div class="flow" id="f-submit"></div>
-    <div class="flow" id="f-endtrack"></div>
-  </div>
-  <p class="flowtitle" style="margin-top:22px">E. Cadence and capacity (CPU)</p>
-  <div class="card">
-    <ul class="tight">
-      <li><b>Capacity calibration</b> (engine 0, at startup): measures the loop time for 1, 2, 3 … <span class="chip n">12</span> cameras
-        (<span class="chip n">3</span> warm-up + <span class="chip n">20</span> timed rounds, p95), budget
-        <span class="mono">detect_every × 1000 / 25 fps × 0.7</span> = <span class="chip t">28 ms</span> at one camera; stops after
-        <span class="chip n">2</span> consecutive misses. Stored in <span class="chip k">plate:internal:detector:capacity</span> and <code>/health</code>.</li>
-      <li><b>Auto-degrade</b> (<code>CAPACITY_AUTO_DEGRADE=true</code>): when cameras exceed capacity, the detection interval per camera is
-        computed from the measurements (not fixed steps), never below <span class="chip n">DETECT_EVERY_N_FRAMES = 1</span>, never slower than
-        <span class="chip n">8 fps</span> (<code>DETECT_MIN_FPS</code>). Frames in between are "coasted" (no inference, tracker not updated).
-        Logged as 🐢 lowered / 🐇 raised.</li>
-      <li><b>Missed frames</b>: the reader keeps only the newest frame; frames replaced before the loop reached them are counted as <i>missed</i>
-        in the <code>[PERF]</code> line. Coasted frames are separate (deliberately skipped).</li>
-      <li><b>Engine placement</b>: pick the engine with the fewest cameras; start a new engine when full
-        (GPU <span class="chip n">6</span>, CPU <span class="chip n">16</span>). Rebalance check every <span class="chip t">30 s</span>.</li>
-    </ul>
-  </div>
-</section>
-
-<!-- ============================================================= 5 -->
+<section id="overview"><h2><span class="no">2</span>Whole pipeline — flowchart 1</h2><p class="lead">Everything on one page, in swimlanes: camera registration, the detector loop, Redis queues, OCR, the control hub, and the record the backend reads. Use Fit / + / − to zoom; the detailed flowcharts below zoom into each part.</p><div class="key"><span><i class="ky"></i>yes</span><span><i class="kn"></i>no</span><span><i class="kd"></i>data through Redis</span><span><i class="kl"></i>loop / feedback</span><span><i class="kg"></i>normal flow</span><span>◇ decision</span><span>▭ step</span><span>⛁ Redis queue / store</span></div><div class="chartbox"><div class="chartbar"><b>Flowchart 1 — whole pipeline</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1830" viewBox="0 0 1830 2115" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c2n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c2y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c2x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c2d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c2l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<rect class="lane-band " x="0.0" y="0" width="210" height="2115"/>
+<text class="lane-name" x="105" y="24" text-anchor="middle">Backend</text>
+<rect class="lane-band alt" x="210.0" y="0" width="230" height="2115"/>
+<text class="lane-name" x="325" y="24" text-anchor="middle">camera_stream + MediaMTX</text>
+<rect class="lane-band " x="440.0" y="0" width="360" height="2115"/>
+<text class="lane-name" x="620" y="24" text-anchor="middle">plate_detector</text>
+<rect class="lane-band alt" x="810.0" y="0" width="260" height="2115"/>
+<text class="lane-name" x="940" y="24" text-anchor="middle">Redis</text>
+<rect class="lane-band " x="1070.0" y="0" width="270" height="2115"/>
+<text class="lane-name" x="1205" y="24" text-anchor="middle">plate_ocr (3 workers)</text>
+<rect class="lane-band alt" x="1340.0" y="0" width="260" height="2115"/>
+<text class="lane-name" x="1470" y="24" text-anchor="middle">control_hub</text>
+<rect class="lane-band " x="1650.0" y="0" width="170" height="2115"/>
+<text class="lane-name" x="1735" y="24" text-anchor="middle">MinIO</text>
+<path class="ed e-n" d="M200.9 110.0 L228.2 110.0" marker-end="url(#c2n)"/>
+<path class="ed e-n" d="M105.0 142.2 L105.0 265.5" marker-end="url(#c2n)"/>
+<path class="ed e-d" d="M325.0 141.2 L325.0 380.0 L512.9 380.0" marker-end="url(#c2d)"/>
+<text class="lb lb-d" x="332.0" y="205.2">camera:events</text>
+<text class="lb lb-d" x="332.0" y="217.2">(online / offline)</text>
+<path class="ed e-d" d="M194.0 290.0 L855.0 290.0" marker-end="url(#c2d)"/>
+<text class="lb lb-d" x="524.5" y="284.0" text-anchor="middle">activated</text>
+<path class="ed e-d" d="M940.0 312.8 L940.0 380.0 L727.1 380.0" marker-end="url(#c2d)"/>
+<path class="ed e-n" d="M620.0 419.0 L620.0 508.8" marker-end="url(#c2n)"/>
+<path class="ed e-n" d="M620.0 571.2 L620.0 655.0" marker-end="url(#c2n)"/>
+<path class="ed e-y" d="M620.0 725.0 L620.0 816.5" marker-end="url(#c2y)"/>
+<text class="lb lb-y" x="627.0" y="753.0">yes</text>
+<path class="ed e-l" d="M522.2 690.0 L405.0 690.0 L405.0 540.0 L499.1 540.0" marker-end="url(#c2l)"/>
+<text class="lb lb-l" x="412.0" y="630.6">no: next frame</text>
+<path class="ed e-n" d="M620.0 863.5 L620.0 955.0" marker-end="url(#c2n)"/>
+<path class="ed e-d" d="M747.9 840.0 L770.0 840.0 L845.0 840.0" marker-end="url(#c2d)"/>
+<path class="ed e-d" d="M747.9 840.0 L770.0 840.0 L770.0 1070.0 L845.0 1070.0" marker-end="url(#c2d)"/>
+<path class="ed e-y" d="M620.0 1025.0 L620.0 1106.5" marker-end="url(#c2y)"/>
+<text class="lb lb-y" x="627.0" y="1053.0">yes</text>
+<path class="ed e-l" d="M542.9 990.0 L365.0 990.0 L365.0 540.0 L499.1 540.0" marker-end="url(#c2l)"/>
+<text class="lb lb-l" x="372.0" y="790.9">no</text>
+<path class="ed e-d" d="M741.0 1130.0 L770.0 1130.0 L770.0 840.0 L845.0 840.0" marker-end="url(#c2d)"/>
+<text class="lb lb-d" x="777.0" y="1123.0">track_ended</text>
+<path class="ed e-d" d="M1035.0 1070.0 L1094.4 1070.0" marker-end="url(#c2d)"/>
+<path class="ed e-n" d="M1205.0 1093.5 L1205.0 1161.5" marker-end="url(#c2n)"/>
+<path class="ed e-n" d="M1205.0 1208.5 L1205.0 1273.0" marker-end="url(#c2n)"/>
+<path class="ed e-y" d="M1205.0 1367.0 L1205.0 1441.5" marker-end="url(#c2y)"/>
+<text class="lb lb-y" x="1212.0" y="1411.0">valid → ok · invalid → invalid</text>
+<path class="ed e-n" d="M1205.0 1488.5 L1205.0 1541.5" marker-end="url(#c2n)"/>
+<path class="ed e-n" d="M1301.8 1465.0 L1670.0 1465.0" marker-end="url(#c2n)"/>
+<text class="lb lb-n" x="1391.8" y="1459.0" text-anchor="middle">2 PNG</text>
+<path class="ed e-d" d="M1080.6 1565.0 L1035.0 1565.0" marker-end="url(#c2d)"/>
+<path class="ed e-d" d="M1035.0 840.0 L1366.3 840.0" marker-end="url(#c2d)"/>
+<path class="ed e-n" d="M1470.0 871.2 L1470.0 928.8" marker-end="url(#c2n)"/>
+<path class="ed e-n" d="M1470.0 991.2 L1470.0 1053.0" marker-end="url(#c2n)"/>
+<path class="ed e-d" d="M1345.6 960.0 L1044.7 960.0" marker-end="url(#c2d)"/>
+<text class="lb lb-d" x="1315.6" y="954.0" text-anchor="middle">request</text>
+<path class="ed e-x" d="M1470.0 1147.0 L1470.0 1218.8" marker-end="url(#c2x)"/>
+<text class="lb lb-x" x="1477.0" y="1175.0">no</text>
+<path class="ed e-y" d="M1562.6 1100.0 L1620.0 1100.0 L1620.0 1565.0 L1587.5 1565.0" marker-end="url(#c2y)"/>
+<text class="lb lb-y" x="1602.6" y="1094.0" text-anchor="middle">yes: publish now</text>
+<path class="ed e-n" d="M1470.0 1281.2 L1470.0 1533.8" marker-end="url(#c2n)"/>
+<path class="ed e-d" d="M1035.0 1565.0 L1352.5 1565.0" marker-end="url(#c2d)"/>
+<path class="ed e-n" d="M1470.0 1596.2 L1470.0 1676.5" marker-end="url(#c2n)"/>
+<path class="ed e-d" d="M1373.2 1700.0 L1320.0 1700.0 L940.0 1700.0 L940.0 982.8" marker-end="url(#c2d)"/>
+<text class="lb lb-d" x="1303.2" y="1694.0" text-anchor="middle">ack + satisfied</text>
+<path class="ed e-n" d="M1470.0 1723.5 L1470.0 1800.0" marker-end="url(#c2n)"/>
+<path class="ed e-y" d="M1470.0 1870.0 L1470.0 1951.5" marker-end="url(#c2y)"/>
+<text class="lb lb-y" x="1477.0" y="1898.0">yes</text>
+<path class="ed e-l" d="M1614.4 1835.0 L1655.0 1835.0 L1655.0 840.0 L1573.7 840.0" marker-end="url(#c2l)"/>
+<text class="lb lb-l" x="1662.0" y="1819.6">no: keep waiting</text>
+<path class="ed e-d" d="M1366.3 1975.0 L1036.9 1975.0" marker-end="url(#c2d)"/>
+<path class="ed e-d" d="M843.1 1975.0 L197.4 1975.0" marker-end="url(#c2d)"/>
+<text class="lb lb-d" x="643.1" y="1969.0" text-anchor="middle">RPUSH</text>
+<path class="ed e-n" d="M1735.0 1495.5 L1735.0 2065.0 L105.0 2065.0 L105.0 1999.5" marker-end="url(#c2n)"/>
+<text class="lb lb-n" x="1404.5" y="2059.0" text-anchor="middle">backend loads images by path</text>
+<path class="ed e-l" d="M835.3 960.0 L810.0 960.0 L810.0 690.0 L717.8 690.0" marker-end="url(#c2l)"/>
+<text class="lb lb-l" x="817.0" y="739.3">ack frees the lock;</text>
+<text class="lb lb-l" x="817.0" y="751.3">satisfied stops OCR</text>
+<rect class="nd c-green" x="9.099999999999994" y="77.75" width="191.8" height="64.5" rx="32.25"/><text class="tt b" x="105" y="98.5" text-anchor="middle">Save camera</text><text class="tt" x="105" y="114.0" text-anchor="middle">HSET cameras:config</text><text class="tt" x="105" y="129.5" text-anchor="middle">PUBLISH config:updated</text>
+<rect class="nd c-blue" x="228.2" y="78.75" width="193.60000000000002" height="62.5" rx="7"/><text class="tt" x="325" y="98.5" text-anchor="middle">Register in MediaMTX</text><text class="tt" x="325" y="114.0" text-anchor="middle">monitor online / offline</text><text class="tt" x="325" y="129.5" text-anchor="middle">(offline held 10 s)</text>
+<rect class="nd c-green" x="16.0" y="265.5" width="178.0" height="49.0" rx="24.5"/><text class="tt b" x="105" y="286.2" text-anchor="middle">Activate camera</text><text class="tt" x="105" y="301.8" text-anchor="middle">LPUSH cmd:ai:request</text>
+<path class="nd c-purple" d="M855.0 274.25 A85.0 7 0 0 1 1025.0 274.25 V305.75 A85.0 7 0 0 1 855.0 305.75 Z"/><path class="nd c-purple" style="fill:none" d="M855.0 274.25 A85.0 7 0 0 0 1025.0 274.25"/><text class="tt b" x="940" y="298.0" text-anchor="middle">cmd:ai:request</text>
+<rect class="nd c-blue" x="512.85" y="341.0" width="214.3" height="78.0" rx="7"/><text class="tt" x="620" y="360.8" text-anchor="middle">Command worker (BRPOP 2 s)</text><text class="tt" x="620" y="376.2" text-anchor="middle">write active_cameras ledger</text><text class="tt" x="620" y="391.8" text-anchor="middle">attach camera: RTSP reader,</text><text class="tt" x="620" y="407.2" text-anchor="middle">tracker, model instance</text>
+<rect class="nd c-blue" x="499.05" y="508.75" width="241.9" height="62.5" rx="7"/><text class="tt" x="620" y="528.5" text-anchor="middle">Newest frame → crop ROI</text><text class="tt" x="620" y="544.0" text-anchor="middle">→ YOLO detect → BYTETracker</text><text class="tt" x="620" y="559.5" text-anchor="middle">(auto-degrade if over capacity)</text>
+<polygon class="nd c-amber" points="620,654.975 717.8,690 620,725.025 522.2,690"/><text class="tt" x="620" y="686.2" text-anchor="middle">Trigger fired or</text><text class="tt" x="620" y="701.8" text-anchor="middle">hub asked again?</text>
+<rect class="nd c-blue" x="492.15" y="816.5" width="255.70000000000002" height="47.0" rx="7"/><text class="tt" x="620" y="836.2" text-anchor="middle">Build task: ≤5 crops + 1 frame</text><text class="tt" x="620" y="851.8" text-anchor="middle">(JPEG) · emit trigger / submitted</text>
+<polygon class="nd c-amber" points="620,954.975 697.1,990 620,1025.025 542.9,990"/><text class="tt" x="620" y="986.2" text-anchor="middle">Track unseen</text><text class="tt" x="620" y="1001.8" text-anchor="middle">&gt; 30 frames?</text>
+<rect class="nd c-blue" x="499.05" y="1106.5" width="241.9" height="47.0" rx="7"/><text class="tt" x="620" y="1126.2" text-anchor="middle">leave_scene task (if rules)</text><text class="tt" x="620" y="1141.8" text-anchor="middle">emit track_ended · forget track</text>
+<path class="nd c-purple" d="M845.0 824.25 A95.0 7 0 0 1 1035.0 824.25 V855.75 A95.0 7 0 0 1 845.0 855.75 Z"/><path class="nd c-purple" style="fill:none" d="M845.0 824.25 A95.0 7 0 0 0 1035.0 824.25"/><text class="tt b" x="940" y="848.0" text-anchor="middle">hub:events (STREAM)</text>
+<path class="nd c-purple" d="M845.0 1054.25 A95.0 7 0 0 1 1035.0 1054.25 V1085.75 A95.0 7 0 0 1 845.0 1085.75 Z"/><path class="nd c-purple" style="fill:none" d="M845.0 1054.25 A95.0 7 0 0 0 1035.0 1054.25"/><text class="tt b" x="940" y="1078.0" text-anchor="middle">ocr:tasks (LIST)</text>
+<rect class="nd c-green" x="1094.4" y="1046.5" width="221.20000000000002" height="47.0" rx="7"/><text class="tt" x="1205" y="1066.2" text-anchor="middle">BRPOP task (1 s)</text><text class="tt" x="1205" y="1081.8" text-anchor="middle">vote class: car / motorcycle</text>
+<rect class="nd c-green" x="1139.25" y="1161.5" width="131.5" height="47.0" rx="7"/><text class="tt" x="1205" y="1181.2" text-anchor="middle">OCR every crop</text><text class="tt" x="1205" y="1196.8" text-anchor="middle">vote characters</text>
+<polygon class="nd c-amber" points="1205,1272.9625 1328.675,1320 1205,1367.0375 1081.325,1320"/><text class="tt" x="1205" y="1308.5" text-anchor="middle">Valid?</text><text class="tt" x="1205" y="1324.0" text-anchor="middle">conf ≥ 0.70, 8 chars,</text><text class="tt" x="1205" y="1339.5" text-anchor="middle">plate pattern</text>
+<rect class="nd c-green" x="1108.2" y="1441.5" width="193.60000000000002" height="47.0" rx="7"/><text class="tt" x="1205" y="1461.2" text-anchor="middle">Upload crop + best frame</text><text class="tt" x="1205" y="1476.8" text-anchor="middle">(2 PNG) to MinIO</text>
+<rect class="nd c-green" x="1080.6" y="1541.5" width="248.8" height="47.0" rx="7"/><text class="tt" x="1205" y="1561.2" text-anchor="middle">Answer ALWAYS sent</text><text class="tt" x="1205" y="1576.8" text-anchor="middle">(ok / invalid / skipped / error)</text>
+<path class="nd c-purple" d="M1670.0 1441.5 A65.0 7 0 0 1 1800.0 1441.5 V1488.5 A65.0 7 0 0 1 1670.0 1488.5 Z"/><path class="nd c-purple" style="fill:none" d="M1670.0 1441.5 A65.0 7 0 0 0 1800.0 1441.5"/><text class="tt b" x="1735" y="1465.2" text-anchor="middle">MinIO</text><text class="tt" x="1735" y="1480.8" text-anchor="middle">private bucket</text>
+<path class="nd c-purple" d="M845.0 1549.25 A95.0 7 0 0 1 1035.0 1549.25 V1580.75 A95.0 7 0 0 1 845.0 1580.75 Z"/><path class="nd c-purple" style="fill:none" d="M845.0 1549.25 A95.0 7 0 0 0 1035.0 1549.25"/><text class="tt b" x="940" y="1573.0" text-anchor="middle">hub:results (STREAM)</text>
+<rect class="nd c-amber" x="1366.3" y="808.75" width="207.4" height="62.5" rx="7"/><text class="tt" x="1470" y="828.5" text-anchor="middle">Read events</text><text class="tt" x="1470" y="844.0" text-anchor="middle">(track_started, submitted,</text><text class="tt" x="1470" y="859.5" text-anchor="middle">trigger, track_ended)</text>
+<rect class="nd c-amber" x="1345.6" y="928.75" width="248.8" height="62.5" rx="7"/><text class="tt" x="1470" y="948.5" text-anchor="middle">Every 3 s (periodic cameras):</text><text class="tt" x="1470" y="964.0" text-anchor="middle">ask detector to re-read if</text><text class="tt" x="1470" y="979.5" text-anchor="middle">not satisfied, nothing in flight</text>
+<path class="nd c-purple" d="M835.3345 944.25 A104.6655 7 0 0 1 1044.6655 944.25 V975.75 A104.6655 7 0 0 1 835.3345 975.75 Z"/><path class="nd c-purple" style="fill:none" d="M835.3345 944.25 A104.6655 7 0 0 0 1044.6655 944.25"/><text class="tt b" x="940" y="968.0" text-anchor="middle">hub:ctl:&lt;engine&gt; (LIST)</text>
+<polygon class="nd c-amber" points="1470,1052.9625 1562.625,1100 1470,1147.0375 1377.375,1100"/><text class="tt" x="1470" y="1088.5" text-anchor="middle">Trigger fired:</text><text class="tt" x="1470" y="1104.0" text-anchor="middle">result known or</text><text class="tt" x="1470" y="1119.5" text-anchor="middle">satisfied?</text>
+<rect class="nd c-amber" x="1369.75" y="1218.75" width="200.5" height="62.5" rx="7"/><text class="tt" x="1470" y="1238.5" text-anchor="middle">Defer trigger</text><text class="tt" x="1470" y="1254.0" text-anchor="middle">wait ≤ 15 s (task queued)</text><text class="tt" x="1470" y="1269.5" text-anchor="middle">or ≤ 3 s (no task)</text>
+<rect class="nd c-amber" x="1352.5" y="1533.75" width="235.0" height="62.5" rx="7"/><text class="tt" x="1470" y="1553.5" text-anchor="middle">Result arrives:</text><text class="tt" x="1470" y="1569.0" text-anchor="middle">vote (sum of confidences)</text><text class="tt" x="1470" y="1584.5" text-anchor="middle">satisfied if ≥ 0.85 or 3 agree</text>
+<rect class="nd c-amber" x="1373.2" y="1676.5" width="193.60000000000002" height="47.0" rx="7"/><text class="tt" x="1470" y="1696.2" text-anchor="middle">Publish waiting triggers</text><text class="tt" x="1470" y="1711.8" text-anchor="middle">send ack to detector</text>
+<polygon class="nd c-amber" points="1470,1799.975 1614.375,1835 1470,1870.025 1325.625,1835"/><text class="tt" x="1470" y="1831.2" text-anchor="middle">Track ended and all tasks</text><text class="tt" x="1470" y="1846.8" text-anchor="middle">answered (or 30 s)?</text>
+<rect class="nd c-amber" x="1366.3" y="1951.5" width="207.4" height="47.0" rx="7"/><text class="tt" x="1470" y="1971.2" text-anchor="middle">Publish final</text><text class="tt" x="1470" y="1986.8" text-anchor="middle">(gate: ≥8 frames, ≥1 crop)</text>
+<path class="nd c-purple" d="M843.1315 1959.25 A96.8685 7 0 0 1 1036.8685 1959.25 V1990.75 A96.8685 7 0 0 1 843.1315 1990.75 Z"/><path class="nd c-purple" style="fill:none" d="M843.1315 1959.25 A96.8685 7 0 0 0 1036.8685 1959.25"/><text class="tt b" x="940" y="1983.0" text-anchor="middle">plate:vehicle:results</text>
+<rect class="nd c-red" x="12.549999999999997" y="1950.5" width="184.9" height="49.0" rx="24.5"/><text class="tt b" x="105" y="1971.2" text-anchor="middle">Backend reads</text><text class="tt" x="105" y="1986.8" text-anchor="middle">plate record + images</text>
+</svg></div></div></section>
+<section id="boot"><h2><span class="no">3</span>Startup</h2><p class="lead">What each service does when its container starts.</p><div class="chartbox"><div class="chartbar"><b>Startup — detector · OCR · control hub</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1750" viewBox="0 0 1750 800.55" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c10n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c10y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c10x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c10d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c10l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M280.0 63.5 L280.0 89.5" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M280.0 136.5 L280.0 162.5" marker-end="url(#c10n)"/>
+<path class="ed e-y" d="M280.0 224.5 L280.0 250.5" marker-end="url(#c10y)"/>
+<text class="lb lb-y" x="287.0" y="241.5">yes</text>
+<path class="ed e-n" d="M280.0 282.0 L280.0 308.0" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M280.0 370.5 L280.0 396.5" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M280.0 443.5 L280.0 469.5" marker-end="url(#c10n)"/>
+<path class="ed e-y" d="M280.0 539.5 L280.0 565.5" marker-end="url(#c10y)"/>
+<text class="lb lb-y" x="287.0" y="556.5">yes</text>
+<path class="ed e-n" d="M280.0 612.5 L280.0 638.5" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M280.0 701.0 L280.0 727.0" marker-end="url(#c10n)"/>
+<path class="ed e-x" d="M388.1 193.5 L558.1 193.5" marker-end="url(#c10x)"/>
+<text class="lb lb-x" x="473.1" y="175.5" text-anchor="middle">no: CPU model → fall back to .pt on CPU;</text>
+<text class="lb lb-x" x="473.1" y="187.5" text-anchor="middle">.pt missing → startup error</text>
+<path class="ed e-x" d="M398.5 504.5 L490.0 504.5 L490.0 669.8 L463.1 669.8" marker-end="url(#c10x)"/>
+<text class="lb lb-x" x="458.5" y="486.5" text-anchor="middle">no: stay idle until a camera</text>
+<text class="lb lb-x" x="458.5" y="498.5" text-anchor="middle">is activated</text>
+<path class="ed e-n" d="M980.0 63.5 L980.0 93.5" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M980.0 140.5 L980.0 170.5" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M980.0 233.0 L980.0 263.0" marker-end="url(#c10n)"/>
+<path class="ed e-y" d="M980.0 325.0 L980.0 355.0" marker-end="url(#c10y)"/>
+<text class="lb lb-y" x="987.0" y="344.0">yes</text>
+<path class="ed e-x" d="M1119.2 294.0 L1279.2 294.0" marker-end="url(#c10x)"/>
+<text class="lb lb-x" x="1199.2" y="276.0" text-anchor="middle">no: idle, poll every 0.2 s</text>
+<text class="lb lb-x" x="1199.2" y="288.0" text-anchor="middle">(demand event switches it on)</text>
+<path class="ed e-l" d="M980.0 386.5 L980.0 455.0" marker-end="url(#c10l)"/>
+<path class="ed e-n" d="M1480.0 63.5 L1480.0 93.5" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M1480.0 125.0 L1480.0 155.0" marker-end="url(#c10n)"/>
+<path class="ed e-y" d="M1480.0 225.1 L1480.0 255.1" marker-end="url(#c10y)"/>
+<text class="lb lb-y" x="1487.0" y="244.1">yes</text>
+<path class="ed e-n" d="M1480.0 302.1 L1480.0 332.1" marker-end="url(#c10n)"/>
+<path class="ed e-n" d="M1480.0 379.1 L1480.0 409.1" marker-end="url(#c10n)"/>
+<path class="ed e-x" d="M1325.3 190.0 L1225.3 190.0" marker-end="url(#c10x)"/>
+<text class="lb lb-x" x="1275.3" y="172.0" text-anchor="middle">no: standby, retry</text>
+<text class="lb lb-x" x="1275.3" y="184.0" text-anchor="middle">every ≤ 2 s</text>
+<rect class="nd c-green" x="178.13150000000002" y="30.0" width="203.737" height="33.5" rx="16.75"/><text class="tt b" x="280" y="50.8" text-anchor="middle">plate_detector starts</text>
+<rect class="nd c-blue" x="131.45" y="89.5" width="297.1" height="47.0" rx="7"/><text class="tt" x="280" y="109.2" text-anchor="middle">Probe device: torch.cuda.is_available()</text><text class="tt" x="280" y="124.8" text-anchor="middle">(DETECTION_DEVICE gpu / cpu / auto)</text>
+<polygon class="nd c-amber" points="280,162.5 388.15,193.5 280,224.5 171.85,193.5"/><text class="tt" x="280" y="197.5" text-anchor="middle">Model files found?</text>
+<rect class="nd c-blue" x="155.6" y="250.5" width="248.8" height="31.5" rx="7"/><text class="tt" x="280" y="270.2" text-anchor="middle">Wait for Redis (retry every 2 s)</text>
+<rect class="nd c-blue" x="55.54999999999998" y="308.0" width="448.90000000000003" height="62.5" rx="7"/><text class="tt" x="280" y="327.8" text-anchor="middle">Start threads: command worker · camera events ·</text><text class="tt" x="280" y="343.2" text-anchor="middle">engine status · rebalance (30 s) · heartbeat (10 s, TTL 30 s)</text><text class="tt" x="280" y="358.8" text-anchor="middle">Health server :8010</text>
+<rect class="nd c-blue" x="131.45" y="396.5" width="297.1" height="47.0" rx="7"/><text class="tt" x="280" y="416.2" text-anchor="middle">Self-heal: read internal:detector:state</text><text class="tt" x="280" y="431.8" text-anchor="middle">start_idle(n engines, default 1)</text>
+<polygon class="nd c-amber" points="280,469.5 398.5,504.525 280,539.55 161.5,504.525"/><text class="tt" x="280" y="500.8" text-anchor="middle">Active-camera ledger</text><text class="tt" x="280" y="516.3" text-anchor="middle">not empty?</text>
+<rect class="nd c-green" x="148.7" y="565.55" width="262.6" height="47.0" rx="7"/><text class="tt" x="280" y="585.3" text-anchor="middle">start_process → reconcile:</text><text class="tt" x="280" y="600.8" text-anchor="middle">attach every active, online camera</text>
+<rect class="nd c-blue" x="96.94999999999999" y="638.55" width="366.1" height="62.5" rx="7"/><text class="tt" x="280" y="658.3" text-anchor="middle">Each engine process: build backend (load model),</text><text class="tt" x="280" y="673.8" text-anchor="middle">CPU: capacity calibration (engine 0),</text><text class="tt" x="280" y="689.3" text-anchor="middle">warm-up 10 runs, hub client → emit engine_started</text>
+<rect class="nd c-red" x="162.53750000000002" y="727.05" width="234.92499999999998" height="33.5" rx="16.75"/><text class="tt b" x="280" y="747.8" text-anchor="middle">Engine loop (flowchart 2)</text>
+<rect class="nd c-green" x="897.624" y="30.0" width="164.752" height="33.5" rx="16.75"/><text class="tt b" x="980" y="50.8" text-anchor="middle">plate_ocr starts</text>
+<rect class="nd c-blue" x="838.35" y="93.5" width="283.3" height="47.0" rx="7"/><text class="tt" x="980" y="113.2" text-anchor="middle">Pool starts 3 worker processes</text><text class="tt" x="980" y="128.8" text-anchor="middle">(DEFAULT_WORKER_COUNT or saved count)</text>
+<rect class="nd c-blue" x="814.2" y="170.5" width="331.6" height="62.5" rx="7"/><text class="tt" x="980" y="190.2" text-anchor="middle">Each worker: wait for Redis · load PaddleOCR</text><text class="tt" x="980" y="205.8" text-anchor="middle">car + motorcycle models (≤ 180 s) · warm-up</text><text class="tt" x="980" y="221.2" text-anchor="middle">ensure MinIO private bucket exists</text>
+<polygon class="nd c-amber" points="980,263.0 1119.2,294.0 980,325.0 840.8,294.0"/><text class="tt" x="980" y="298.0" text-anchor="middle">Pool in processing mode?</text>
+<rect class="nd c-green" x="865.95" y="355.0" width="228.10000000000002" height="31.5" rx="7"/><text class="tt" x="980" y="374.8" text-anchor="middle">BRPOP ocr:tasks (flowchart 5)</text>
+<rect class="nd c-grey" x="814.2" y="455.0" width="331.6" height="31.5" rx="7"/><text class="tt" x="980" y="474.8" text-anchor="middle">Watchdog every 5 s: respawn a crashed worker</text>
+<rect class="nd c-green" x="1389.827" y="30.0" width="180.346" height="33.5" rx="16.75"/><text class="tt b" x="1480" y="50.8" text-anchor="middle">control_hub starts</text>
+<rect class="nd c-blue" x="1355.6" y="93.5" width="248.8" height="31.5" rx="7"/><text class="tt" x="1480" y="113.2" text-anchor="middle">Wait for Redis (retry every 2 s)</text>
+<polygon class="nd c-amber" points="1480,155.0 1634.725,190.025 1480,225.05 1325.275,190.025"/><text class="tt" x="1480" y="186.3" text-anchor="middle">Got the leader lease?</text><text class="tt" x="1480" y="201.8" text-anchor="middle">(TTL 15 s, renew every 5 s)</text>
+<rect class="nd c-blue" x="1379.75" y="255.05" width="200.5" height="47.0" rx="7"/><text class="tt" x="1480" y="274.8" text-anchor="middle">Restore track checkpoints</text><text class="tt" x="1480" y="290.3" text-anchor="middle">(hub:track:&lt;uid&gt;)</text>
+<rect class="nd c-blue" x="1296.95" y="332.05" width="366.1" height="47.0" rx="7"/><text class="tt" x="1480" y="351.8" text-anchor="middle">Ensure consumer groups (new group starts at tail)</text><text class="tt" x="1480" y="367.3" text-anchor="middle">re-read unacknowledged entries</text>
+<rect class="nd c-green" x="1359.05" y="409.05" width="241.9" height="47.0" rx="7"/><text class="tt" x="1480" y="428.8" text-anchor="middle">Live loop (flowcharts 6 and 7)</text><text class="tt" x="1480" y="444.3" text-anchor="middle">heartbeat every 10 s (TTL 30 s)</text>
+</svg></div></div></section>
+<section id="camera"><h2><span class="no">4</span>Camera lifecycle</h2><p class="lead">Left: camera_stream registers the camera and decides online / offline. Middle: the backend command (activate / deactivate). Right: online / offline events and the error restart.</p><div class="chartbox"><div class="chartbar"><b>Camera lifecycle — registration, commands, events, error restart</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="2150" viewBox="0 0 2150 1179.55" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c9n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c9y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c9x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c9d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c9l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M250.0 94.5 L250.0 124.5" marker-end="url(#c9n)"/>
+<path class="ed e-n" d="M250.0 171.5 L250.0 201.5" marker-end="url(#c9n)"/>
+<path class="ed e-y" d="M250.0 271.6 L250.0 301.6" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="257.0" y="290.6">yes</text>
+<path class="ed e-n" d="M250.0 348.6 L250.0 378.6" marker-end="url(#c9n)"/>
+<path class="ed e-n" d="M250.0 425.6 L250.0 455.6" marker-end="url(#c9n)"/>
+<path class="ed e-y" d="M167.7 486.6 L50.0 486.6 L50.0 678.1 L83.0 678.1" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="107.7" y="480.6" text-anchor="middle">yes: online at once</text>
+<path class="ed e-x" d="M250.0 517.5 L250.0 547.5" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="257.0" y="536.5">no</text>
+<path class="ed e-y" d="M250.0 617.6 L250.0 647.6" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="257.0" y="636.6">yes: publish offline</text>
+<path class="ed e-x" d="M337.4 582.6 L487.4 582.6" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="412.4" y="576.6" text-anchor="middle">no: keep holding</text>
+<path class="ed e-n" d="M800.0 79.0 L800.0 109.0" marker-end="url(#c9n)"/>
+<path class="ed e-n" d="M800.0 156.0 L800.0 186.0" marker-end="url(#c9n)"/>
+<path class="ed e-y" d="M800.0 248.0 L800.0 278.0" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="807.0" y="267.0">activated</text>
+<path class="ed e-n" d="M800.0 325.0 L800.0 355.0" marker-end="url(#c9n)"/>
+<path class="ed e-n" d="M800.0 386.5 L800.0 416.5" marker-end="url(#c9n)"/>
+<path class="ed e-x" d="M800.0 478.5 L800.0 508.5" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="807.0" y="497.5">no</text>
+<path class="ed e-y" d="M800.0 578.5 L800.0 608.5" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="807.0" y="597.5">yes</text>
+<path class="ed e-d" d="M800.0 671.0 L800.0 701.0" marker-end="url(#c9d)"/>
+<path class="ed e-y" d="M897.8 447.5 L1017.8 447.5" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="957.8" y="441.5" text-anchor="middle">yes: answer OK</text>
+<path class="ed e-x" d="M913.3 543.5 L1033.3 543.5" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="973.3" y="525.5" text-anchor="middle">no: wait for the online event</text>
+<text class="lb lb-x" x="973.3" y="537.5" text-anchor="middle">(answer OK, attach later)</text>
+<path class="ed e-x" d="M851.2 217.0 L1340.0 217.0 L1340.0 255.8" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="875.2" y="211.0" text-anchor="middle">deactivated</text>
+<path class="ed e-d" d="M1340.0 318.2 L1340.0 376.5" marker-end="url(#c9d)"/>
+<path class="ed e-n" d="M1850.0 63.5 L1850.0 93.5" marker-end="url(#c9n)"/>
+<path class="ed e-y" d="M1850.0 155.5 L1850.0 185.5" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="1857.0" y="174.5">online</text>
+<path class="ed e-y" d="M1850.0 255.6 L1850.0 285.6" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="1857.0" y="274.6">yes</text>
+<path class="ed e-x" d="M1710.8 220.5 L1610.8 220.5" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="1660.8" y="214.5" text-anchor="middle">no: ignore</text>
+<path class="ed e-x" d="M1916.8 124.5 L2050.0 124.5 L2050.0 361.0 L1942.6 361.0" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="1940.8" y="118.5" text-anchor="middle">offline</text>
+<path class="ed e-y" d="M1850.0 392.0 L1850.0 422.0" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="1857.0" y="411.0">yes</text>
+<path class="ed e-n" d="M1850.0 469.0 L1850.0 499.0" marker-end="url(#c9n)"/>
+<path class="ed e-x" d="M1850.0 561.0 L1850.0 591.0" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="1857.0" y="580.0">no</text>
+<path class="ed e-y" d="M1989.2 530.0 L2089.2 530.0" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="2039.2" y="524.0" text-anchor="middle">yes: cancel the timer</text>
+<path class="ed e-x" d="M1757.4 361.0 L1657.4 361.0" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="1707.4" y="355.0" text-anchor="middle">no: ignore</text>
+<path class="ed e-n" d="M1850.0 809.0 L1850.0 839.0" marker-end="url(#c9n)"/>
+<path class="ed e-y" d="M1850.0 909.0 L1850.0 939.0" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="1857.0" y="928.0">yes</text>
+<path class="ed e-n" d="M1850.0 970.5 L1850.0 1000.5" marker-end="url(#c9n)"/>
+<path class="ed e-y" d="M1850.0 1062.5 L1850.0 1092.5" marker-end="url(#c9y)"/>
+<text class="lb lb-y" x="1857.0" y="1081.5">yes</text>
+<path class="ed e-x" d="M1690.1 874.0 L1570.1 874.0" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="1630.1" y="868.0" text-anchor="middle">no: stay stopped</text>
+<path class="ed e-x" d="M1752.2 1031.5 L1652.2 1031.5" marker-end="url(#c9x)"/>
+<text class="lb lb-x" x="1702.2" y="1025.5" text-anchor="middle">no: leave it</text>
+<rect class="nd c-green" x="133.39999999999998" y="30.0" width="233.20000000000002" height="64.5" rx="32.25"/><text class="tt b" x="250" y="50.8" text-anchor="middle">camera_stream</text><text class="tt" x="250" y="66.2" text-anchor="middle">backend wrote cameras:config</text><text class="tt" x="250" y="81.8" text-anchor="middle">and published config:updated</text>
+<rect class="nd c-blue" x="80.75" y="124.5" width="338.5" height="47.0" rx="7"/><text class="tt" x="250" y="144.2" text-anchor="middle">sync_cameras → cameras:details</text><text class="tt" x="250" y="159.8" text-anchor="middle">(connected = false, "Waiting for connection")</text>
+<polygon class="nd c-amber" points="250,201.5 404.725,236.525 250,271.55 95.27499999999998,236.525"/><text class="tt" x="250" y="232.8" text-anchor="middle">Camera answers on its</text><text class="tt" x="250" y="248.3" text-anchor="middle">RTSP port? (TCP ping 0.2 s)</text>
+<rect class="nd c-blue" x="91.1" y="301.55" width="317.8" height="47.0" rx="7"/><text class="tt" x="250" y="321.3" text-anchor="middle">Register in MediaMTX</text><text class="tt" x="250" y="336.8" text-anchor="middle">(TCP, sourceOnDemand = false, 1 s timeout)</text>
+<rect class="nd c-blue" x="142.85" y="378.55" width="214.3" height="47.0" rx="7"/><text class="tt" x="250" y="398.3" text-anchor="middle">Poll MediaMTX /paths/list</text><text class="tt" x="250" y="413.8" text-anchor="middle">every 0.5 s (1.5 s timeout)</text>
+<polygon class="nd c-amber" points="250,455.55 332.275,486.55 250,517.55 167.725,486.55"/><text class="tt" x="250" y="490.6" text-anchor="middle">Path "ready"?</text>
+<polygon class="nd c-amber" points="250,547.55 337.45,582.5749999999999 250,617.5999999999999 162.55,582.5749999999999"/><text class="tt" x="250" y="578.8" text-anchor="middle">Offline for</text><text class="tt" x="250" y="594.3" text-anchor="middle">≥ 10 s (hold)?</text>
+<path class="nd c-purple" d="M82.95850000000002 654.5999999999999 A167.04149999999998 7 0 0 1 417.0415 654.5999999999999 V701.5999999999999 A167.04149999999998 7 0 0 1 82.95850000000002 701.5999999999999 Z"/><path class="nd c-purple" style="fill:none" d="M82.95850000000002 654.5999999999999 A167.04149999999998 7 0 0 0 417.0415 654.5999999999999"/><text class="tt b" x="250" y="678.3" text-anchor="middle">cameras:details + PUBLISH camera:events</text><text class="tt" x="250" y="693.8" text-anchor="middle">(connected true / false, error)</text>
+<rect class="nd c-green" x="666.9435" y="30.0" width="266.113" height="49.0" rx="24.5"/><text class="tt b" x="800" y="50.8" text-anchor="middle">Backend: LPUSH cmd:ai:request</text><text class="tt" x="800" y="66.2" text-anchor="middle">{action, camera_id, request_id}</text>
+<rect class="nd c-blue" x="696.3" y="109.0" width="207.4" height="47.0" rx="7"/><text class="tt" x="800" y="128.8" text-anchor="middle">Detector command worker</text><text class="tt" x="800" y="144.2" text-anchor="middle">BRPOP cmd:ai:request (2 s)</text>
+<polygon class="nd c-amber" points="800,186.0 851.225,217.0 800,248.0 748.775,217.0"/><text class="tt" x="800" y="221.0" text-anchor="middle">action?</text>
+<rect class="nd c-blue" x="603.15" y="278.0" width="393.70000000000005" height="47.0" rx="7"/><text class="tt" x="800" y="297.8" text-anchor="middle">mark_active in the durable ledger (with config) FIRST</text><text class="tt" x="800" y="313.2" text-anchor="middle">notify demand → OCR starts popping tasks</text>
+<rect class="nd c-blue" x="613.5" y="355.0" width="373.0" height="31.5" rx="7"/><text class="tt" x="800" y="374.8" text-anchor="middle">cancel pending offline timer · reset error counter</text>
+<polygon class="nd c-amber" points="800,416.5 897.8,447.5 800,478.5 702.2,447.5"/><text class="tt" x="800" y="451.5" text-anchor="middle">Already running?</text>
+<polygon class="nd c-amber" points="800,508.5 913.325,543.525 800,578.55 686.675,543.525"/><text class="tt" x="800" y="539.8" text-anchor="middle">Camera online now?</text><text class="tt" x="800" y="555.3" text-anchor="middle">(details.connected)</text>
+<rect class="nd c-blue" x="606.6" y="608.55" width="386.8" height="62.5" rx="7"/><text class="tt" x="800" y="628.3" text-anchor="middle">ATTACH: engine with fewest cameras (new one if full)</text><text class="tt" x="800" y="643.8" text-anchor="middle">RTSP reader thread · BYTETracker · model instance</text><text class="tt" x="800" y="659.3" text-anchor="middle">capacity check (✅ / 🚨) · cadence</text>
+<path class="nd c-purple" d="M633.2 708.05 A166.8 7 0 0 1 966.8000000000001 708.05 V755.05 A166.8 7 0 0 1 633.2 755.05 Z"/><path class="nd c-purple" style="fill:none" d="M633.2 708.05 A166.8 7 0 0 0 966.8000000000001 708.05"/><text class="tt b" x="800" y="731.8" text-anchor="middle">cameras:&lt;id&gt;:ai_status = running</text><text class="tt" x="800" y="747.3" text-anchor="middle">cmd:ai:response:&lt;request_id&gt; = OK (TTL 60 s)</text>
+<rect class="nd c-blue" x="1208.7" y="255.75" width="262.6" height="62.5" rx="7"/><text class="tt" x="1340" y="275.5" text-anchor="middle">mark_inactive · notify demand</text><text class="tt" x="1340" y="291.0" text-anchor="middle">(OCR stops when no camera is left)</text><text class="tt" x="1340" y="306.5" text-anchor="middle">cancel timers · detach camera</text>
+<path class="nd c-purple" d="M1219.7404999999999 383.5 A120.2595 7 0 0 1 1460.2595 383.5 V430.5 A120.2595 7 0 0 1 1219.7404999999999 430.5 Z"/><path class="nd c-purple" style="fill:none" d="M1219.7404999999999 383.5 A120.2595 7 0 0 0 1460.2595 383.5"/><text class="tt b" x="1340" y="407.2" text-anchor="middle">ai_status = stopped_by_user</text><text class="tt" x="1340" y="422.8" text-anchor="middle">response OK</text>
+<rect class="nd c-green" x="1705.248" y="30.0" width="289.504" height="33.5" rx="16.75"/><text class="tt b" x="1850" y="50.8" text-anchor="middle">camera:events from camera_stream</text>
+<polygon class="nd c-amber" points="1850,93.5 1916.75,124.5 1850,155.5 1783.25,124.5"/><text class="tt" x="1850" y="128.5" text-anchor="middle">connected?</text>
+<polygon class="nd c-amber" points="1850,185.5 1989.2,220.525 1850,255.55 1710.8,220.525"/><text class="tt" x="1850" y="216.8" text-anchor="middle">Activated by the backend</text><text class="tt" x="1850" y="232.3" text-anchor="middle">and not running?</text>
+<rect class="nd c-blue" x="1735.95" y="285.55" width="228.10000000000002" height="31.5" rx="7"/><text class="tt" x="1850" y="305.3" text-anchor="middle">cancel offline timer → ATTACH</text>
+<polygon class="nd c-amber" points="1850,330.0 1942.625,361.0 1850,392.0 1757.375,361.0"/><text class="tt" x="1850" y="365.0" text-anchor="middle">Camera running?</text>
+<rect class="nd c-blue" x="1753.2" y="422.0" width="193.60000000000002" height="47.0" rx="7"/><text class="tt" x="1850" y="441.8" text-anchor="middle">start 10 s offline timer</text><text class="tt" x="1850" y="457.2" text-anchor="middle">(CAMERA_OFFLINE_GRACE)</text>
+<polygon class="nd c-amber" points="1850,499.0 1989.2,530.0 1850,561.0 1710.8,530.0"/><text class="tt" x="1850" y="534.0" text-anchor="middle">Back online within 10 s?</text>
+<rect class="nd c-blue" x="1739.4" y="591.0" width="221.20000000000002" height="62.5" rx="7"/><text class="tt" x="1850" y="610.8" text-anchor="middle">DETACH · ai_status = stopped</text><text class="tt" x="1850" y="626.2" text-anchor="middle">"Camera disconnected"</text><text class="tt" x="1850" y="641.8" text-anchor="middle">(stays in the ledger)</text>
+<rect class="nd c-green" x="1692.0" y="760.0" width="316.0" height="49.0" rx="24.5"/><text class="tt b" x="1850" y="780.8" text-anchor="middle">Engine reports status = error</text><text class="tt" x="1850" y="796.2" text-anchor="middle">(inference exception, resource shortage)</text>
+<polygon class="nd c-amber" points="1850,839.0 2009.9,874.025 1850,909.05 1690.1,874.025"/><text class="tt" x="1850" y="870.3" text-anchor="middle">Retries used &lt; 1?</text><text class="tt" x="1850" y="885.8" text-anchor="middle">(counter resets after 600 s)</text>
+<rect class="nd c-blue" x="1777.35" y="939.05" width="145.3" height="31.5" rx="7"/><text class="tt" x="1850" y="958.8" text-anchor="middle">DETACH · wait 3 s</text>
+<polygon class="nd c-amber" points="1850,1000.55 1947.8,1031.55 1850,1062.55 1752.2,1031.55"/><text class="tt" x="1850" y="1035.5" text-anchor="middle">Still activated?</text>
+<rect class="nd c-green" x="1787.7" y="1092.55" width="124.60000000000001" height="47.0" rx="7"/><text class="tt" x="1850" y="1112.3" text-anchor="middle">ATTACH again</text><text class="tt" x="1850" y="1127.8" text-anchor="middle">(retry 1 of 1)</text>
+</svg></div></div></section>
+<section id="frame"><h2><span class="no">5</span>Detector</h2><p class="lead">The engine loop, the trigger rules, and the gate that decides whether crops go to OCR.</p><div class="chartbox"><div class="chartbar"><b>Flowchart 2 — engine loop (one iteration)</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1250" viewBox="0 0 1250 1298.75" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c3n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c3y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c3x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c3d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c3l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M430.0 63.5 L430.0 93.5" marker-end="url(#c3n)"/>
+<path class="ed e-n" d="M430.0 140.5 L430.0 170.5" marker-end="url(#c3n)"/>
+<path class="ed e-n" d="M430.0 217.5 L430.0 247.5" marker-end="url(#c3n)"/>
+<path class="ed e-y" d="M430.0 317.5 L430.0 347.6" marker-end="url(#c3y)"/>
+<text class="lb lb-y" x="437.0" y="336.5">yes</text>
+<path class="ed e-n" d="M430.0 394.6 L430.0 424.6" marker-end="url(#c3n)"/>
+<path class="ed e-y" d="M430.0 494.6 L430.0 524.6" marker-end="url(#c3y)"/>
+<text class="lb lb-y" x="437.0" y="513.6">yes</text>
+<path class="ed e-n" d="M430.0 587.1 L430.0 617.1" marker-end="url(#c3n)"/>
+<path class="ed e-n" d="M430.0 664.1 L430.0 694.1" marker-end="url(#c3n)"/>
+<path class="ed e-x" d="M430.0 764.1 L430.0 794.2" marker-end="url(#c3x)"/>
+<text class="lb lb-x" x="437.0" y="783.2">no</text>
+<path class="ed e-n" d="M430.0 841.2 L430.0 871.2" marker-end="url(#c3n)"/>
+<path class="ed e-n" d="M430.0 918.2 L430.0 948.2" marker-end="url(#c3n)"/>
+<path class="ed e-x" d="M430.0 1018.2 L430.0 1048.2" marker-end="url(#c3x)"/>
+<text class="lb lb-x" x="437.0" y="1037.2">no</text>
+<path class="ed e-n" d="M430.0 1079.7 L430.0 1109.7" marker-end="url(#c3n)"/>
+<path class="ed e-x" d="M430.0 1179.8 L430.0 1209.8" marker-end="url(#c3x)"/>
+<text class="lb lb-x" x="437.0" y="1198.8">no</text>
+<path class="ed e-x" d="M522.6 282.5 L760.8 282.5" marker-end="url(#c3x)"/>
+<text class="lb lb-x" x="546.6" y="276.5" text-anchor="middle">no</text>
+<path class="ed e-x" d="M538.1 459.6 L678.0 459.6" marker-end="url(#c3x)"/>
+<text class="lb lb-x" x="562.1" y="453.6" text-anchor="middle">no</text>
+<path class="ed e-y" d="M507.1 729.1 L718.7 729.1" marker-end="url(#c3y)"/>
+<text class="lb lb-y" x="531.1" y="723.1" text-anchor="middle">yes</text>
+<path class="ed e-n" d="M850.0 760.4 L850.0 817.7 L626.9 817.7" marker-end="url(#c3n)"/>
+<path class="ed e-y" d="M501.9 983.2 L742.9 983.2" marker-end="url(#c3y)"/>
+<text class="lb lb-y" x="525.9" y="977.2" text-anchor="middle">yes</text>
+<path class="ed e-n" d="M850.0 1006.7 L850.0 1064.0 L571.6 1064.0" marker-end="url(#c3n)"/>
+<path class="ed e-y" d="M527.8 1144.7 L791.1 1144.7" marker-end="url(#c3y)"/>
+<text class="lb lb-y" x="551.8" y="1138.7" text-anchor="middle">yes</text>
+<path class="ed e-n" d="M850.0 1168.2 L850.0 1234.2 L668.3 1234.2" marker-end="url(#c3n)"/>
+<path class="ed e-l" d="M191.7 1234.2 L100.0 1234.2 L100.0 117.0 L278.0 117.0" marker-end="url(#c3l)"/>
+<text class="lb lb-l" x="131.7" y="1228.2" text-anchor="middle">repeat</text>
+<path class="ed e-l" d="M830.0 259.0 L830.0 194.0 L585.5 194.0" marker-end="url(#c3l)"/>
+<text class="lb lb-l" x="837.0" y="245.0">next camera</text>
+<path class="ed e-l" d="M982.0 459.6 L990.0 459.6 L990.0 194.0 L585.5 194.0" marker-end="url(#c3l)"/>
+<rect class="nd c-green" x="304.7405" y="30.0" width="250.519" height="33.5" rx="16.75"/><text class="tt b" x="430" y="50.8" text-anchor="middle">Engine loop — one iteration</text>
+<rect class="nd c-blue" x="278.0" y="93.5" width="304.0" height="47.0" rx="7"/><text class="tt" x="430" y="113.2" text-anchor="middle">Apply add / remove camera commands</text><text class="tt" x="430" y="128.8" text-anchor="middle">Drain hub:ctl (result · request · state)</text>
+<rect class="nd c-blue" x="274.54999999999995" y="170.5" width="310.90000000000003" height="47.0" rx="7"/><text class="tt" x="430" y="190.2" text-anchor="middle">For each camera: take the newest frame</text><text class="tt" x="430" y="205.8" text-anchor="middle">(reader thread keeps only the latest one)</text>
+<polygon class="nd c-amber" points="430,247.49999999999997 522.625,282.525 430,317.54999999999995 337.375,282.525"/><text class="tt" x="430" y="278.8" text-anchor="middle">New frame since</text><text class="tt" x="430" y="294.3" text-anchor="middle">last time?</text>
+<rect class="nd c-blue" x="246.95" y="347.55" width="366.1" height="47.0" rx="7"/><text class="tt" x="430" y="367.3" text-anchor="middle">missed = new frames − 1 · fid += new frames</text><text class="tt" x="430" y="382.8" text-anchor="middle">Crop the camera ROI (keep offset → full-frame px)</text>
+<polygon class="nd c-amber" points="430,424.55000000000007 538.15,459.57500000000005 430,494.6 321.85,459.57500000000005"/><text class="tt" x="430" y="455.8" text-anchor="middle">Due for detection?</text><text class="tt" x="430" y="471.3" text-anchor="middle">fid ≥ _next_due</text>
+<rect class="nd c-blue" x="219.35" y="524.6" width="421.3" height="62.5" rx="7"/><text class="tt" x="430" y="544.4" text-anchor="middle">ONE inference call for all due frames</text><text class="tt" x="430" y="559.9" text-anchor="middle">GPU: one batched predict() · CPU: one instance per camera</text><text class="tt" x="430" y="575.4" text-anchor="middle">conf ≥ 0.25 · NMS IoU 0.7 · ≤ 300 boxes</text>
+<rect class="nd c-blue" x="260.75" y="617.1" width="338.5" height="47.0" rx="7"/><text class="tt" x="430" y="636.9" text-anchor="middle">BYTETracker.update(detections, dt)</text><text class="tt" x="430" y="652.4" text-anchor="middle">dt = real camera frames since the last update</text>
+<polygon class="nd c-amber" points="430,694.1 507.1,729.125 430,764.15 352.9,729.125"/><text class="tt" x="430" y="725.4" text-anchor="middle">Active track</text><text class="tt" x="430" y="740.9" text-anchor="middle">is new?</text>
+<rect class="nd c-blue" x="233.14999999999998" y="794.1500000000001" width="393.70000000000005" height="47.0" rx="7"/><text class="tt" x="430" y="813.9" text-anchor="middle">Cut plate crop from ROI frame · sharpness (Laplacian)</text><text class="tt" x="430" y="829.4" text-anchor="middle">Run triggers  (flowchart 3)</text>
+<rect class="nd c-blue" x="260.75" y="871.1500000000001" width="338.5" height="47.0" rx="7"/><text class="tt" x="430" y="890.9" text-anchor="middle">Update best-5 crops (rank = conf×100, area)</text><text class="tt" x="430" y="906.4" text-anchor="middle">Update best frame when the best crop improved</text>
+<polygon class="nd c-amber" points="430,948.1500000000001 501.925,983.1750000000001 430,1018.2 358.075,983.1750000000001"/><text class="tt" x="430" y="979.4" text-anchor="middle">Recognition</text><text class="tt" x="430" y="994.9" text-anchor="middle">requested?</text>
+<rect class="nd c-blue" x="288.35" y="1048.2" width="283.3" height="31.5" rx="7"/><text class="tt" x="430" y="1068.0" text-anchor="middle">Emit track_update (at most every 5 s)</text>
+<polygon class="nd c-amber" points="430,1109.7 527.8,1144.7250000000001 430,1179.7500000000002 332.2,1144.7250000000001"/><text class="tt" x="430" y="1141.0" text-anchor="middle">Any track unseen</text><text class="tt" x="430" y="1156.5" text-anchor="middle">&gt; 30 frames?</text>
+<rect class="nd c-red" x="191.684" y="1209.75" width="476.632" height="49.0" rx="24.5"/><text class="tt b" x="430" y="1230.5" text-anchor="middle">Debug video · [PERF] every 10 s · [STATS] every 50 loops</text><text class="tt" x="430" y="1246.0" text-anchor="middle">→ next iteration</text>
+<rect class="nd c-grey" x="760.8" y="259.025" width="138.4" height="47.0" rx="7"/><text class="tt" x="830" y="278.8" text-anchor="middle">skip this camera</text><text class="tt" x="830" y="294.3" text-anchor="middle">(nothing new)</text>
+<rect class="nd c-grey" x="678.0" y="436.07500000000005" width="304.0" height="47.0" rx="7"/><text class="tt" x="830" y="455.8" text-anchor="middle">COAST: no inference, tracker not updated</text><text class="tt" x="830" y="471.3" text-anchor="middle">(counted as coasted, not missed)</text>
+<rect class="nd c-blue" x="718.7" y="697.875" width="262.6" height="62.5" rx="7"/><text class="tt" x="850" y="717.6" text-anchor="middle">uid = camera-engine-random10</text><text class="tt" x="850" y="733.1" text-anchor="middle">emit track_started {trigger flags}</text><text class="tt" x="850" y="748.6" text-anchor="middle">new TrackRecState</text>
+<rect class="nd c-blue" x="742.85" y="959.6750000000001" width="214.3" height="47.0" rx="7"/><text class="tt" x="850" y="979.4" text-anchor="middle">Try to submit crops</text><text class="tt" x="850" y="994.9" text-anchor="middle">(submit gate — flowchart 4)</text>
+<rect class="nd c-blue" x="791.15" y="1121.2250000000001" width="117.7" height="47.0" rx="7"/><text class="tt" x="850" y="1141.0" text-anchor="middle">End the track</text><text class="tt" x="850" y="1156.5" text-anchor="middle">(flowchart 4)</text>
+</svg></div></div><p class="small" style="margin:4px 2px 0">Auto-degrade / capacity (CPU): at startup engine 0 measures the loop time for 1…12 cameras (3 warm-up + 20 timed rounds, p95); budget = detect_every × 1000 / 25 fps × 0.7 = 28 ms at one camera. Above capacity, the per-camera detect interval is computed from those measurements (never below 1, never slower than 8 fps) and the skipped frames are "coasted". Engine placement: fewest cameras first; GPU 6 per engine, CPU 16 (one engine). Rebalance check every 30 s.</p><div class="chartbox"><div class="chartbar"><b>Flowchart 3 — triggers (cross_line, stop_roi)</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1100" viewBox="0 0 1100 998.3" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c4n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c4y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c4x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c4d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c4l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M330.0 79.0 L330.0 109.0" marker-end="url(#c4n)"/>
+<path class="ed e-y" d="M330.0 179.1 L330.0 209.1" marker-end="url(#c4y)"/>
+<text class="lb lb-y" x="337.0" y="198.1">yes</text>
+<path class="ed e-y" d="M330.0 279.1 L330.0 309.1" marker-end="url(#c4y)"/>
+<text class="lb lb-y" x="337.0" y="298.1">yes</text>
+<path class="ed e-y" d="M330.0 379.1 L330.0 409.2" marker-end="url(#c4y)"/>
+<text class="lb lb-y" x="337.0" y="398.1">yes</text>
+<path class="ed e-n" d="M330.0 440.7 L330.0 470.7" marker-end="url(#c4n)"/>
+<path class="ed e-y" d="M330.0 540.7 L330.0 570.7" marker-end="url(#c4y)"/>
+<text class="lb lb-y" x="337.0" y="559.7">yes</text>
+<path class="ed e-n" d="M330.0 617.7 L330.0 647.7" marker-end="url(#c4n)"/>
+<path class="ed e-y" d="M330.0 717.8 L330.0 747.8" marker-end="url(#c4y)"/>
+<text class="lb lb-y" x="337.0" y="736.8">yes</text>
+<path class="ed e-y" d="M330.0 817.8 L330.0 847.8" marker-end="url(#c4y)"/>
+<text class="lb lb-y" x="337.0" y="836.8">yes</text>
+<path class="ed e-n" d="M330.0 879.3 L330.0 909.3" marker-end="url(#c4n)"/>
+<path class="ed e-x" d="M500.2 144.0 L710.2 144.0" marker-end="url(#c4x)"/>
+<text class="lb lb-x" x="605.2" y="138.0" text-anchor="middle">no</text>
+<path class="ed e-x" d="M443.3 244.1 L653.3 244.1" marker-end="url(#c4x)"/>
+<text class="lb lb-x" x="548.3" y="238.1" text-anchor="middle">no (same side)</text>
+<path class="ed e-x" d="M474.4 344.1 L684.4 344.1" marker-end="url(#c4x)"/>
+<text class="lb lb-x" x="579.4" y="338.1" text-anchor="middle">no (too soon)</text>
+<path class="ed e-x" d="M526.1 505.7 L736.1 505.7" marker-end="url(#c4x)"/>
+<text class="lb lb-x" x="631.1" y="487.7" text-anchor="middle">no: inside counter reset;</text>
+<text class="lb lb-x" x="631.1" y="499.7" text-anchor="middle">confirmed → ROI exit</text>
+<path class="ed e-x" d="M469.2 682.7 L679.2 682.7" marker-end="url(#c4x)"/>
+<text class="lb lb-x" x="574.2" y="676.7" text-anchor="middle">no: keep sampling</text>
+<path class="ed e-x" d="M510.6 782.8 L720.6 782.8" marker-end="url(#c4x)"/>
+<text class="lb lb-x" x="615.6" y="776.8" text-anchor="middle">no: still moving</text>
+<rect class="nd c-green" x="120.25" y="30.0" width="419.5" height="49.0" rx="24.5"/><text class="tt b" x="330" y="50.8" text-anchor="middle">Per track, per detected frame</text><text class="tt" x="330" y="66.2" text-anchor="middle">anchor = bottom-centre of the plate box (full-frame px)</text>
+<polygon class="nd c-amber" points="330,109.0 500.25,144.025 330,179.05 159.75,144.025"/><text class="tt" x="330" y="140.3" text-anchor="middle">Line set, track age ≥ 5 frames</text><text class="tt" x="330" y="155.8" text-anchor="middle">and avg conf ≥ 0.40?</text>
+<polygon class="nd c-amber" points="330,209.05 443.325,244.07500000000002 330,279.1 216.675,244.07500000000002"/><text class="tt" x="330" y="240.3" text-anchor="middle">Anchor changed side</text><text class="tt" x="330" y="255.8" text-anchor="middle">of the line?</text>
+<polygon class="nd c-amber" points="330,309.1 474.375,344.125 330,379.15 185.625,344.125"/><text class="tt" x="330" y="340.4" text-anchor="middle">Cooldown (30 frames)</text><text class="tt" x="330" y="355.9" text-anchor="middle">since last crossing over?</text>
+<rect class="nd c-green" x="174.54999999999998" y="409.15000000000003" width="310.90000000000003" height="31.5" rx="7"/><text class="tt" x="330" y="428.9" text-anchor="middle">EVENT cross_line {direction, point, conf}</text>
+<polygon class="nd c-amber" points="330,470.6500000000001 526.125,505.67500000000007 330,540.7 133.875,505.67500000000007"/><text class="tt" x="330" y="501.9" text-anchor="middle">Stop ROI set, anchor inside polygon</text><text class="tt" x="330" y="517.4" text-anchor="middle">and avg conf ≥ 0.30?</text>
+<rect class="nd c-blue" x="171.1" y="570.7" width="317.8" height="47.0" rx="7"/><text class="tt" x="330" y="590.5" text-anchor="middle">inside_frames += 1</text><text class="tt" x="330" y="606.0" text-anchor="middle">≥ 2 frames → entry confirmed, timer starts</text>
+<polygon class="nd c-amber" points="330,647.7 469.20000000000005,682.725 330,717.75 190.79999999999998,682.725"/><text class="tt" x="330" y="679.0" text-anchor="middle">≥ 6 position samples and</text><text class="tt" x="330" y="694.5" text-anchor="middle">≥ 2.0 s since entry?</text>
+<polygon class="nd c-amber" points="330,747.75 510.6,782.775 330,817.8 149.39999999999998,782.775"/><text class="tt" x="330" y="779.0" text-anchor="middle">Net movement over the last 1.5 s</text><text class="tt" x="330" y="794.5" text-anchor="middle">≤ 20 px/s?</text>
+<rect class="nd c-green" x="171.1" y="847.8" width="317.8" height="31.5" rx="7"/><text class="tt" x="330" y="867.5" text-anchor="middle">EVENT stop_roi {duration, velocity, point}</text>
+<rect class="nd c-red" x="158.2" y="909.3" width="343.6" height="49.0" rx="24.5"/><text class="tt b" x="330" y="930.0" text-anchor="middle">Engine: once per event name per track</text><text class="tt" x="330" y="945.5" text-anchor="middle">→ hub:events trigger + request a recognition</text>
+<rect class="nd c-grey" x="828.0" y="474.42500000000007" width="304.0" height="62.5" rx="7"/><text class="tt" x="980" y="494.2" text-anchor="middle">Both checks run on every frame.</text><text class="tt" x="980" y="509.7" text-anchor="middle">A track can fire cross_line and stop_roi</text><text class="tt" x="980" y="525.2" text-anchor="middle">(each once).</text>
+</svg></div></div><div class="chartbox"><div class="chartbar"><b>Flowchart 4 — submit gate (left) and ending a track (right)</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1300" viewBox="0 0 1300 803.725" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c5n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c5y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c5x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c5d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c5l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M300.0 79.0 L300.0 109.0" marker-end="url(#c5n)"/>
+<path class="ed e-x" d="M300.0 179.1 L300.0 209.1" marker-end="url(#c5x)"/>
+<text class="lb lb-x" x="307.0" y="198.1">no</text>
+<path class="ed e-x" d="M300.0 279.1 L300.0 309.1" marker-end="url(#c5x)"/>
+<text class="lb lb-x" x="307.0" y="298.1">no</text>
+<path class="ed e-y" d="M300.0 379.1 L300.0 409.2" marker-end="url(#c5y)"/>
+<text class="lb lb-y" x="307.0" y="398.1">yes</text>
+<path class="ed e-y" d="M300.0 503.2 L300.0 533.2" marker-end="url(#c5y)"/>
+<text class="lb lb-y" x="307.0" y="522.2">yes</text>
+<path class="ed e-n" d="M300.0 580.2 L300.0 610.2" marker-end="url(#c5n)"/>
+<path class="ed e-d" d="M300.0 672.7 L300.0 702.7" marker-end="url(#c5d)"/>
+<path class="ed e-y" d="M397.8 144.0 L607.8 144.0" marker-end="url(#c5y)"/>
+<text class="lb lb-y" x="502.8" y="138.0" text-anchor="middle">yes: nothing sent</text>
+<path class="ed e-y" d="M418.5 244.1 L628.5 244.1" marker-end="url(#c5y)"/>
+<text class="lb lb-y" x="523.5" y="226.1" text-anchor="middle">yes: wait for the hub ack</text>
+<text class="lb lb-y" x="523.5" y="238.1" text-anchor="middle">(or 15 s SUBMIT_TIMEOUT)</text>
+<path class="ed e-x" d="M392.6 344.1 L602.6 344.1" marker-end="url(#c5x)"/>
+<text class="lb lb-x" x="497.6" y="338.1" text-anchor="middle">no: nothing to send yet</text>
+<path class="ed e-x" d="M465.1 456.2 L675.1 456.2" marker-end="url(#c5x)"/>
+<text class="lb lb-x" x="570.1" y="438.2" text-anchor="middle">no: wait for a better crop;</text>
+<text class="lb lb-x" x="570.1" y="450.2" text-anchor="middle">request stays pending</text>
+<path class="ed e-n" d="M900.0 79.0 L900.0 109.0" marker-end="url(#c5n)"/>
+<path class="ed e-y" d="M900.0 179.1 L900.0 209.1" marker-end="url(#c5y)"/>
+<text class="lb lb-y" x="907.0" y="198.1">yes</text>
+<path class="ed e-d" d="M900.0 256.1 L900.0 286.1" marker-end="url(#c5d)"/>
+<path class="ed e-x" d="M1091.0 144.0 L1110.0 144.0 L1110.0 316.6 L1098.2 316.6" marker-end="url(#c5x)"/>
+<text class="lb lb-x" x="1117.0" y="159.0">no: no final task</text>
+<path class="ed e-n" d="M900.0 347.1 L900.0 377.1" marker-end="url(#c5n)"/>
+<rect class="nd c-green" x="83.35" y="30.0" width="433.3" height="49.0" rx="24.5"/><text class="tt b" x="300" y="50.8" text-anchor="middle">Something asks for a read:</text><text class="tt" x="300" y="66.2" text-anchor="middle">trigger fired (local) · hub periodic request · track ends</text>
+<polygon class="nd c-amber" points="300,109.0 397.8,144.025 300,179.05 202.2,144.025"/><text class="tt" x="300" y="140.3" text-anchor="middle">Hub already said</text><text class="tt" x="300" y="155.8" text-anchor="middle">"satisfied"?</text>
+<polygon class="nd c-amber" points="300,209.05 418.5,244.07500000000002 300,279.1 181.5,244.07500000000002"/><text class="tt" x="300" y="240.3" text-anchor="middle">A task of this track</text><text class="tt" x="300" y="255.8" text-anchor="middle">is in flight?</text>
+<polygon class="nd c-amber" points="300,309.1 392.625,344.125 300,379.15 207.375,344.125"/><text class="tt" x="300" y="340.4" text-anchor="middle">Any crop stored</text><text class="tt" x="300" y="355.9" text-anchor="middle">for this track?</text>
+<polygon class="nd c-amber" points="300,409.15000000000003 465.07500000000005,456.18750000000006 300,503.2250000000001 134.92499999999998,456.18750000000006"/><text class="tt" x="300" y="444.7" text-anchor="middle">Crop set changed since</text><text class="tt" x="300" y="460.2" text-anchor="middle">the last send?</text><text class="tt" x="300" y="475.7" text-anchor="middle">(best frame no. : crop count)</text>
+<rect class="nd c-blue" x="106.6" y="533.225" width="386.8" height="47.0" rx="7"/><text class="tt" x="300" y="553.0" text-anchor="middle">Pick the stage by priority</text><text class="tt" x="300" y="568.5" text-anchor="middle">leave_scene 3 &gt; cross_line / stop_roi 2 &gt; periodic 1</text>
+<rect class="nd c-blue" x="120.39999999999998" y="610.225" width="359.20000000000005" height="62.5" rx="7"/><text class="tt" x="300" y="630.0" text-anchor="middle">Encode ≤ 5 crops + 1 best frame as JPEG</text><text class="tt" x="300" y="645.5" text-anchor="middle">+ camera, track, uid, stage, class flags, scores</text><text class="tt" x="300" y="661.0" text-anchor="middle">→ pickle</text>
+<path class="nd c-purple" d="M58.887 709.725 A241.113 7 0 0 1 541.113 709.725 V756.725 A241.113 7 0 0 1 58.887 756.725 Z"/><path class="nd c-purple" style="fill:none" d="M58.887 709.725 A241.113 7 0 0 0 541.113 709.725"/><text class="tt b" x="300" y="733.5" text-anchor="middle">emit "submitted" → hub:events, THEN LPUSH task → ocr:tasks</text><text class="tt" x="300" y="749.0" text-anchor="middle">(in-memory outbox keeps the order; retry 0.2 → 5 s)</text>
+<rect class="nd c-green" x="743.5525" y="30.0" width="312.895" height="49.0" rx="24.5"/><text class="tt b" x="900" y="50.8" text-anchor="middle">Track unseen for &gt; 30 camera frames</text><text class="tt" x="900" y="66.2" text-anchor="middle">(or camera removed · engine stopping)</text>
+<polygon class="nd c-amber" points="900,109.0 1090.95,144.025 900,179.05 709.05,144.025"/><text class="tt" x="900" y="140.3" text-anchor="middle">leave_scene on, hub not satisfied,</text><text class="tt" x="900" y="155.8" text-anchor="middle">seen ≥ 8 frames, ≥ 1 crop?</text>
+<rect class="nd c-blue" x="782.5" y="209.05" width="235.0" height="47.0" rx="7"/><text class="tt" x="900" y="228.8" text-anchor="middle">Build leave_scene task</text><text class="tt" x="900" y="244.3" text-anchor="middle">(same path as the submit gate)</text>
+<path class="nd c-purple" d="M701.7705 293.05 A198.2295 7 0 0 1 1098.2295 293.05 V340.05 A198.2295 7 0 0 1 701.7705 340.05 Z"/><path class="nd c-purple" style="fill:none" d="M701.7705 293.05 A198.2295 7 0 0 0 1098.2295 293.05"/><text class="tt b" x="900" y="316.8" text-anchor="middle">emit track_ended {reason, seen_frames, n_crops,</text><text class="tt" x="900" y="332.3" text-anchor="middle">duration, finalize_task_id}</text>
+<rect class="nd c-red" x="769.6" y="377.05" width="260.8" height="49.0" rx="24.5"/><text class="tt b" x="900" y="397.8" text-anchor="middle">Forget crops, best frame,</text><text class="tt" x="900" y="413.3" text-anchor="middle">trigger state, recognition state</text>
+</svg></div></div></section>
+<section id="ocr"><h2><span class="no">6</span>OCR worker</h2><p class="lead">One task = up to 5 crops of one track + 1 frame. A worker handles one task at a time; three workers run in parallel.</p><div class="chartbox"><div class="chartbar"><b>Flowchart 5 — one OCR task</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1250" viewBox="0 0 1250 1144.35" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c6n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c6y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c6x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c6d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c6l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M420.0 79.0 L420.0 113.0" marker-end="url(#c6n)"/>
+<path class="ed e-y" d="M420.0 183.1 L420.0 217.1" marker-end="url(#c6y)"/>
+<text class="lb lb-y" x="427.0" y="204.1">yes</text>
+<path class="ed e-y" d="M420.0 287.1 L420.0 321.1" marker-end="url(#c6y)"/>
+<text class="lb lb-y" x="427.0" y="308.1">yes</text>
+<path class="ed e-n" d="M420.0 352.6 L420.0 386.6" marker-end="url(#c6n)"/>
+<path class="ed e-y" d="M342.9 417.6 L190.0 417.6 L190.0 500.9" marker-end="url(#c6y)"/>
+<text class="lb lb-y" x="318.9" y="411.6" text-anchor="middle">car (0)</text>
+<path class="ed e-y" d="M497.1 417.6 L650.0 417.6 L650.0 508.6" marker-end="url(#c6y)"/>
+<text class="lb lb-y" x="521.1" y="411.6" text-anchor="middle">motorcycle (1)</text>
+<path class="ed e-n" d="M190.0 594.4 L190.0 707.6 L270.4 707.6" marker-end="url(#c6n)"/>
+<path class="ed e-n" d="M650.0 586.6 L650.0 707.6 L569.5 707.6" marker-end="url(#c6n)"/>
+<path class="ed e-y" d="M420.0 766.6 L420.0 826.4" marker-end="url(#c6y)"/>
+<text class="lb lb-y" x="427.0" y="800.6">yes → status ok</text>
+<text class="lb lb-y" x="427.0" y="812.6">no → status invalid + reason</text>
+<path class="ed e-d" d="M420.0 888.9 L420.0 939.4" marker-end="url(#c6d)"/>
+<path class="ed e-n" d="M420.0 1015.9 L420.0 1070.8" marker-end="url(#c6n)"/>
+<path class="ed e-x" d="M554.0 148.0 L826.9 148.0" marker-end="url(#c6x)"/>
+<text class="lb lb-x" x="578.0" y="142.0" text-anchor="middle">no</text>
+<path class="ed e-x" d="M543.7 252.1 L813.0 252.1" marker-end="url(#c6x)"/>
+<text class="lb lb-x" x="567.7" y="246.1" text-anchor="middle">no</text>
+<path class="ed e-x" d="M1053.2 148.0 L1180.0 148.0 L1180.0 977.6 L649.4 977.6" marker-end="url(#c6x)"/>
+<path class="ed e-x" d="M940.0 276.6 L940.0 977.6 L649.4 977.6" marker-end="url(#c6x)"/>
+<text class="lb lb-x" x="947.0" y="530.6">always answer the hub</text>
+<rect class="nd c-green" x="283.045" y="30.0" width="273.90999999999997" height="49.0" rx="24.5"/><text class="tt b" x="420" y="50.8" text-anchor="middle">BRPOP internal:ocr:tasks (1 s)</text><text class="tt" x="420" y="66.2" text-anchor="middle">only while demand = processing</text>
+<polygon class="nd c-amber" points="420,113.0 554.025,148.025 420,183.05 285.975,148.025"/><text class="tt" x="420" y="144.3" text-anchor="middle">Has task_id, camera_id,</text><text class="tt" x="420" y="159.8" text-anchor="middle">track_id, trigger_type?</text>
+<polygon class="nd c-amber" points="420,217.05 543.675,252.07500000000002 420,287.1 296.325,252.07500000000002"/><text class="tt" x="420" y="248.3" text-anchor="middle">Crops present and</text><text class="tt" x="420" y="263.8" text-anchor="middle">at least one decodes?</text>
+<rect class="nd c-blue" x="247.29999999999998" y="321.1" width="345.40000000000003" height="31.5" rx="7"/><text class="tt" x="420" y="340.9" text-anchor="middle">Class vote: majority of the crops' class flags</text>
+<polygon class="nd c-amber" points="420,386.6 497.1,417.6 420,448.6 342.9,417.6"/><text class="tt" x="420" y="421.6" text-anchor="middle">Voted class?</text>
+<rect class="nd c-green" x="58.69999999999999" y="500.85" width="262.6" height="93.5" rx="7"/><text class="tt" x="190" y="520.6" text-anchor="middle">CAR (class 0), per crop:</text><text class="tt" x="190" y="536.1" text-anchor="middle">CLAHE on V channel → resize 256×64</text><text class="tt" x="190" y="551.6" text-anchor="middle">→ PaddleOCR recognition only</text><text class="tt" x="190" y="567.1" text-anchor="middle">vote character by character</text><text class="tt" x="190" y="582.6" text-anchor="middle">(only 8-char candidates)</text>
+<rect class="nd c-green" x="515.25" y="508.6" width="269.5" height="78.0" rx="7"/><text class="tt" x="650" y="528.4" text-anchor="middle">MOTORCYCLE (class 1), per crop:</text><text class="tt" x="650" y="543.9" text-anchor="middle">resize 240×200 → detect + recognise</text><text class="tt" x="650" y="559.4" text-anchor="middle">drop boxes &lt; 5 % of the largest</text><text class="tt" x="650" y="574.9" text-anchor="middle">vote each part</text>
+<polygon class="nd c-amber" points="420,648.5500000000001 569.55,707.6 420,766.65 270.45,707.6"/><text class="tt" x="420" y="688.4" text-anchor="middle">Valid?</text><text class="tt" x="420" y="703.9" text-anchor="middle">car: conf ≥ 0.70, 8 chars,</text><text class="tt" x="420" y="719.4" text-anchor="middle">2 digits + letter + 3 + 2</text><text class="tt" x="420" y="734.9" text-anchor="middle">motorcycle: format rules</text>
+<rect class="nd c-green" x="192.1" y="826.35" width="455.8" height="62.5" rx="7"/><text class="tt" x="420" y="846.1" text-anchor="middle">Upload crop[0] + best frame as PNG to MinIO</text><text class="tt" x="420" y="861.6" text-anchor="middle">valid → dynamics/ValidPlateImage/vp_… + ValidVehicleImage/vf_…</text><text class="tt" x="420" y="877.1" text-anchor="middle">invalid → InvalidPlateImage/ip_… + InvalidVehicleImage/if_…</text>
+<path class="nd c-purple" d="M190.5825 946.35 A229.4175 7 0 0 1 649.4175 946.35 V1008.85 A229.4175 7 0 0 1 190.5825 1008.85 Z"/><path class="nd c-purple" style="fill:none" d="M190.5825 946.35 A229.4175 7 0 0 0 649.4175 946.35"/><text class="tt b" x="420" y="970.1" text-anchor="middle">XADD internal:hub:results {uid, task_id, stage, status,</text><text class="tt" x="420" y="985.6" text-anchor="middle">plate, confidence, validity, image paths}</text><text class="tt" x="420" y="1001.1" text-anchor="middle">8 attempts, 0.2 → 5 s backoff (~25 s)</text>
+<rect class="nd c-red" x="134.902" y="1070.85" width="570.196" height="33.5" rx="16.75"/><text class="tt b" x="420" y="1091.6" text-anchor="middle">[TASK-DONE] total_processing_ms · [OCR-STATS] every 30 s → next task</text>
+<rect class="nd c-red" x="826.85" y="123.525" width="226.3" height="49.0" rx="24.5"/><text class="tt b" x="940" y="144.3" text-anchor="middle">status = error</text><text class="tt" x="940" y="159.8" text-anchor="middle">"invalid OCR task contract"</text>
+<rect class="nd c-red" x="813.05" y="227.57500000000002" width="253.9" height="49.0" rx="24.5"/><text class="tt b" x="940" y="248.3" text-anchor="middle">status = skipped</text><text class="tt" x="940" y="263.8" text-anchor="middle">(no crops / all decodes failed)</text>
+</svg></div></div></section>
+<section id="hub"><h2><span class="no">7</span>Control hub</h2><p class="lead">The only component that decides what the backend receives. Per track uid (camera-engine-random10). Satisfied = best valid confidence ≥ 0.85, or ≥ 3 agreeing valid results with one candidate. The plate is chosen by a confidence-weighted vote over valid results only (sum of confidences per plate).</p><div class="chartbox"><div class="chartbar"><b>Flowchart 6 — events and results coming in</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="2200" viewBox="0 0 2200 1156.75" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c7n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c7y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c7x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c7d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c7l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M1000.0 64.5 L1000.0 109.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L110.0 215.0 L110.0 258.8" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="117.0" y="228.8">engine_started</text>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L330.0 215.0 L330.0 258.8" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="337.0" y="228.8">track_started</text>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L545.0 215.0 L545.0 258.8" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="552.0" y="228.8">track_update</text>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L770.0 215.0 L770.0 258.8" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="777.0" y="228.8">submitted</text>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L995.0 215.0 L995.0 258.8" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="1002.0" y="228.8">track_ended</text>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L1290.0 215.0 L1290.0 243.0" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="1284.0" y="209.0" text-anchor="middle">trigger</text>
+<path class="ed e-n" d="M1000.0 171.0 L1000.0 215.0 L1700.0 215.0 L1700.0 259.0" marker-end="url(#c7n)"/>
+<text class="lb lb-n" x="1707.0" y="229.0">result</text>
+<path class="ed e-y" d="M1290.0 337.0 L1290.0 415.0" marker-end="url(#c7y)"/>
+<text class="lb lb-y" x="1297.0" y="365.0">yes</text>
+<path class="ed e-x" d="M1424.0 290.0 L1544.0 290.0" marker-end="url(#c7x)"/>
+<text class="lb lb-x" x="1484.0" y="284.0" text-anchor="middle">no: ignore</text>
+<path class="ed e-y" d="M1290.0 485.0 L1290.0 530.0 L1150.0 530.0 L1150.0 586.5" marker-end="url(#c7y)"/>
+<text class="lb lb-y" x="1157.0" y="556.5">yes</text>
+<path class="ed e-x" d="M1290.0 485.0 L1290.0 530.0 L1430.0 530.0 L1430.0 601.0" marker-end="url(#c7x)"/>
+<text class="lb lb-x" x="1437.0" y="571.0">no</text>
+<path class="ed e-x" d="M1700.0 321.0 L1700.0 419.0" marker-end="url(#c7x)"/>
+<text class="lb lb-x" x="1707.0" y="349.0">no</text>
+<path class="ed e-y" d="M1808.2 290.0 L1928.2 290.0" marker-end="url(#c7y)"/>
+<text class="lb lb-y" x="1868.2" y="284.0" text-anchor="middle">yes: ignore</text>
+<path class="ed e-y" d="M1823.7 450.0 L2020.0 450.0 L2020.0 561.0" marker-end="url(#c7y)"/>
+<text class="lb lb-y" x="1847.7" y="444.0" text-anchor="middle">yes</text>
+<path class="ed e-x" d="M1700.0 481.0 L1700.0 586.0 L1760.0 586.0 L1760.0 691.0" marker-end="url(#c7x)"/>
+<text class="lb lb-x" x="1707.0" y="509.0">no</text>
+<path class="ed e-n" d="M1000.0 1006.0 L1000.0 1083.2" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M110.0 321.2 L110.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M330.0 321.2 L330.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M545.0 321.2 L545.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M770.0 321.2 L770.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M995.0 321.2 L995.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M1150.0 633.5 L1150.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M1430.0 679.0 L1430.0 760.0 L1000.0 760.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M1760.0 769.0 L1760.0 880.0 L1000.0 880.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<path class="ed e-n" d="M2020.0 639.0 L2020.0 800.0 L1000.0 800.0 L1000.0 914.0" marker-end="url(#c7n)"/>
+<rect class="nd c-green" x="742.1915" y="15.5" width="515.617" height="49.0" rx="24.5"/><text class="tt b" x="1000" y="36.2" text-anchor="middle">XREADGROUP events + results (block 200 ms, up to 200 entries)</text><text class="tt" x="1000" y="51.8" text-anchor="middle">unacknowledged entries are read again after a restart</text>
+<polygon class="nd c-amber" points="1000,109.0 1115.0,140 1000,171.0 885.0,140"/><text class="tt" x="1000" y="144.0" text-anchor="middle">core.handle(kind)</text>
+<rect class="nd c-amber" x="6.299999999999997" y="258.75" width="207.4" height="62.5" rx="7"/><text class="tt" x="110" y="278.5" text-anchor="middle">End every live track of</text><text class="tt" x="110" y="294.0" text-anchor="middle">that engine with an older</text><text class="tt" x="110" y="309.5" text-anchor="middle">boot_id (engine_restarted)</text>
+<rect class="nd c-amber" x="235.0" y="258.75" width="190" height="62.5" rx="7"/><text class="tt" x="330" y="278.5" text-anchor="middle">Create track state</text><text class="tt" x="330" y="294.0" text-anchor="middle">store trigger flags</text><text class="tt" x="330" y="309.5" text-anchor="middle">periodic due at +1 s</text>
+<rect class="nd c-amber" x="441.3" y="258.75" width="207.4" height="62.5" rx="7"/><text class="tt" x="545" y="278.5" text-anchor="middle">Absorb frame / crop counts</text><text class="tt" x="545" y="294.0" text-anchor="middle">reset the stale timer</text><text class="tt" x="545" y="309.5" text-anchor="middle">re-check "satisfied"</text>
+<rect class="nd c-amber" x="673.2" y="258.75" width="193.60000000000002" height="62.5" rx="7"/><text class="tt" x="770" y="278.5" text-anchor="middle">Mark task_id in flight;</text><text class="tt" x="770" y="294.0" text-anchor="middle">triggers waiting without</text><text class="tt" x="770" y="309.5" text-anchor="middle">a task now wait for it</text>
+<rect class="nd c-amber" x="884.4" y="258.75" width="221.20000000000002" height="62.5" rx="7"/><text class="tt" x="995" y="278.5" text-anchor="middle">Mark ended; remember</text><text class="tt" x="995" y="294.0" text-anchor="middle">finalize_task_id in flight</text><text class="tt" x="995" y="309.5" text-anchor="middle">→ try to close (flowchart 7)</text>
+<polygon class="nd c-amber" points="1290,242.9625 1424.025,290 1290,337.0375 1155.975,290"/><text class="tt" x="1290" y="278.5" text-anchor="middle">Known event, enabled on</text><text class="tt" x="1290" y="294.0" text-anchor="middle">this camera, first time</text><text class="tt" x="1290" y="309.5" text-anchor="middle">for this track?</text>
+<polygon class="nd c-amber" points="1700,259.0 1808.15,290 1700,321.0 1591.85,290"/><text class="tt" x="1700" y="294.0" text-anchor="middle">Duplicate task_id?</text>
+<polygon class="nd c-amber" points="1290,414.975 1455.075,450 1290,485.025 1124.925,450"/><text class="tt" x="1290" y="446.2" text-anchor="middle">Hub already satisfied,</text><text class="tt" x="1290" y="461.8" text-anchor="middle">or its task already answered?</text>
+<rect class="nd c-green" x="1029.05" y="586.5" width="241.9" height="47.0" rx="7"/><text class="tt" x="1150" y="606.2" text-anchor="middle">PUBLISH now</text><text class="tt" x="1150" y="621.8" text-anchor="middle">(immediate / after_recognition)</text>
+<rect class="nd c-amber" x="1302.15" y="601.0" width="255.70000000000002" height="78.0" rx="7"/><text class="tt" x="1430" y="620.8" text-anchor="middle">DEFER the trigger:</text><text class="tt" x="1430" y="636.2" text-anchor="middle">wait ≤ 15 s if its task is queued</text><text class="tt" x="1430" y="651.8" text-anchor="middle">≤ 3 s if no task could be sent</text><text class="tt" x="1430" y="667.2" text-anchor="middle">(timers: flowchart 7)</text>
+<polygon class="nd c-amber" points="1700,419.0 1823.675,450 1700,481.0 1576.325,450"/><text class="tt" x="1700" y="454.0" text-anchor="middle">Track already CLOSED?</text>
+<rect class="nd c-grey" x="1905.95" y="561.0" width="228.10000000000002" height="78.0" rx="7"/><text class="tt" x="2020" y="580.8" text-anchor="middle">LATE result:</text><text class="tt" x="2020" y="596.2" text-anchor="middle">answer changed? → publish the</text><text class="tt" x="2020" y="611.8" text-anchor="middle">final again (revision + 1)</text><text class="tt" x="2020" y="627.2" text-anchor="middle">else log and drop</text>
+<rect class="nd c-amber" x="1580.4" y="691.0" width="359.20000000000005" height="78.0" rx="7"/><text class="tt" x="1760" y="710.8" text-anchor="middle">Add to the vote (valid only, sum of confidences)</text><text class="tt" x="1760" y="726.2" text-anchor="middle">re-check satisfied (≥ 0.85 or 3 agree)</text><text class="tt" x="1760" y="741.8" text-anchor="middle">send ctl ack to the detector</text><text class="tt" x="1760" y="757.2" text-anchor="middle">publish deferred triggers waiting for this task</text>
+<path class="nd c-purple" d="M767.65 921.0 A232.35000000000002 7 0 0 1 1232.35 921.0 V999.0 A232.35000000000002 7 0 0 1 767.65 999.0 Z"/><path class="nd c-purple" style="fill:none" d="M767.65 921.0 A232.35000000000002 7 0 0 0 1232.35 921.0"/><text class="tt b" x="1000" y="944.8" text-anchor="middle">Apply effects:</text><text class="tt" x="1000" y="960.2" text-anchor="middle">RPUSH plate:vehicle:results (trigger / final records)</text><text class="tt" x="1000" y="975.8" text-anchor="middle">LPUSH hub:ctl:&lt;engine&gt; (ack, satisfied, request) · EXPIRE 120 s</text><text class="tt" x="1000" y="991.2" text-anchor="middle">SET hub:track:&lt;uid&gt; checkpoints (TTL 3600 s) · DEL expired ones</text>
+<rect class="nd c-red" x="878.639" y="1083.25" width="242.72199999999998" height="33.5" rx="16.75"/><text class="tt b" x="1000" y="1104.0" text-anchor="middle">XACK the batch → next read</text>
+</svg></div></div><div class="chartbox"><div class="chartbar"><b>Flowchart 7 — timers and closing a track</b><button data-z="out" type="button">−</button><button data-z="fit" type="button">Fit</button><button data-z="one" type="button">100%</button><button data-z="in" type="button">+</button></div><div class="chartscroll"><svg class="flowsvg" data-w="1800" viewBox="0 0 1800 803.2249999999999" xmlns="http://www.w3.org/2000/svg" role="img">
+<defs><marker id="c8n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-n"/></marker><marker id="c8y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-y"/></marker><marker id="c8x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-x"/></marker><marker id="c8d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-d"/></marker><marker id="c8l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="mk-l"/></marker></defs>
+<path class="ed e-n" d="M330.0 63.5 L330.0 97.5" marker-end="url(#c8n)"/>
+<path class="ed e-x" d="M330.0 159.5 L330.0 193.5" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="337.0" y="180.5">no</text>
+<path class="ed e-x" d="M330.0 255.5 L330.0 289.5" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="337.0" y="276.5">no</text>
+<path class="ed e-x" d="M330.0 359.5 L330.0 393.6" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="337.0" y="380.6">no</text>
+<path class="ed e-x" d="M330.0 463.6 L330.0 497.6" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="337.0" y="484.6">no</text>
+<path class="ed e-x" d="M330.0 591.7 L330.0 625.7" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="337.0" y="612.7">no</text>
+<path class="ed e-x" d="M330.0 695.7 L330.0 729.7" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="337.0" y="716.7">no</text>
+<path class="ed e-y" d="M412.3 128.5 L659.0 128.5" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="436.3" y="122.5" text-anchor="middle">yes</text>
+<path class="ed e-y" d="M407.1 224.5 L634.9 224.5" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="431.1" y="218.5" text-anchor="middle">yes</text>
+<path class="ed e-y" d="M443.3 324.5 L666.0 324.5" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="467.3" y="318.5" text-anchor="middle">yes</text>
+<path class="ed e-y" d="M557.2 428.6 L683.2 428.6" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="581.2" y="422.6" text-anchor="middle">yes</text>
+<path class="ed e-y" d="M500.2 544.6 L600.4 544.6" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="524.2" y="538.6" text-anchor="middle">yes</text>
+<path class="ed e-y" d="M427.8 660.7 L645.2 660.7" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="451.8" y="654.7" text-anchor="middle">yes</text>
+<path class="ed e-n" d="M1330.0 63.5 L1330.0 95.5" marker-end="url(#c8n)"/>
+<path class="ed e-x" d="M1330.0 165.6 L1330.0 197.6" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="1337.0" y="185.6">no</text>
+<path class="ed e-n" d="M1330.0 260.1 L1330.0 292.1" marker-end="url(#c8n)"/>
+<path class="ed e-y" d="M1330.0 362.1 L1330.0 394.1" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="1337.0" y="382.1">yes</text>
+<path class="ed e-n" d="M1330.0 441.1 L1330.0 473.1" marker-end="url(#c8n)"/>
+<path class="ed e-y" d="M1453.7 130.5 L1593.7 130.5" marker-end="url(#c8y)"/>
+<text class="lb lb-y" x="1523.7" y="124.5" text-anchor="middle">yes: keep waiting</text>
+<path class="ed e-x" d="M1505.4 327.1 L1700.0 327.1 L1700.0 393.1" marker-end="url(#c8x)"/>
+<text class="lb lb-x" x="1529.4" y="321.1" text-anchor="middle">no</text>
+<path class="ed e-d" d="M925.1 224.5 L1000.0 224.5 L1000.0 12.0 L1330.0 12.0 L1330.0 30.0" marker-end="url(#c8d)"/>
+<rect class="nd c-green" x="138.466" y="30.0" width="383.068" height="33.5" rx="16.75"/><text class="tt b" x="330" y="50.8" text-anchor="middle">Tick every 0.2 s — for every track in memory</text>
+<polygon class="nd c-amber" points="330,97.5 412.275,128.5 330,159.5 247.725,128.5"/><text class="tt" x="330" y="132.5" text-anchor="middle">Track CLOSED?</text>
+<polygon class="nd c-amber" points="330,193.5 407.1,224.5 330,255.5 252.89999999999998,224.5"/><text class="tt" x="330" y="228.5" text-anchor="middle">Track ENDED?</text>
+<polygon class="nd c-amber" points="330,289.5 443.325,324.525 330,359.54999999999995 216.675,324.525"/><text class="tt" x="330" y="320.8" text-anchor="middle">No event at all for</text><text class="tt" x="330" y="336.3" text-anchor="middle">≥ 120 s (stale)?</text>
+<polygon class="nd c-amber" points="330,393.55000000000007 557.175,428.57500000000005 330,463.6 102.82499999999999,428.57500000000005"/><text class="tt" x="330" y="424.8" text-anchor="middle">A deferred trigger waited ≥ its limit?</text><text class="tt" x="330" y="440.3" text-anchor="middle">15 s (its task is queued) · 3 s (no task)</text>
+<polygon class="nd c-amber" points="330,497.6 500.25,544.6375 330,591.6750000000001 159.75,544.6375"/><text class="tt" x="330" y="533.1" text-anchor="middle">Periodic due?</text><text class="tt" x="330" y="548.6" text-anchor="middle">(camera has the periodic flag;</text><text class="tt" x="330" y="564.1" text-anchor="middle">first at +1 s, then every 3 s)</text>
+<polygon class="nd c-amber" points="330,625.675 427.8,660.6999999999999 330,695.7249999999999 232.2,660.6999999999999"/><text class="tt" x="330" y="656.9" text-anchor="middle">A task in flight</text><text class="tt" x="330" y="672.4" text-anchor="middle">for ≥ 90 s?</text>
+<rect class="nd c-red" x="271.015" y="729.7249999999999" width="117.97" height="33.5" rx="16.75"/><text class="tt b" x="330" y="750.5" text-anchor="middle">next track</text>
+<rect class="nd c-blue" x="659.05" y="105.0" width="241.9" height="47.0" rx="7"/><text class="tt" x="780" y="124.8" text-anchor="middle">closed ≥ 300 s ago?</text><text class="tt" x="780" y="140.2" text-anchor="middle">yes → delete track + checkpoint</text>
+<rect class="nd c-blue" x="634.9" y="208.75" width="290.2" height="31.5" rx="7"/><text class="tt" x="780" y="228.5" text-anchor="middle">TRY TO CLOSE  (flowchart on the right)</text>
+<rect class="nd c-blue" x="665.95" y="301.025" width="228.10000000000002" height="47.0" rx="7"/><text class="tt" x="780" y="320.8" text-anchor="middle">END the track itself</text><text class="tt" x="780" y="336.3" text-anchor="middle">reason = stale → try to close</text>
+<rect class="nd c-green" x="683.2" y="405.07500000000005" width="193.60000000000002" height="47.0" rx="7"/><text class="tt" x="780" y="424.8" text-anchor="middle">PUBLISH that trigger now</text><text class="tt" x="780" y="440.3" text-anchor="middle">(resolution = timeout)</text>
+<rect class="nd c-blue" x="600.4" y="513.3875" width="359.20000000000005" height="62.5" rx="7"/><text class="tt" x="780" y="533.1" text-anchor="middle">Only if not satisfied and nothing in flight:</text><text class="tt" x="780" y="548.6" text-anchor="middle">LPUSH hub:ctl {request, stage: periodic}</text><text class="tt" x="780" y="564.1" text-anchor="middle">→ detector re-sends crops if a better set exists</text>
+<rect class="nd c-blue" x="645.25" y="637.1999999999999" width="269.5" height="47.0" rx="7"/><text class="tt" x="780" y="656.9" text-anchor="middle">Forget that task</text><text class="tt" x="780" y="672.4" text-anchor="middle">(so it cannot block periodic reads)</text>
+<rect class="nd c-green" x="1204.7404999999999" y="30.0" width="250.519" height="33.5" rx="16.75"/><text class="tt b" x="1330" y="50.8" text-anchor="middle">Try to close an ended track</text>
+<polygon class="nd c-amber" points="1330,95.5 1453.675,130.525 1330,165.55 1206.325,130.525"/><text class="tt" x="1330" y="126.8" text-anchor="middle">Tasks in flight and</text><text class="tt" x="1330" y="142.3" text-anchor="middle">&lt; 30 s since the end?</text>
+<rect class="nd c-blue" x="1146.95" y="197.55" width="366.1" height="62.5" rx="7"/><text class="tt" x="1330" y="217.3" text-anchor="middle">Publish triggers still deferred</text><text class="tt" x="1330" y="232.8" text-anchor="middle">(resolution = track_ended)</text><text class="tt" x="1330" y="248.3" text-anchor="middle">If it timed out: unanswered tasks → missing_tasks</text>
+<polygon class="nd c-amber" points="1330,292.05000000000007 1505.425,327.07500000000005 1330,362.1 1154.575,327.07500000000005"/><text class="tt" x="1330" y="323.3" text-anchor="middle">seen ≥ 8 frames and ≥ 1 crop,</text><text class="tt" x="1330" y="338.8" text-anchor="middle">or something already published?</text>
+<rect class="nd c-green" x="1157.3" y="394.1" width="345.40000000000003" height="47.0" rx="7"/><text class="tt" x="1330" y="413.9" text-anchor="middle">PUBLISH FINAL  update_type = leave_scene</text><text class="tt" x="1330" y="429.4" text-anchor="middle">is_final, revision 1, complete / missing_tasks</text>
+<path class="nd c-purple" d="M1174.654 480.1 A155.346 7 0 0 1 1485.346 480.1 V511.6 A155.346 7 0 0 1 1174.654 511.6 Z"/><path class="nd c-purple" style="fill:none" d="M1174.654 480.1 A155.346 7 0 0 0 1485.346 480.1"/><text class="tt b" x="1330" y="503.9" text-anchor="middle">closed — kept 300 s for late results</text>
+<rect class="nd c-red" x="1586.85" y="393.1" width="226.3" height="49.0" rx="24.5"/><text class="tt b" x="1700" y="413.9" text-anchor="middle">DROP the track</text><text class="tt" x="1700" y="429.4" text-anchor="middle">(backend never hears of it)</text>
+</svg></div></div><p class="small" style="margin:4px 2px 0">Backend records: update_type cross_line / stop_roi (once per event per track) and one final leave_scene (is_final, revision, complete, missing_tasks). Periodic re-reads are not published as records; they only feed the vote.</p></section>
 <section id="seq">
-  <h2><span class="no">5</span>One vehicle, end to end (sequence)</h2>
+  <h2><span class="no">8</span>One vehicle, end to end (sequence)</h2>
   <p class="lead">A car drives through, stops in the stop region, and leaves. Numbers on the left are the order of events;
   amber notes are waits and timeouts. Assumes <code>periodic</code>, <code>stop_roi</code> and <code>leave_scene</code> enabled for the camera.</p>
   <div class="svgbox"><svg id="seqsvg" role="img" aria-label="Sequence diagram"></svg></div>
 </section>
-
-<!-- ============================================================= 6 -->
-<section id="ocr">
-  <h2><span class="no">6</span>OCR worker — one task</h2>
-  <p class="lead">A task is one batch of up to <span class="chip n">5</span> crops of the same track plus one frame. A worker handles one task at a time;
-  three workers run in parallel by default.</p>
-  <div class="flow" id="f-ocr"></div>
-</section>
-
-<!-- ============================================================= 7 -->
-<section id="hub">
-  <h2><span class="no">7</span>Control hub — the state machine of one track</h2>
-  <p class="lead">The hub is the only component that decides what the backend receives. Everything below is per track <code>uid</code>
-  (<code>camera-engine-random10</code>), which is unique across engine restarts.</p>
-
-  <div class="svgbox"><svg viewBox="0 0 1320 330" role="img" aria-label="Track states">
-    <defs><marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
-    <text class="sm" x="20" y="30">An engine_started event with a new boot_id also ends every live track of that engine (reason engine_restarted).</text>
-    <rect class="box c-green" x="20" y="100" width="130" height="70" rx="10"/><text class="b" x="36" y="126">(new)</text><text class="sm" x="36" y="144">first event for uid</text>
-    <rect class="box c-blue" x="240" y="80" width="170" height="110" rx="10"/><text class="b" x="256" y="106">LIVE</text><text class="sm" x="256" y="124">results are voted</text><text class="sm" x="256" y="138">triggers deferred / published</text><text class="sm" x="256" y="152">periodic re-query</text><text class="sm" x="256" y="166">stale watch</text>
-    <rect class="box c-amber" x="590" y="80" width="170" height="110" rx="10"/><text class="b" x="606" y="106">ENDED</text><text class="sm" x="606" y="124">track_ended received</text><text class="sm" x="606" y="138">waiting for in-flight</text><text class="sm" x="606" y="152">tasks to answer</text>
-    <rect class="box c-purple" x="940" y="80" width="170" height="110" rx="10"/><text class="b" x="956" y="106">CLOSED</text><text class="sm" x="956" y="124">final published (or dropped)</text><text class="sm" x="956" y="138">kept for late results</text>
-    <rect class="box c-grey" x="1190" y="100" width="110" height="70" rx="10"/><text class="b" x="1204" y="126">deleted</text><text class="sm" x="1204" y="144">checkpoint gone</text>
-    <path class="ar" d="M150 135 H240" marker-end="url(#h)"/><text class="sm" x="156" y="128">track_started</text>
-    <path class="ar" d="M410 135 H590" marker-end="url(#h)"/><text class="sm" x="440" y="124">track_ended</text><text class="sm" x="440" y="156">or STALE: silent 120 s</text>
-    <path class="ar" d="M760 135 H940" marker-end="url(#h)"/><text class="sm" x="780" y="124">all tasks answered</text><text class="sm" x="780" y="156">or 30 s finalize timeout</text>
-    <path class="ar" d="M1110 135 H1190" marker-end="url(#h)"/><text class="sm" x="1116" y="128">+300 s</text>
-    <path class="ar" d="M1025 190 V235 H1000 V192" marker-end="url(#h)"/>
-    <text class="sm" x="760" y="260">late result while CLOSED: publish the final again (revision + 1) only if the plate changed, else drop</text>
-  </svg></div>
-
-  <div class="cols" style="margin-top:18px">
-    <div>
-      <p class="flowtitle">Events in (<code>hub:events</code>, <code>hub:results</code>)</p>
-      <div class="flow" id="f-hub-in"></div>
-    </div>
-    <div>
-      <p class="flowtitle">Timers (checked every 0.2 s)</p>
-      <div class="flow" id="f-hub-tick"></div>
-    </div>
-  </div>
-
-  <p class="flowtitle" style="margin-top:22px">How a plate is decided</p>
-  <div class="cols">
-    <div class="card">
-      <b>Vote</b>
-      <ul class="tight">
-        <li>Only <i>valid</i> results count (valid OCR, text not empty / "0"). Each candidate plate scores the <b>sum of its confidences</b>; highest sum wins
-          (tie → highest single confidence). The best single result of the winner supplies the images.</li>
-        <li>No valid result: the most confident attempt is shown (<code>raw_text</code>), <code>is_valid=false</code>, plate "0".</li>
-        <li>At most <span class="chip n">50</span> results are kept per track.</li>
-      </ul>
-    </div>
-    <div class="card">
-      <b>"Satisfied" (stop asking OCR)</b>
-      <ul class="tight">
-        <li>winner's best confidence ≥ <span class="chip n">0.85</span>, <b>or</b></li>
-        <li>≥ <span class="chip n">3</span> valid results agree and there is only one candidate.</li>
-        <li>When satisfied: all waiting triggers publish at once, the detector stops sending crops for this track and skips the leave-scene OCR pass.</li>
-      </ul>
-    </div>
-    <div class="card">
-      <b>What the backend receives (<span class="chip k">plate:vehicle:results</span>)</b>
-      <ul class="tight">
-        <li><code>update_type = cross_line</code> / <code>stop_roi</code> — once per event per track, with the event detail (direction, stop duration …).</li>
-        <li><code>update_type = leave_scene</code>, <code>is_final=true</code> — one final per track (gate: seen ≥ <span class="chip n">8</span> frames and ≥ <span class="chip n">1</span> crop,
-          unless something was already published for the track).</li>
-        <li>Periodic re-queries are <b>not</b> published as records; they only feed the vote.</li>
-        <li>Each record carries <code>resolved</code> (plate, confidence, votes, image paths), <code>ocr_results</code> per stage, <code>revision</code>, <code>complete</code>, <code>missing_tasks</code>.</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<!-- ============================================================= 8 -->
 <section id="redis">
-  <h2><span class="no">8</span>Redis keys — who writes, who reads, bounds</h2>
+  <h2><span class="no">9</span>Redis keys — who writes, who reads, bounds</h2>
   <p class="lead">Prefix <code>plate:</code> (<code>REDIS_MODULE</code>). "Bounded" means the code limits its growth.</p>
   <div class="tw"><table id="t-redis"></table></div>
 </section>
-
-<!-- ============================================================= 9 -->
 <section id="images">
-  <h2><span class="no">9</span>Images — how many, where, what size class</h2>
+  <h2><span class="no">10</span>Images — how many, where, what size class</h2>
   <p class="lead">Numbers are per track and per OCR task.</p>
   <div class="grid2">
     <div class="card">
@@ -498,23 +936,17 @@ td.v{white-space:nowrap;font-weight:600;color:var(--amber)}
     </div>
   </div>
 </section>
-
-<!-- ============================================================= 10 -->
 <section id="timeouts">
-  <h2><span class="no">10</span>Every timeout, interval and limit</h2>
+  <h2><span class="no">11</span>Every timeout, interval and limit</h2>
   <p class="lead">Grouped by service. "Effect" says what happens when the time runs out.</p>
   <div class="tw"><table id="t-time"></table></div>
 </section>
-
-<!-- ============================================================= 11 -->
 <section id="findings">
-  <h2><span class="no">11</span>Things worth knowing (found while mapping)</h2>
+  <h2><span class="no">12</span>Things worth knowing (found while mapping)</h2>
   <p class="lead">Read straight from the code; none of these were changed.</p>
   <div class="grid2" id="finds"></div>
 </section>
-
 </main>
-
 <script>
 /* ---------------------------------------------------------------
    helpers
@@ -544,141 +976,22 @@ function renderTable(id, head, rows){
 /* ---------------------------------------------------------------
    2 startup
 --------------------------------------------------------------- */
-renderFlow('f-boot-det',[
- {k:'start',t:'Probe the device',d:'<code>resolve_runtime</code>: <code>DETECTION_DEVICE</code> = gpu | cpu | auto. For gpu/auto it calls <code>torch.cuda.is_available()</code>. No CUDA + strict off → logs an error and runs the CPU pipeline.'},
- {t:'Check model files exist',d:'Filesystem check only. A missing OpenVINO/ONNX model falls back to the <code>.pt</code> on CPU (<code>BACKEND_FALLBACK_TO_PT</code>).'},
- {t:'Wait for Redis',d:'<code>wait_until_available</code> retries until Redis answers.',c:[['t','retry every 2 s']]},
- {t:'Start background threads',d:'engine-status monitor · command worker (BRPOP on <code>cmd:ai:request</code>) · camera-events subscriber · rebalance loop · heartbeat · health server <code>:8010/health</code>.',c:[['t','rebalance 30 s'],['t','heartbeat 10 s, TTL 30 s'],['t','BRPOP 2 s']]},
- {k:'store',t:'Self-heal',d:'Reads <span class="chip k">internal:detector:state</span> (phase + engine count) and replays it: <code>start_idle(n)</code> spawns n engine processes (default <span class="chip n">1</span> on a fresh boot). If the active-camera ledger is not empty, <code>start_process()</code> re-attaches those cameras.'},
- {t:'Engine process boots',d:'Builds its own backend (loads the model), runs the <b>capacity calibration</b> (CPU, engine 0), warm-up, then starts the hub client (emits <code>engine_started</code>) and its loop.',c:[['n','warm-up 10 runs'],['t','container start_period 180 s']]},
-]);
-renderFlow('f-boot-ocr',[
- {k:'start',t:'Start worker processes',d:'Pool starts <span class="chip n">3</span> workers (<code>DEFAULT_WORKER_COUNT</code>, or the saved count). Each loads <b>two</b> PaddleOCR pipelines (car, motorcycle), warms up with dummy images, and checks that the MinIO private bucket exists.',c:[['t','load timeout 180 s'],['t','watchdog respawn 5 s']]},
- {t:'Idle until demand',d:'Workers only pop tasks while the pool is in <i>processing</i>. The detector flips that with a pub/sub message on <span class="chip k">internal:demand:events</span> (first camera active → on, last removed → off).',c:[['t','idle poll 0.2 s']]},
-]);
-renderFlow('f-boot-hub',[
- {k:'start',t:'Wait for Redis, take the leader lease',d:'Key <span class="chip k">internal:hub:leader</span>, one hub per module; a second copy waits as standby.',c:[['t','lease TTL 15 s'],['t','renew 5 s'],['t','retry Redis 2 s']]},
- {k:'store',t:'Restore and replay',d:'Loads saved track checkpoints (<span class="chip k">hub:track:&lt;uid&gt;</span>), creates the consumer group (new group starts at the tail <code>$</code>), then re-reads entries it read but never acknowledged before it went live.'},
-]);
 
 /* ---------------------------------------------------------------
    3 camera lifecycle
 --------------------------------------------------------------- */
-renderFlow('f-camera',[
- {k:'start',who:'backend',t:'Backend stores the camera',d:'HSET <span class="chip k">cameras:config</span> (address, ROI, line, stop ROI, trigger flags) and PUBLISH <code>camera:config:updated</code>.'},
- {who:'camera_stream',t:'Sync and register',d:'Copies config into <span class="chip k">cameras:details</span> (<code>connected=false</code>, "Waiting for connection"). If the camera answers on its RTSP port, it is registered in MediaMTX (<code>sourceOnDemand=false</code>, TCP).',c:[['t','TCP ping 0.2 s'],['t','register call 1.0 s']]},
- {who:'camera_stream',t:'Online / offline decision',d:'Poll MediaMTX <code>/paths/list</code> for <code>ready</code>. Monitor loop checks every camera. <b>Online is published immediately; offline only after being offline for 10 s</b> (so blips do not detach cameras). The result goes to <span class="chip k">cameras:details</span> and the channel <span class="chip k">camera:events</span>.',c:[['t','poll 0.5 s'],['t','API timeout 1.5 s'],['t','loop 0.3 s (idle 1.0 s)'],['t','OFFLINE_HOLD 10 s']]},
- {who:'backend',t:'Backend activates',d:'LPUSH <span class="chip k">cmd:ai:request</span> <code>{action: activated, camera_id, request_id}</code> and waits on <span class="chip k">cmd:ai:response:&lt;request_id&gt;</span>.'},
- {who:'detector',t:'Command worker',d:'<b>First</b> writes the camera into the durable ledger <span class="chip k">internal:active_cameras</span> (with its config), <b>then</b> notifies demand (OCR starts popping tasks).',c:[['t','BRPOP 2 s']]},
- {k:'decision',who:'detector',t:'Is the camera online right now?',b:[
-   ['no','No (details.connected = false)','Stay registered but wait. Attach happens on the next <i>online</i> event. The command still answers OK.'],
-   ['yes','Yes','Attach: pick the engine with the fewest cameras (start a new one if full); the engine creates the RTSP reader thread, a BYTETracker, a model instance (CPU), then applies the cadence / capacity check.']]},
- {who:'detector',t:'Answer and status',d:'<span class="chip k">cameras:&lt;id&gt;:ai_status</span> = <code>running</code>; response <code>OK</code> / <code>ERROR</code> is pushed to the response list.',c:[['t','response TTL 60 s']]},
- {k:'decision',who:'detector',t:'While running',b:[
-   ['wait','Camera goes offline','Event <code>connected=false</code> starts a timer. If it is still offline after <b>10 s</b> the camera is detached (<code>ai_status=stopped</code>, "Camera disconnected"); it stays in the ledger and re-attaches on the next online event.'],
-   ['no','Engine reports an error','Detach, wait <b>3 s</b>, attach again. <b>Max 1 retry</b>; the retry counter resets after 600 s without errors. After that the camera stays stopped.'],
-   ['yes','Backend deactivates','Ledger entry removed, camera detached, <code>ai_status=stopped_by_user</code>. If no active camera is left, demand switches off (OCR stops popping).']]},
- {k:'end',who:'detector',t:'Container restart / reboot',d:'Self-heal replays the ledger: every camera that was active (and is online) is attached again with its stored config — no backend action needed.'},
-]);
 
 /* ---------------------------------------------------------------
    4 frame loop
 --------------------------------------------------------------- */
-renderFlow('f-reader',[
- {k:'start',t:'Open the stream',d:'OpenCV + FFmpeg, <b>RTSP over TCP</b>, keeps buffer size 1, FFmpeg decode threads 1.',c:[['t','open timeout 5 s'],['t','FFmpeg stimeout 5 s'],['n','1 decode thread']]},
- {t:'Read frames continuously',d:'Only the <b>latest</b> frame is kept (older ones are overwritten). Every received frame increments <code>frames_captured</code>, which is how the engine counts missed frames.',c:[['t','read timeout 5 s']]},
- {k:'decision',t:'Read failed?',b:[
-   ['no','Yes','Re-open the stream; wait 0.5 s between failures (logs at failure 1, 10, 50, 200, then every 1000).'],
-   ['yes','No','Store frame + capture time.']],c:[['t','reconnect backoff 0.2 s'],['t','read-fail backoff 0.5 s']]},
- {k:'end',t:'Stop',d:'Waits for the thread to leave <code>read()</code> before releasing the capture (releasing mid-read can deadlock FFmpeg).',c:[['t','join timeout 6 s']]},
-]);
-renderFlow('f-loop',[
- {k:'start',t:'Housekeeping',d:'Apply add/remove-camera commands; drain control messages from the hub (<code>result</code> / <code>request</code> / <code>state</code>); every 10 s write the <code>[PERF]</code> line.',c:[['t','PERF every 10 s'],['n','STATS every 50 loops']]},
- {t:'For each camera: take the newest frame',d:'If no new frame arrived since last time, skip this camera. <code>missed = new_frames − 1</code>. <code>fid</code> counts camera frames (missed ones included).'},
- {t:'Crop to the camera ROI',d:'Only the ROI rectangle goes to the model; all later coordinates are shifted back to full-frame pixels.'},
- {k:'decision',t:'Is this camera due for detection?',d:'<code>fid ≥ _next_due</code>. With <code>DETECT_EVERY_N_FRAMES=1</code> and no degradation, every new frame is due.',b:[
-   ['wait','Not due → coast','Counted as coasted; no inference, tracker not updated, (debug video only if configured).'],
-   ['yes','Due','Joins this loop\'s batch.']]},
- {t:'Inference (one call per loop)',d:'GPU: <b>one batched <code>predict()</code></b> over all due frames (.pt, FP32 unless <code>GPU_HALF</code>). CPU: one model instance per camera, run in parallel threads (OpenVINO FP32/INT8 or ONNX Runtime). Output per frame: <code>[x1,y1,x2,y2,conf,cls]</code>; class 0 = car plate, 1 = motorcycle plate.',c:[['n','conf ≥ 0.25'],['n','NMS IoU 0.7'],['n','max 300 boxes'],['t','slow-loop warning > 150 ms']]},
- {t:'Tracker update (per camera)',d:'BYTETracker with the true elapsed frame count (<code>dt</code>), so coasted frames advance the motion model correctly. Lost-track buffer is rescaled to the real detect rate.',c:[['n','buffer 60 steps'],['n','track thresh 0.5'],['n','recovery + camera-motion comp. on']]},
- {k:'decision',t:'For every active track',b:[
-   ['yes','New track','Make <code>uid = camera-engine-random10</code>, emit <code>track_started</code> (with the camera\'s trigger flags).'],
-   ['','Every track','Cut the crop, measure sharpness, run triggers (C), update the best-5 crops and best frame, send any pending request (D), emit <code>track_update</code> at most every 5 s.']],c:[['t','track_update 5 s']]},
- {k:'decision',t:'Tracks that disappeared',d:'Not seen for more than <span class="chip n">30</span> camera frames → end the track (D).'},
- {k:'end',t:'Optional debug video, then stats',d:'Annotated frame written if enabled; counters feed <code>[PERF]</code>/<code>[STATS]</code>. Then the loop repeats. If no camera had a new frame it sleeps 2–20 ms.'},
-]);
-renderFlow('f-triggers',[
- {k:'start',t:'Anchor point',d:'Bottom-centre of the plate box, in full-frame pixels. Each frame adds (point, time, confidence) to the track\'s history.'},
- {t:'Line crossing → <code>cross_line</code>',d:'Needs a line on the camera. Fires when the point switches side of the line.',c:[['n','track age ≥ 5 frames'],['n','avg conf ≥ 0.40'],['n','cooldown 30 frames']]},
- {t:'Stop ROI entry',d:'Point inside the polygon with average confidence ≥ <span class="chip n">0.30</span> for <span class="chip n">2</span> detection frames → entry confirmed, timer starts.'},
- {t:'Stopped → <code>stop_roi</code>',d:'After entry confirmed: ≥ <span class="chip n">6</span> samples, ≥ <span class="chip t">2.0 s</span> inside, and net movement over the last <span class="chip t">1.5 s</span> ≤ <span class="chip n">20 px/s</span>. Fires once per entry.'},
- {t:'Once per event per track',d:'The engine (and the hub) ignore a second <code>cross_line</code> or <code>stop_roi</code> for the same track.'},
-]);
-renderFlow('f-submit',[
- {k:'start',t:'Something asks for a read',d:'<b>Local, immediate:</b> a trigger fired (<code>cross_line</code> / <code>stop_roi</code>). <b>From the hub:</b> a periodic request, or "leave_scene" at the end. The request is remembered until a task goes out.',c:[['n','priority leave_scene 3 > triggers 2 > periodic 1']]},
- {k:'decision',t:'May a task go out now?',d:'All must hold:',b:[
-   ['no','Blocked if','hub said <i>satisfied</i> · a previous task of this track is still in flight (until the hub acknowledges it, or <b>15 s</b>) · no crop exists yet · the crop set is the same as the one already sent (key = best frame number : crop count)'],
-   ['yes','Go','Build the task and dispatch.']],c:[['t','SUBMIT_TIMEOUT 15 s']]},
- {k:'img',t:'Build the task',d:'Encode up to <span class="chip i">5 crops</span> + <span class="chip i">1 best frame</span> as JPEG, with camera id, track id, uid, stage, class flags, detector scores, source URL. Pickled.'},
- {k:'store',t:'Dispatch (ordered)',d:'<code>submitted</code> event first, then the task — both go through the in-memory outbox, so the hub always knows a task exists before its result can arrive. Task → <span class="chip k">ocr:tasks</span> (LPUSH).',c:[['n','outbox max 20 000'],['t','retry backoff 0.2 → 5 s']]},
-]);
-renderFlow('f-endtrack',[
- {k:'start',t:'Track lost for more than 30 frames',d:'(or camera removed, or engine stopping)'},
- {k:'decision',t:'Leave-scene OCR pass?',b:[
-   ['yes','Yes if','camera has <code>leave_scene</code> on · hub has <b>not</b> said satisfied · seen ≥ <span class="chip n">8</span> frames · ≥ <span class="chip n">1</span> crop → build a <code>leave_scene</code> task and dispatch it.'],
-   ['no','Otherwise','No final OCR task is sent.']]},
- {k:'store',t:'Tell the hub',d:'Emit <code>track_ended</code> {reason, seen_frames, n_crops, duration, <code>finalize_task_id</code>}. After that the detector forgets the track completely; the hub owns the rest.',c:[['k','hub:events']]},
- {k:'end',t:'Free memory',d:'Drop the track\'s crops, best frame, trigger state, recognition state.'},
-]);
 
 /* ---------------------------------------------------------------
    6 OCR
 --------------------------------------------------------------- */
-renderFlow('f-ocr',[
- {k:'start',t:'Pop a task',d:'BRPOP on <span class="chip k">internal:ocr:tasks</span>. FIFO (producer LPUSH, consumer BRPOP). Queue latency = now − the nanosecond timestamp inside the task id.',c:[['t','BRPOP 1 s'],['t','retry after error 1 s']]},
- {t:'Check the task',d:'Needs <code>task_id</code>, <code>camera_id</code>, <code>track_id</code>, <code>trigger_type</code>; otherwise answers <code>status=error</code>. No crops → <code>skipped</code>. Decode crops (and the best frame); if none decode → <code>skipped</code>.'},
- {t:'Class vote',d:'Majority of the crops\' class flags decides the pipeline: <b>0 = car</b>, <b>1 = motorcycle</b>.'},
- {k:'decision',t:'Recognise',b:[
-   ['yes','Car (class 0)','Per crop: CLAHE contrast on the V channel → resize to <b>256×64</b> → PaddleOCR (recognition only). Then a <b>character-by-character vote</b> over candidates that have exactly 8 characters. Result text + average of best confidence per position.'],
-   ['yes','Motorcycle (class 1)','Per crop: resize to <b>240×200</b> → detection + recognition; boxes smaller than 5% of the largest are dropped; text split into parts by position; voted per part.'],
-   ['no','Other class','<code>status=error</code>.']]},
- {t:'Validate',d:'Car: confidence ≥ <span class="chip n">0.70</span>; after normalising, exactly 8 characters matching <code>2 digits + Persian letter + 3 digits + 2 digits</code>. Motorcycle: format rules on the voted parts. Result: <code>ok</code> (valid) or <code>invalid</code> with the reason in <code>description</code>.'},
- {k:'img',t:'Upload two images',d:'The first crop and the best frame, PNG, to the MinIO private bucket under <code>dynamics/Valid…</code> or <code>dynamics/Invalid…</code>. A failed upload leaves the path empty; the result is still sent.',c:[['i','2 PNG per task']]},
- {k:'store',t:'Answer the hub',d:'XADD to <span class="chip k">internal:hub:results</span> with the track <code>uid</code>, <code>task_id</code>, stage, status, plate text, confidence, validity, image paths. <b>Always</b> answered — also for skipped / error — so the hub never waits for nothing. Retried when Redis hiccups.',c:[['n','8 attempts'],['t','0.2 → 5 s backoff (~25 s)']]},
- {k:'end',t:'Log and next',d:'<code>[TASK-DONE] total_processing_ms</code>; every 30 s a <code>[OCR-STATS]</code> line per worker (tasks, queue latency, processing ms, valid %). An unhandled exception still produces an <code>error</code> result.',c:[['t','stats every 30 s']]},
-]);
 
 /* ---------------------------------------------------------------
    7 hub
 --------------------------------------------------------------- */
-renderFlow('f-hub-in',[
- {k:'start',t:'engine_started',d:'Remember the engine\'s <code>boot_id</code>. Any live track of that engine from an older boot is ended with reason <code>engine_restarted</code>.'},
- {t:'track_started',d:'Create/mark the track, store its trigger flags. If <i>periodic</i> is on: first re-query at +<span class="chip t">1 s</span>.'},
- {t:'track_update',d:'Heartbeat with frame/crop counts; also resets the stale timer. Re-evaluates "satisfied" (e.g. liveness).'},
- {t:'submitted',d:'Marks <code>task_id</code> as in flight. Any trigger that was waiting without a task now waits for <b>this</b> task.'},
- {k:'decision',t:'trigger',d:'Once per event per track.',b:[
-   ['yes','Already satisfied','Publish immediately (<code>immediate</code>).'],
-   ['yes','Its result already arrived','Publish now (<code>after_recognition</code>).'],
-   ['wait','Otherwise','Hold it ("deferred") — see timers.']]},
- {k:'decision',t:'result (from OCR)',b:[
-   ['','Normal','Add to the vote → re-check satisfied → send ack to the detector (<code>result</code>, satisfied flag, display) → publish any deferred trigger waiting for this task.'],
-   ['no','Duplicate task_id','Ignored.'],
-   ['wait','Track already CLOSED','Late result: if it changes the answer, publish the final again with <code>revision+1</code>; else log and drop.']]},
- {t:'track_ended',d:'Mark ended, remember <code>finalize_task_id</code> as in flight, then try to close.'},
-]);
-renderFlow('f-hub-tick',[
- {k:'wait',t:'Deferred trigger deadline',d:'A trigger that is not answered is published anyway, so the backend never gets nothing.',b:[
-   ['wait','Its task is queued','wait up to <b>15 s</b> (<code>trigger_task_wait_sec</code>) — a busy OCR delays the event rather than emptying it'],
-   ['wait','No task could be sent','wait up to <b>3 s</b> (<code>trigger_max_wait_sec</code>)']],c:[['t','15 s / 3 s']]},
- {t:'Periodic re-query',d:'Only for cameras with the periodic flag. Every <span class="chip t">3 s</span>: if the track is not satisfied and nothing is in flight, ask the detector to send crops again (<code>ctl request</code>). The detector only sends if a better crop set exists.',c:[['t','first +1 s, then every 3 s']]},
- {t:'Lost task guard',d:'A task in flight for more than <span class="chip t">90 s</span> (3 × finalize timeout) is forgotten so it cannot block periodic requests forever.'},
- {k:'end',t:'Stale track',d:'No event at all for <span class="chip t">120 s</span> → the hub ends the track itself (<code>reason=stale</code>).'},
- {k:'decision',t:'Close an ended track',b:[
-   ['wait','Tasks still in flight','wait up to <b>30 s</b> after the end (<code>finalize_timeout_sec</code>); then close and mark them <code>missing_tasks</code>'],
-   ['yes','All answered','Publish deferred triggers (<code>track_ended</code>), then the final if the gate passes (seen ≥ 8, crops ≥ 1) or anything was already published.'],
-   ['no','Gate fails and nothing published','Track DROPPED — the backend never hears about it.']],c:[['t','30 s']]},
- {k:'store',t:'Grace and cleanup',d:'Closed tracks are kept <span class="chip t">300 s</span> to catch late results, then the checkpoint is deleted. Live checkpoints also expire by themselves after <span class="chip t">3600 s</span>.'},
-]);
 
 /* ---------------------------------------------------------------
    8 redis table
@@ -877,6 +1190,22 @@ $('#finds').innerHTML = finds.map(f=>`<div class="card find ${f[2]?'ok':''}"><h4
     try{ localStorage.setItem('pm-theme', nx); }catch(e){}
   });
 })();
+
+/* zoom controls */
+document.querySelectorAll('.chartbox').forEach(box=>{
+  const svg = box.querySelector('svg.flowsvg'), W = +svg.dataset.w, wrap = box.querySelector('.chartscroll');
+  let z = 1;
+  const apply = ()=>{ svg.style.width = Math.round(W*z)+'px'; svg.style.minWidth = '0'; };
+  const fit = ()=>{ z = Math.max(0.7, Math.min(1, (wrap.clientWidth-4)/W)); apply(); };
+  box.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{
+    const k=b.dataset.z; if(k==='in') z=Math.min(2.5,z*1.25); else if(k==='out') z=Math.max(0.3,z/1.25); else if(k==='one') z=1; else fit(); apply();
+  }));
+  fit();
+});
+addEventListener('resize',()=>{});
 </script>
+</body>
+</html>
+
 </body>
 </html>
