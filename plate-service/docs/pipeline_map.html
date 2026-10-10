@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plate Pipeline Map</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#1b2430; --muted:#5d6b7c; --line:#d5dbe3; --soft:#eef1f5;
+  --blue:#1f6feb; --blue-bg:#e6f0ff;
+  --green:#1a7f4b; --green-bg:#e3f6ec;
+  --amber:#9a5b00; --amber-bg:#fff1d6;
+  --red:#b42318; --red-bg:#fde8e6;
+  --purple:#6f42c1; --purple-bg:#efe9fb;
+  --teal:#0b7285; --teal-bg:#dff4f7;
+  --shadow:0 1px 2px rgba(20,30,50,.08);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f141b; --panel:#171e28; --ink:#e6ebf2; --muted:#93a1b3; --line:#2b3644; --soft:#1e2733;
+    --blue:#6ea8ff; --blue-bg:#16294a;
+    --green:#4cc38a; --green-bg:#123324;
+    --amber:#f0b44c; --amber-bg:#3a2a0c;
+    --red:#ff8a80; --red-bg:#40181a;
+    --purple:#b79cf2; --purple-bg:#2a1f45;
+    --teal:#5fd0e3; --teal-bg:#0f3037;
+    --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --panel:#171e28; --ink:#e6ebf2; --muted:#93a1b3; --line:#2b3644; --soft:#1e2733;
+  --blue:#6ea8ff; --blue-bg:#16294a;
+  --green:#4cc38a; --green-bg:#123324;
+  --amber:#f0b44c; --amber-bg:#3a2a0c;
+  --red:#ff8a80; --red-bg:#40181a;
+  --purple:#b79cf2; --purple-bg:#2a1f45;
+  --teal:#5fd0e3; --teal-bg:#0f3037;
+  --shadow:none;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}
+header{padding:28px 16px 12px;max-width:1240px;margin:0 auto}
+header h1{margin:0 0 4px;font-size:26px}
+header p{margin:0;color:var(--muted);max-width:860px}
+nav{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line)}
+nav .in{max-width:1240px;margin:0 auto;padding:8px 16px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+nav a{font-size:13px;color:var(--ink);text-decoration:none;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel)}
+nav a:hover{border-color:var(--blue);color:var(--blue)}
+nav button{margin-left:auto;font-size:13px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--ink);cursor:pointer}
+main{max-width:1240px;margin:0 auto;padding:0 16px 80px}
+section{margin-top:34px;scroll-margin-top:56px}
+section>h2{font-size:21px;margin:0 0 4px;display:flex;gap:10px;align-items:center}
+section>h2 .no{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--blue);color:#fff;font-size:14px}
+.lead{color:var(--muted);margin:0 0 14px;max-width:920px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:14px 16px}
+.legend{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0}
+.chip{display:inline-block;font-size:12px;line-height:1;padding:4px 7px;border-radius:6px;border:1px solid transparent;white-space:nowrap}
+.chip.t{background:var(--amber-bg);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 30%,transparent)}
+.chip.n{background:var(--blue-bg);color:var(--blue);border-color:color-mix(in srgb,var(--blue) 30%,transparent)}
+.chip.k{background:var(--purple-bg);color:var(--purple);border-color:color-mix(in srgb,var(--purple) 30%,transparent);font-family:ui-monospace,Menlo,Consolas,monospace}
+.chip.i{background:var(--green-bg);color:var(--green);border-color:color-mix(in srgb,var(--green) 30%,transparent)}
+.chip.w{background:var(--red-bg);color:var(--red);border-color:color-mix(in srgb,var(--red) 30%,transparent)}
+.svgbox{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px}
+.svgbox svg{display:block;min-width:900px;width:100%;height:auto}
+svg text{fill:var(--ink);font:12px system-ui,sans-serif}
+svg .sm{font-size:10.5px;fill:var(--muted)}
+svg .b{font-weight:600}
+svg .box{fill:var(--panel);stroke:var(--line);stroke-width:1.5}
+svg .c-blue{fill:var(--blue-bg);stroke:var(--blue)}
+svg .c-green{fill:var(--green-bg);stroke:var(--green)}
+svg .c-amber{fill:var(--amber-bg);stroke:var(--amber)}
+svg .c-purple{fill:var(--purple-bg);stroke:var(--purple)}
+svg .c-teal{fill:var(--teal-bg);stroke:var(--teal)}
+svg .c-red{fill:var(--red-bg);stroke:var(--red)}
+svg .c-grey{fill:var(--soft);stroke:var(--line)}
+svg .ar{stroke:var(--muted);stroke-width:1.4;fill:none}
+svg .ar-p{stroke:var(--purple);stroke-width:1.5;fill:none}
+svg .ar-g{stroke:var(--green);stroke-width:1.5;fill:none}
+svg .ar-b{stroke:var(--blue);stroke-width:1.5;fill:none}
+svg .ar-a{stroke:var(--amber);stroke-width:1.5;fill:none;stroke-dasharray:5 3}
+svg .lane{stroke:var(--line);stroke-dasharray:3 4}
+svg .zone{fill:none;stroke:var(--line);stroke-dasharray:6 4;stroke-width:1.2}
+/* flow */
+.flow{display:flex;flex-direction:column;align-items:stretch;max-width:980px}
+.step{position:relative;background:var(--panel);border:1px solid var(--line);border-left:5px solid var(--blue);border-radius:10px;padding:10px 14px 10px 14px;box-shadow:var(--shadow)}
+.step.start{border-left-color:var(--green)}
+.step.decision{border-left-color:var(--amber)}
+.step.store{border-left-color:var(--purple)}
+.step.end{border-left-color:var(--red)}
+.step.img{border-left-color:var(--green)}
+.step h4{margin:0 0 2px;font-size:15px}
+.step h4 .ix{display:inline-block;min-width:26px;margin-right:6px;color:var(--muted);font-weight:500;font-size:12px}
+.step p{margin:2px 0 6px;color:var(--ink)}
+.step .who{float:right;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-left:8px}
+.step .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.arrow{align-self:center;color:var(--muted);height:18px;line-height:18px;font-size:16px}
+.branches{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:8px}
+.br{background:var(--soft);border-radius:8px;padding:7px 10px;font-size:13.5px;border:1px solid var(--line)}
+.br>b:first-child{display:block;font-size:12px;letter-spacing:.02em;margin-bottom:2px}
+.br.yes>b:first-child{color:var(--green)} .br.no>b:first-child{color:var(--red)} .br.wait>b:first-child{color:var(--amber)}
+ul.tight{margin:4px 0 4px 18px;padding:0} ul.tight li{margin:1px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+.tw{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--soft);font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);position:sticky;top:0}
+tr:last-child td{border-bottom:none}
+td.v{white-space:nowrap;font-weight:600;color:var(--amber)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.find{border-left:5px solid var(--red);}
+.find.ok{border-left-color:var(--green)}
+.find h4{margin:0 0 3px}
+.find p{margin:0;color:var(--ink)}
+.small{font-size:13px;color:var(--muted)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;align-items:start}
+.flowtitle{font-size:14px;font-weight:600;margin:0 0 8px;color:var(--muted)}
+@media (max-width:640px){ .step .who{float:none;display:inline-block;margin:0 0 4px} }
+@media print{ nav{display:none} .svgbox{overflow:visible} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plate pipeline — complete map</h1>
+  <p>Every service, every step a camera frame takes until a plate record reaches the backend, with the real numbers
+  (images, queues, timeouts) read from the code in <code>plate-service/</code>. Values quoted here are the defaults in each
+  service's <code>config.py</code>; <code>.env</code> only changes device, models and deployment.</p>
+  <div class="legend">
+    <span class="chip t">timeout / interval</span>
+    <span class="chip n">number / limit</span>
+    <span class="chip k">redis key</span>
+    <span class="chip i">image</span>
+    <span class="chip w">warning</span>
+  </div>
+</header>
+
+<nav><div class="in">
+  <a href="#map">1 Services</a>
+  <a href="#boot">2 Startup</a>
+  <a href="#camera">3 Camera lifecycle</a>
+  <a href="#frame">4 Frame loop</a>
+  <a href="#seq">5 One vehicle, end to end</a>
+  <a href="#ocr">6 OCR worker</a>
+  <a href="#hub">7 Control hub</a>
+  <a href="#redis">8 Redis keys</a>
+  <a href="#images">9 Images</a>
+  <a href="#timeouts">10 All timeouts</a>
+  <a href="#findings">11 Findings</a>
+  <button id="theme" type="button">Theme</button>
+</div></nav>
+
+<main>
+
+<!-- ============================================================= 1 -->
+<section id="map">
+  <h2><span class="no">1</span>Services and how they talk</h2>
+  <p class="lead">Seven runtime pieces. Redis is the only bus: nothing calls another service directly except the video path
+  (camera → MediaMTX → detector) and MinIO uploads (OCR → MinIO).</p>
+  <div class="svgbox">
+  <svg viewBox="0 0 1300 700" role="img" aria-label="Service map">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker>
+      <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--purple)"/></marker>
+      <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--green)"/></marker>
+      <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--blue)"/></marker>
+    </defs>
+
+    <!-- external -->
+    <rect class="box c-grey" x="20" y="40" width="190" height="86" rx="10"/>
+    <text class="b" x="34" y="64">IP cameras / test publishers</text>
+    <text class="sm" x="34" y="82">real RTSP cameras, or</text>
+    <text class="sm" x="34" y="96">plate_video_publisher_1…8</text>
+    <text class="sm" x="34" y="110">(ffmpeg loop of a video, profile test-video)</text>
+
+    <rect class="box c-grey" x="20" y="310" width="190" height="110" rx="10"/>
+    <text class="b" x="34" y="334">Backend (Django)</text>
+    <text class="sm" x="34" y="352">writes camera config, sends</text>
+    <text class="sm" x="34" y="366">activate / deactivate commands,</text>
+    <text class="sm" x="34" y="380">reads plate records + MinIO images</text>
+    <text class="sm" x="34" y="394">(outside this repo)</text>
+
+    <!-- video -->
+    <rect class="box c-teal" x="280" y="40" width="190" height="86" rx="10"/>
+    <text class="b" x="294" y="64">plate_mediamtx</text>
+    <text class="sm" x="294" y="82">RTSP relay, path = camera id</text>
+    <text class="sm" x="294" y="96">rtsp://mediamtx:8554/&lt;id&gt;</text>
+    <text class="sm" x="294" y="110">REST API (poll for "ready")</text>
+
+    <rect class="box c-teal" x="280" y="170" width="190" height="104" rx="10"/>
+    <text class="b" x="294" y="194">plate_camera_stream</text>
+    <text class="sm" x="294" y="212">registers cameras in MediaMTX,</text>
+    <text class="sm" x="294" y="226">checks online / offline,</text>
+    <text class="sm" x="294" y="240">publishes camera events</text>
+    <text class="sm" x="294" y="254">(10 s offline hold)</text>
+
+    <!-- redis -->
+    <rect class="box c-purple" x="520" y="170" width="250" height="380" rx="12"/>
+    <text class="b" x="536" y="196" style="font-size:15px">eyeplate_redis</text>
+    <text class="sm" x="536" y="214">appendonly yes, fsync every second</text>
+    <text class="sm" x="536" y="240">camera config / details / events</text>
+    <text class="sm" x="536" y="258">cmd:ai:request / response</text>
+    <text class="sm" x="536" y="276">internal:active_cameras (ledger)</text>
+    <text class="sm" x="536" y="294">internal:detector:state / capacity</text>
+    <text class="sm" x="536" y="318">internal:ocr:tasks      (LIST)</text>
+    <text class="sm" x="536" y="336">internal:hub:events     (STREAM)</text>
+    <text class="sm" x="536" y="354">internal:hub:results    (STREAM)</text>
+    <text class="sm" x="536" y="372">internal:hub:ctl:&lt;engine&gt; (LIST)</text>
+    <text class="sm" x="536" y="390">internal:hub:track:&lt;uid&gt; (STRING)</text>
+    <text class="sm" x="536" y="408">internal:hub:leader / heartbeat</text>
+    <text class="sm" x="536" y="426">internal:demand:events (pub/sub)</text>
+    <text class="b" x="536" y="460" style="fill:var(--green)">plate:vehicle:results (LIST)</text>
+    <text class="sm" x="536" y="478">= what the backend consumes</text>
+    <text class="sm" x="536" y="504">no maxmemory is set (see findings)</text>
+
+    <!-- detector -->
+    <rect class="box c-blue" x="930" y="40" width="330" height="150" rx="10"/>
+    <text class="b" x="946" y="64">plate_detector  (:8010)</text>
+    <text class="sm" x="946" y="82">main: command worker, camera-event subscriber,</text>
+    <text class="sm" x="946" y="96">rebalance 30 s, heartbeat 10 s</text>
+    <text class="sm" x="946" y="114">Engine process(es): RTSP reader thread per camera</text>
+    <text class="sm" x="946" y="128">→ ROI → YOLO (GPU .pt batched / CPU per-camera)</text>
+    <text class="sm" x="946" y="142">→ BYTETracker → triggers → best 5 crops</text>
+    <text class="sm" x="946" y="156">GPU: ≤6 cameras per engine · CPU: ≤16, one engine</text>
+    <text class="sm" x="946" y="174">sends tasks + events, never waits for OCR</text>
+
+    <!-- ocr -->
+    <rect class="box c-green" x="930" y="250" width="330" height="130" rx="10"/>
+    <text class="b" x="946" y="274">plate_ocr  (:8011)</text>
+    <text class="sm" x="946" y="292">3 worker processes (default), each with</text>
+    <text class="sm" x="946" y="306">PaddleOCR car model + motorcycle model</text>
+    <text class="sm" x="946" y="324">pop task → vote over crops → validate</text>
+    <text class="sm" x="946" y="338">→ upload 2 PNG → push result to hub</text>
+    <text class="sm" x="946" y="356">only pops tasks while demand = processing</text>
+
+    <!-- hub -->
+    <rect class="box c-amber" x="930" y="440" width="330" height="140" rx="10"/>
+    <text class="b" x="946" y="464">plate_control_hub  (:8021 → 8020)</text>
+    <text class="sm" x="946" y="482">single leader (lease), per-track state machine</text>
+    <text class="sm" x="946" y="496">votes OCR results, decides "satisfied",</text>
+    <text class="sm" x="946" y="510">holds triggers until a result exists,</text>
+    <text class="sm" x="946" y="524">publishes trigger + final records,</text>
+    <text class="sm" x="946" y="538">tells the detector to stop / re-ask</text>
+
+    <!-- minio -->
+    <rect class="box c-grey" x="930" y="620" width="330" height="64" rx="10"/>
+    <text class="b" x="946" y="644">MinIO (+ minio_init)</text>
+    <text class="sm" x="946" y="662">private bucket, PNG crops + frames</text>
+    <text class="sm" x="946" y="676">http://minio:9000</text>
+
+    <!-- arrows video -->
+    <path class="ar" d="M210 83 H280" marker-end="url(#a)"/>
+    <text class="sm" x="214" y="76">RTSP push</text>
+    <path class="ar" d="M375 126 V170" marker-end="url(#a)"/>
+    <path class="ar" d="M365 170 V126" marker-end="url(#a)"/>
+    <text class="sm" x="384" y="152">register / poll</text>
+    <path class="ar-b" d="M470 70 H930" marker-end="url(#ab)"/>
+    <text class="sm" x="500" y="62" style="fill:var(--blue)">frames: RTSP over TCP, rtsp://mediamtx:8554/&lt;camera_id&gt;</text>
+
+    <!-- camera_stream redis -->
+    <path class="ar-p" d="M470 222 H520" marker-end="url(#ap)"/>
+    <path class="ar-p" d="M520 236 H470" marker-end="url(#ap)"/>
+    <text class="sm" x="294" y="290">⇄ config / details / events via Redis</text>
+
+    <!-- backend redis -->
+    <path class="ar-p" d="M210 352 H520" marker-end="url(#ap)"/>
+    <text class="sm" x="228" y="344">config · cmd:ai:request (activated / deactivated)</text>
+    <path class="ar-g" d="M520 400 H210" marker-end="url(#ag)"/>
+    <text class="sm" x="228" y="416" style="fill:var(--green)">plate:vehicle:results · cmd response · ai_status</text>
+
+    <!-- detector redis -->
+    <path class="ar-p" d="M930 120 L770 220" marker-end="url(#ap)"/>
+    <text class="sm" x="800" y="136">hub:events (XADD)</text>
+    <text class="sm" x="800" y="150">ocr:tasks (LPUSH)</text>
+    <path class="ar-p" d="M770 250 L930 150" marker-end="url(#ap)"/>
+    <text class="sm" x="800" y="236">hub:ctl (BRPOP)</text>
+    <text class="sm" x="800" y="250">cmd (BRPOP)</text>
+
+    <!-- ocr redis -->
+    <path class="ar-p" d="M770 310 H930" marker-end="url(#ap)"/>
+    <text class="sm" x="776" y="302">ocr:tasks (BRPOP 1 s)</text>
+    <path class="ar-p" d="M930 346 H770" marker-end="url(#ap)"/>
+    <text class="sm" x="776" y="364">hub:results (XADD)</text>
+
+    <!-- hub redis -->
+    <path class="ar-p" d="M770 470 H930" marker-end="url(#ap)"/>
+    <text class="sm" x="776" y="462">events + results (XREAD)</text>
+    <path class="ar-g" d="M930 520 H770" marker-end="url(#ag)"/>
+    <text class="sm" x="776" y="538" style="fill:var(--green)">vehicle:results · ctl (push)</text>
+
+    <!-- ocr minio -->
+    <path class="ar" d="M1260 320 H1288 V652 H1260" marker-end="url(#a)"/>
+    <text class="sm" x="1180" y="606">2 PNG per task →</text>
+    <path class="ar" d="M930 652 C 500 660, 120 600, 115 420" marker-end="url(#a)"/>
+    <text class="sm" x="300" y="640">backend reads images from MinIO</text>
+
+    <!-- zone -->
+    <text class="sm" x="20" y="500">Test-only (compose profile "test-video"): publishers + test video.</text>
+    <text class="sm" x="20" y="516">Production: real cameras replace the publishers.</text>
+    <text class="sm" x="20" y="540">autoheal (profile "watchdog") restarts containers whose healthcheck fails.</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ============================================================= 2 -->
+<section id="boot">
+  <h2><span class="no">2</span>Startup — what happens when containers come up</h2>
+  <p class="lead">Each service starts independently and waits for Redis. Nothing starts processing frames until a camera is activated
+  (or the saved ledger of active cameras is replayed).</p>
+  <div class="cols">
+    <div>
+      <p class="flowtitle">plate_detector</p>
+      <div class="flow" id="f-boot-det"></div>
+    </div>
+    <div>
+      <p class="flowtitle">plate_ocr</p>
+      <div class="flow" id="f-boot-ocr"></div>
+      <p class="flowtitle" style="margin-top:18px">plate_control_hub</p>
+      <div class="flow" id="f-boot-hub"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= 3 -->
+<section id="camera">
+  <h2><span class="no">3</span>Camera lifecycle — register, activate, offline, restart</h2>
+  <p class="lead">Camera configuration and the on/off command arrive through Redis. The "active" decision is stored first
+  (a durable ledger), so a crash or reboot resumes exactly the same set of cameras.</p>
+  <div class="flow" id="f-camera"></div>
+</section>
+
+<!-- ============================================================= 4 -->
+<section id="frame">
+  <h2><span class="no">4</span>Detector frame loop — from pixels to a task for OCR</h2>
+  <p class="lead">One loop per engine. It never blocks on Redis or OCR: events and tasks go to an in-memory outbox that a separate thread delivers.</p>
+  <div class="cols">
+    <div>
+      <p class="flowtitle">A. Reader thread (one per camera)</p>
+      <div class="flow" id="f-reader"></div>
+      <p class="flowtitle" style="margin-top:18px">C. Triggers (per track, per detected frame)</p>
+      <div class="flow" id="f-triggers"></div>
+    </div>
+    <div>
+      <p class="flowtitle">B. Engine loop (all cameras of the engine)</p>
+      <div class="flow" id="f-loop"></div>
+    </div>
+  </div>
+  <p class="flowtitle" style="margin-top:22px">D. Sending crops to OCR (<code>_try_submit</code>) and ending a track</p>
+  <div class="cols">
+    <div class="flow" id="f-submit"></div>
+    <div class="flow" id="f-endtrack"></div>
+  </div>
+  <p class="flowtitle" style="margin-top:22px">E. Cadence and capacity (CPU)</p>
+  <div class="card">
+    <ul class="tight">
+      <li><b>Capacity calibration</b> (engine 0, at startup): measures the loop time for 1, 2, 3 … <span class="chip n">12</span> cameras
+        (<span class="chip n">3</span> warm-up + <span class="chip n">20</span> timed rounds, p95), budget
+        <span class="mono">detect_every × 1000 / 25 fps × 0.7</span> = <span class="chip t">28 ms</span> at one camera; stops after
+        <span class="chip n">2</span> consecutive misses. Stored in <span class="chip k">plate:internal:detector:capacity</span> and <code>/health</code>.</li>
+      <li><b>Auto-degrade</b> (<code>CAPACITY_AUTO_DEGRADE=true</code>): when cameras exceed capacity, the detection interval per camera is
+        computed from the measurements (not fixed steps), never below <span class="chip n">DETECT_EVERY_N_FRAMES = 1</span>, never slower than
+        <span class="chip n">8 fps</span> (<code>DETECT_MIN_FPS</code>). Frames in between are "coasted" (no inference, tracker not updated).
+        Logged as 🐢 lowered / 🐇 raised.</li>
+      <li><b>Missed frames</b>: the reader keeps only the newest frame; frames replaced before the loop reached them are counted as <i>missed</i>
+        in the <code>[PERF]</code> line. Coasted frames are separate (deliberately skipped).</li>
+      <li><b>Engine placement</b>: pick the engine with the fewest cameras; start a new engine when full
+        (GPU <span class="chip n">6</span>, CPU <span class="chip n">16</span>). Rebalance check every <span class="chip t">30 s</span>.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================= 5 -->
+<section id="seq">
+  <h2><span class="no">5</span>One vehicle, end to end (sequence)</h2>
+  <p class="lead">A car drives through, stops in the stop region, and leaves. Numbers on the left are the order of events;
+  amber notes are waits and timeouts. Assumes <code>periodic</code>, <code>stop_roi</code> and <code>leave_scene</code> enabled for the camera.</p>
+  <div class="svgbox"><svg id="seqsvg" role="img" aria-label="Sequence diagram"></svg></div>
+</section>
+
+<!-- ============================================================= 6 -->
+<section id="ocr">
+  <h2><span class="no">6</span>OCR worker — one task</h2>
+  <p class="lead">A task is one batch of up to <span class="chip n">5</span> crops of the same track plus one frame. A worker handles one task at a time;
+  three workers run in parallel by default.</p>
+  <div class="flow" id="f-ocr"></div>
+</section>
+
+<!-- ============================================================= 7 -->
+<section id="hub">
+  <h2><span class="no">7</span>Control hub — the state machine of one track</h2>
+  <p class="lead">The hub is the only component that decides what the backend receives. Everything below is per track <code>uid</code>
+  (<code>camera-engine-random10</code>), which is unique across engine restarts.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 1320 330" role="img" aria-label="Track states">
+    <defs><marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
+    <text class="sm" x="20" y="30">An engine_started event with a new boot_id also ends every live track of that engine (reason engine_restarted).</text>
+    <rect class="box c-green" x="20" y="100" width="130" height="70" rx="10"/><text class="b" x="36" y="126">(new)</text><text class="sm" x="36" y="144">first event for uid</text>
+    <rect class="box c-blue" x="240" y="80" width="170" height="110" rx="10"/><text class="b" x="256" y="106">LIVE</text><text class="sm" x="256" y="124">results are voted</text><text class="sm" x="256" y="138">triggers deferred / published</text><text class="sm" x="256" y="152">periodic re-query</text><text class="sm" x="256" y="166">stale watch</text>
+    <rect class="box c-amber" x="590" y="80" width="170" height="110" rx="10"/><text class="b" x="606" y="106">ENDED</text><text class="sm" x="606" y="124">track_ended received</text><text class="sm" x="606" y="138">waiting for in-flight</text><text class="sm" x="606" y="152">tasks to answer</text>
+    <rect class="box c-purple" x="940" y="80" width="170" height="110" rx="10"/><text class="b" x="956" y="106">CLOSED</text><text class="sm" x="956" y="124">final published (or dropped)</text><text class="sm" x="956" y="138">kept for late results</text>
+    <rect class="box c-grey" x="1190" y="100" width="110" height="70" rx="10"/><text class="b" x="1204" y="126">deleted</text><text class="sm" x="1204" y="144">checkpoint gone</text>
+    <path class="ar" d="M150 135 H240" marker-end="url(#h)"/><text class="sm" x="156" y="128">track_started</text>
+    <path class="ar" d="M410 135 H590" marker-end="url(#h)"/><text class="sm" x="440" y="124">track_ended</text><text class="sm" x="440" y="156">or STALE: silent 120 s</text>
+    <path class="ar" d="M760 135 H940" marker-end="url(#h)"/><text class="sm" x="780" y="124">all tasks answered</text><text class="sm" x="780" y="156">or 30 s finalize timeout</text>
+    <path class="ar" d="M1110 135 H1190" marker-end="url(#h)"/><text class="sm" x="1116" y="128">+300 s</text>
+    <path class="ar" d="M1025 190 V235 H1000 V192" marker-end="url(#h)"/>
+    <text class="sm" x="760" y="260">late result while CLOSED: publish the final again (revision + 1) only if the plate changed, else drop</text>
+  </svg></div>
+
+  <div class="cols" style="margin-top:18px">
+    <div>
+      <p class="flowtitle">Events in (<code>hub:events</code>, <code>hub:results</code>)</p>
+      <div class="flow" id="f-hub-in"></div>
+    </div>
+    <div>
+      <p class="flowtitle">Timers (checked every 0.2 s)</p>
+      <div class="flow" id="f-hub-tick"></div>
+    </div>
+  </div>
+
+  <p class="flowtitle" style="margin-top:22px">How a plate is decided</p>
+  <div class="cols">
+    <div class="card">
+      <b>Vote</b>
+      <ul class="tight">
+        <li>Only <i>valid</i> results count (valid OCR, text not empty / "0"). Each candidate plate scores the <b>sum of its confidences</b>; highest sum wins
+          (tie → highest single confidence). The best single result of the winner supplies the images.</li>
+        <li>No valid result: the most confident attempt is shown (<code>raw_text</code>), <code>is_valid=false</code>, plate "0".</li>
+        <li>At most <span class="chip n">50</span> results are kept per track.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <b>"Satisfied" (stop asking OCR)</b>
+      <ul class="tight">
+        <li>winner's best confidence ≥ <span class="chip n">0.85</span>, <b>or</b></li>
+        <li>≥ <span class="chip n">3</span> valid results agree and there is only one candidate.</li>
+        <li>When satisfied: all waiting triggers publish at once, the detector stops sending crops for this track and skips the leave-scene OCR pass.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <b>What the backend receives (<span class="chip k">plate:vehicle:results</span>)</b>
+      <ul class="tight">
+        <li><code>update_type = cross_line</code> / <code>stop_roi</code> — once per event per track, with the event detail (direction, stop duration …).</li>
+        <li><code>update_type = leave_scene</code>, <code>is_final=true</code> — one final per track (gate: seen ≥ <span class="chip n">8</span> frames and ≥ <span class="chip n">1</span> crop,
+          unless something was already published for the track).</li>
+        <li>Periodic re-queries are <b>not</b> published as records; they only feed the vote.</li>
+        <li>Each record carries <code>resolved</code> (plate, confidence, votes, image paths), <code>ocr_results</code> per stage, <code>revision</code>, <code>complete</code>, <code>missing_tasks</code>.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= 8 -->
+<section id="redis">
+  <h2><span class="no">8</span>Redis keys — who writes, who reads, bounds</h2>
+  <p class="lead">Prefix <code>plate:</code> (<code>REDIS_MODULE</code>). "Bounded" means the code limits its growth.</p>
+  <div class="tw"><table id="t-redis"></table></div>
+</section>
+
+<!-- ============================================================= 9 -->
+<section id="images">
+  <h2><span class="no">9</span>Images — how many, where, what size class</h2>
+  <p class="lead">Numbers are per track and per OCR task.</p>
+  <div class="grid2">
+    <div class="card">
+      <b>In the detector (memory only)</b>
+      <ul class="tight">
+        <li><span class="chip i">≤ 5 crops</span> per live track (<code>DEFAULT_N_BEST_CROPS</code>): the plate bounding box cut from the <b>ROI frame</b>.
+          Ranked by <code>(int(det_conf × 100), pixel area)</code>; a better candidate replaces the worst.</li>
+        <li><span class="chip i">1 best frame</span> per track: a copy of the ROI frame at the moment the best crop improved.</li>
+        <li>Everything is dropped when the track ends.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <b>Detector → Redis (one OCR task)</b>
+      <ul class="tight">
+        <li>Up to <span class="chip i">5 crop JPEGs</span> + <span class="chip i">1 frame JPEG</span> (<code>cv2.imencode('.jpg')</code>, default quality 95), pickled into one value pushed to
+          <span class="chip k">ocr:tasks</span>.</li>
+        <li>Tasks per track: one per trigger (<code>cross_line</code>, <code>stop_roi</code>), one per periodic request, one <code>leave_scene</code> at the end.
+          Only one task is in flight per track, and a crop set identical to the last one is never re-sent.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <b>OCR → MinIO (one task)</b>
+      <ul class="tight">
+        <li><span class="chip i">2 PNG uploads</span> per task, valid or not: the first (best) crop, and the best frame.</li>
+        <li>Keys: valid → <code>dynamics/ValidPlateImage/vp_&lt;cam&gt;_&lt;date&gt;_&lt;time&gt;.png</code> and <code>dynamics/ValidVehicleImage/vf_…</code>;
+          invalid → <code>InvalidPlateImage/ip_…</code> and <code>InvalidVehicleImage/if_…</code>. Bucket: private.</li>
+        <li>Model input sizes: car plate <span class="chip n">256×64</span>, motorcycle <span class="chip n">240×200</span>.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <b>What the backend gets</b>
+      <ul class="tight">
+        <li>No image bytes in Redis results — only the MinIO <b>paths</b> (<code>plate_image</code>, <code>frame_image</code>) of the winning result, per record and per stage in <code>track_paths</code>.</li>
+        <li>A track that needs <i>k</i> tasks leaves <b>2k</b> objects in MinIO; there is no cleanup in this code.</li>
+        <li>Debug only (off by default): annotated video in <code>./debug_video</code>, submission montages (max 200 files), OCR decision montages (max 200).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= 10 -->
+<section id="timeouts">
+  <h2><span class="no">10</span>Every timeout, interval and limit</h2>
+  <p class="lead">Grouped by service. "Effect" says what happens when the time runs out.</p>
+  <div class="tw"><table id="t-time"></table></div>
+</section>
+
+<!-- ============================================================= 11 -->
+<section id="findings">
+  <h2><span class="no">11</span>Things worth knowing (found while mapping)</h2>
+  <p class="lead">Read straight from the code; none of these were changed.</p>
+  <div class="grid2" id="finds"></div>
+</section>
+
+</main>
+
+<script>
+/* ---------------------------------------------------------------
+   helpers
+--------------------------------------------------------------- */
+const $ = (s, r=document) => r.querySelector(s);
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function chips(list){
+  if(!list||!list.length) return '';
+  return '<div class="chips">'+list.map(c=>`<span class="chip ${c[0]}">${c[1]}</span>`).join('')+'</div>';
+}
+function renderFlow(id, steps){
+  const el = document.getElementById(id); let n = 0, out = '';
+  steps.forEach((s,i)=>{
+    n++;
+    out += `<div class="step ${s.k||''}">${s.who?`<span class="who">${esc(s.who)}</span>`:''}
+      <h4><span class="ix">${n}</span>${s.t}</h4>${s.d?`<p>${s.d}</p>`:''}${chips(s.c)}
+      ${s.b?`<div class="branches">${s.b.map(b=>`<div class="br ${b[0]}"><b>${esc(b[1])}</b>${b[2]}</div>`).join('')}</div>`:''}</div>`;
+    if(i<steps.length-1) out += '<div class="arrow">↓</div>';
+  });
+  el.innerHTML = out;
+}
+function renderTable(id, head, rows){
+  $('#'+id).innerHTML = '<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>'+
+    rows.map(r=>'<tr>'+r.map((c,i)=>`<td${(head[i]==='Value'||head[i]==='Bound')&&id==='t-time'&&i===2?' class="v"':''}>${c}</td>`).join('')+'</tr>').join('')+'</tbody>';
+}
+
+/* ---------------------------------------------------------------
+   2 startup
+--------------------------------------------------------------- */
+renderFlow('f-boot-det',[
+ {k:'start',t:'Probe the device',d:'<code>resolve_runtime</code>: <code>DETECTION_DEVICE</code> = gpu | cpu | auto. For gpu/auto it calls <code>torch.cuda.is_available()</code>. No CUDA + strict off → logs an error and runs the CPU pipeline.'},
+ {t:'Check model files exist',d:'Filesystem check only. A missing OpenVINO/ONNX model falls back to the <code>.pt</code> on CPU (<code>BACKEND_FALLBACK_TO_PT</code>).'},
+ {t:'Wait for Redis',d:'<code>wait_until_available</code> retries until Redis answers.',c:[['t','retry every 2 s']]},
+ {t:'Start background threads',d:'engine-status monitor · command worker (BRPOP on <code>cmd:ai:request</code>) · camera-events subscriber · rebalance loop · heartbeat · health server <code>:8010/health</code>.',c:[['t','rebalance 30 s'],['t','heartbeat 10 s, TTL 30 s'],['t','BRPOP 2 s']]},
+ {k:'store',t:'Self-heal',d:'Reads <span class="chip k">internal:detector:state</span> (phase + engine count) and replays it: <code>start_idle(n)</code> spawns n engine processes (default <span class="chip n">1</span> on a fresh boot). If the active-camera ledger is not empty, <code>start_process()</code> re-attaches those cameras.'},
+ {t:'Engine process boots',d:'Builds its own backend (loads the model), runs the <b>capacity calibration</b> (CPU, engine 0), warm-up, then starts the hub client (emits <code>engine_started</code>) and its loop.',c:[['n','warm-up 10 runs'],['t','container start_period 180 s']]},
+]);
+renderFlow('f-boot-ocr',[
+ {k:'start',t:'Start worker processes',d:'Pool starts <span class="chip n">3</span> workers (<code>DEFAULT_WORKER_COUNT</code>, or the saved count). Each loads <b>two</b> PaddleOCR pipelines (car, motorcycle), warms up with dummy images, and checks that the MinIO private bucket exists.',c:[['t','load timeout 180 s'],['t','watchdog respawn 5 s']]},
+ {t:'Idle until demand',d:'Workers only pop tasks while the pool is in <i>processing</i>. The detector flips that with a pub/sub message on <span class="chip k">internal:demand:events</span> (first camera active → on, last removed → off).',c:[['t','idle poll 0.2 s']]},
+]);
+renderFlow('f-boot-hub',[
+ {k:'start',t:'Wait for Redis, take the leader lease',d:'Key <span class="chip k">internal:hub:leader</span>, one hub per module; a second copy waits as standby.',c:[['t','lease TTL 15 s'],['t','renew 5 s'],['t','retry Redis 2 s']]},
+ {k:'store',t:'Restore and replay',d:'Loads saved track checkpoints (<span class="chip k">hub:track:&lt;uid&gt;</span>), creates the consumer group (new group starts at the tail <code>$</code>), then re-reads entries it read but never acknowledged before it went live.'},
+]);
+
+/* ---------------------------------------------------------------
+   3 camera lifecycle
+--------------------------------------------------------------- */
+renderFlow('f-camera',[
+ {k:'start',who:'backend',t:'Backend stores the camera',d:'HSET <span class="chip k">cameras:config</span> (address, ROI, line, stop ROI, trigger flags) and PUBLISH <code>camera:config:updated</code>.'},
+ {who:'camera_stream',t:'Sync and register',d:'Copies config into <span class="chip k">cameras:details</span> (<code>connected=false</code>, "Waiting for connection"). If the camera answers on its RTSP port, it is registered in MediaMTX (<code>sourceOnDemand=false</code>, TCP).',c:[['t','TCP ping 0.2 s'],['t','register call 1.0 s']]},
+ {who:'camera_stream',t:'Online / offline decision',d:'Poll MediaMTX <code>/paths/list</code> for <code>ready</code>. Monitor loop checks every camera. <b>Online is published immediately; offline only after being offline for 10 s</b> (so blips do not detach cameras). The result goes to <span class="chip k">cameras:details</span> and the channel <span class="chip k">camera:events</span>.',c:[['t','poll 0.5 s'],['t','API timeout 1.5 s'],['t','loop 0.3 s (idle 1.0 s)'],['t','OFFLINE_HOLD 10 s']]},
+ {who:'backend',t:'Backend activates',d:'LPUSH <span class="chip k">cmd:ai:request</span> <code>{action: activated, camera_id, request_id}</code> and waits on <span class="chip k">cmd:ai:response:&lt;request_id&gt;</span>.'},
+ {who:'detector',t:'Command worker',d:'<b>First</b> writes the camera into the durable ledger <span class="chip k">internal:active_cameras</span> (with its config), <b>then</b> notifies demand (OCR starts popping tasks).',c:[['t','BRPOP 2 s']]},
+ {k:'decision',who:'detector',t:'Is the camera online right now?',b:[
+   ['no','No (details.connected = false)','Stay registered but wait. Attach happens on the next <i>online</i> event. The command still answers OK.'],
+   ['yes','Yes','Attach: pick the engine with the fewest cameras (start a new one if full); the engine creates the RTSP reader thread, a BYTETracker, a model instance (CPU), then applies the cadence / capacity check.']]},
+ {who:'detector',t:'Answer and status',d:'<span class="chip k">cameras:&lt;id&gt;:ai_status</span> = <code>running</code>; response <code>OK</code> / <code>ERROR</code> is pushed to the response list.',c:[['t','response TTL 60 s']]},
+ {k:'decision',who:'detector',t:'While running',b:[
+   ['wait','Camera goes offline','Event <code>connected=false</code> starts a timer. If it is still offline after <b>10 s</b> the camera is detached (<code>ai_status=stopped</code>, "Camera disconnected"); it stays in the ledger and re-attaches on the next online event.'],
+   ['no','Engine reports an error','Detach, wait <b>3 s</b>, attach again. <b>Max 1 retry</b>; the retry counter resets after 600 s without errors. After that the camera stays stopped.'],
+   ['yes','Backend deactivates','Ledger entry removed, camera detached, <code>ai_status=stopped_by_user</code>. If no active camera is left, demand switches off (OCR stops popping).']]},
+ {k:'end',who:'detector',t:'Container restart / reboot',d:'Self-heal replays the ledger: every camera that was active (and is online) is attached again with its stored config — no backend action needed.'},
+]);
+
+/* ---------------------------------------------------------------
+   4 frame loop
+--------------------------------------------------------------- */
+renderFlow('f-reader',[
+ {k:'start',t:'Open the stream',d:'OpenCV + FFmpeg, <b>RTSP over TCP</b>, keeps buffer size 1, FFmpeg decode threads 1.',c:[['t','open timeout 5 s'],['t','FFmpeg stimeout 5 s'],['n','1 decode thread']]},
+ {t:'Read frames continuously',d:'Only the <b>latest</b> frame is kept (older ones are overwritten). Every received frame increments <code>frames_captured</code>, which is how the engine counts missed frames.',c:[['t','read timeout 5 s']]},
+ {k:'decision',t:'Read failed?',b:[
+   ['no','Yes','Re-open the stream; wait 0.5 s between failures (logs at failure 1, 10, 50, 200, then every 1000).'],
+   ['yes','No','Store frame + capture time.']],c:[['t','reconnect backoff 0.2 s'],['t','read-fail backoff 0.5 s']]},
+ {k:'end',t:'Stop',d:'Waits for the thread to leave <code>read()</code> before releasing the capture (releasing mid-read can deadlock FFmpeg).',c:[['t','join timeout 6 s']]},
+]);
+renderFlow('f-loop',[
+ {k:'start',t:'Housekeeping',d:'Apply add/remove-camera commands; drain control messages from the hub (<code>result</code> / <code>request</code> / <code>state</code>); every 10 s write the <code>[PERF]</code> line.',c:[['t','PERF every 10 s'],['n','STATS every 50 loops']]},
+ {t:'For each camera: take the newest frame',d:'If no new frame arrived since last time, skip this camera. <code>missed = new_frames − 1</code>. <code>fid</code> counts camera frames (missed ones included).'},
+ {t:'Crop to the camera ROI',d:'Only the ROI rectangle goes to the model; all later coordinates are shifted back to full-frame pixels.'},
+ {k:'decision',t:'Is this camera due for detection?',d:'<code>fid ≥ _next_due</code>. With <code>DETECT_EVERY_N_FRAMES=1</code> and no degradation, every new frame is due.',b:[
+   ['wait','Not due → coast','Counted as coasted; no inference, tracker not updated, (debug video only if configured).'],
+   ['yes','Due','Joins this loop\'s batch.']]},
+ {t:'Inference (one call per loop)',d:'GPU: <b>one batched <code>predict()</code></b> over all due frames (.pt, FP32 unless <code>GPU_HALF</code>). CPU: one model instance per camera, run in parallel threads (OpenVINO FP32/INT8 or ONNX Runtime). Output per frame: <code>[x1,y1,x2,y2,conf,cls]</code>; class 0 = car plate, 1 = motorcycle plate.',c:[['n','conf ≥ 0.25'],['n','NMS IoU 0.7'],['n','max 300 boxes'],['t','slow-loop warning > 150 ms']]},
+ {t:'Tracker update (per camera)',d:'BYTETracker with the true elapsed frame count (<code>dt</code>), so coasted frames advance the motion model correctly. Lost-track buffer is rescaled to the real detect rate.',c:[['n','buffer 60 steps'],['n','track thresh 0.5'],['n','recovery + camera-motion comp. on']]},
+ {k:'decision',t:'For every active track',b:[
+   ['yes','New track','Make <code>uid = camera-engine-random10</code>, emit <code>track_started</code> (with the camera\'s trigger flags).'],
+   ['','Every track','Cut the crop, measure sharpness, run triggers (C), update the best-5 crops and best frame, send any pending request (D), emit <code>track_update</code> at most every 5 s.']],c:[['t','track_update 5 s']]},
+ {k:'decision',t:'Tracks that disappeared',d:'Not seen for more than <span class="chip n">30</span> camera frames → end the track (D).'},
+ {k:'end',t:'Optional debug video, then stats',d:'Annotated frame written if enabled; counters feed <code>[PERF]</code>/<code>[STATS]</code>. Then the loop repeats. If no camera had a new frame it sleeps 2–20 ms.'},
+]);
+renderFlow('f-triggers',[
+ {k:'start',t:'Anchor point',d:'Bottom-centre of the plate box, in full-frame pixels. Each frame adds (point, time, confidence) to the track\'s history.'},
+ {t:'Line crossing → <code>cross_line</code>',d:'Needs a line on the camera. Fires when the point switches side of the line.',c:[['n','track age ≥ 5 frames'],['n','avg conf ≥ 0.40'],['n','cooldown 30 frames']]},
+ {t:'Stop ROI entry',d:'Point inside the polygon with average confidence ≥ <span class="chip n">0.30</span> for <span class="chip n">2</span> detection frames → entry confirmed, timer starts.'},
+ {t:'Stopped → <code>stop_roi</code>',d:'After entry confirmed: ≥ <span class="chip n">6</span> samples, ≥ <span class="chip t">2.0 s</span> inside, and net movement over the last <span class="chip t">1.5 s</span> ≤ <span class="chip n">20 px/s</span>. Fires once per entry.'},
+ {t:'Once per event per track',d:'The engine (and the hub) ignore a second <code>cross_line</code> or <code>stop_roi</code> for the same track.'},
+]);
+renderFlow('f-submit',[
+ {k:'start',t:'Something asks for a read',d:'<b>Local, immediate:</b> a trigger fired (<code>cross_line</code> / <code>stop_roi</code>). <b>From the hub:</b> a periodic request, or "leave_scene" at the end. The request is remembered until a task goes out.',c:[['n','priority leave_scene 3 > triggers 2 > periodic 1']]},
+ {k:'decision',t:'May a task go out now?',d:'All must hold:',b:[
+   ['no','Blocked if','hub said <i>satisfied</i> · a previous task of this track is still in flight (until the hub acknowledges it, or <b>15 s</b>) · no crop exists yet · the crop set is the same as the one already sent (key = best frame number : crop count)'],
+   ['yes','Go','Build the task and dispatch.']],c:[['t','SUBMIT_TIMEOUT 15 s']]},
+ {k:'img',t:'Build the task',d:'Encode up to <span class="chip i">5 crops</span> + <span class="chip i">1 best frame</span> as JPEG, with camera id, track id, uid, stage, class flags, detector scores, source URL. Pickled.'},
+ {k:'store',t:'Dispatch (ordered)',d:'<code>submitted</code> event first, then the task — both go through the in-memory outbox, so the hub always knows a task exists before its result can arrive. Task → <span class="chip k">ocr:tasks</span> (LPUSH).',c:[['n','outbox max 20 000'],['t','retry backoff 0.2 → 5 s']]},
+]);
+renderFlow('f-endtrack',[
+ {k:'start',t:'Track lost for more than 30 frames',d:'(or camera removed, or engine stopping)'},
+ {k:'decision',t:'Leave-scene OCR pass?',b:[
+   ['yes','Yes if','camera has <code>leave_scene</code> on · hub has <b>not</b> said satisfied · seen ≥ <span class="chip n">8</span> frames · ≥ <span class="chip n">1</span> crop → build a <code>leave_scene</code> task and dispatch it.'],
+   ['no','Otherwise','No final OCR task is sent.']]},
+ {k:'store',t:'Tell the hub',d:'Emit <code>track_ended</code> {reason, seen_frames, n_crops, duration, <code>finalize_task_id</code>}. After that the detector forgets the track completely; the hub owns the rest.',c:[['k','hub:events']]},
+ {k:'end',t:'Free memory',d:'Drop the track\'s crops, best frame, trigger state, recognition state.'},
+]);
+
+/* ---------------------------------------------------------------
+   6 OCR
+--------------------------------------------------------------- */
+renderFlow('f-ocr',[
+ {k:'start',t:'Pop a task',d:'BRPOP on <span class="chip k">internal:ocr:tasks</span>. FIFO (producer LPUSH, consumer BRPOP). Queue latency = now − the nanosecond timestamp inside the task id.',c:[['t','BRPOP 1 s'],['t','retry after error 1 s']]},
+ {t:'Check the task',d:'Needs <code>task_id</code>, <code>camera_id</code>, <code>track_id</code>, <code>trigger_type</code>; otherwise answers <code>status=error</code>. No crops → <code>skipped</code>. Decode crops (and the best frame); if none decode → <code>skipped</code>.'},
+ {t:'Class vote',d:'Majority of the crops\' class flags decides the pipeline: <b>0 = car</b>, <b>1 = motorcycle</b>.'},
+ {k:'decision',t:'Recognise',b:[
+   ['yes','Car (class 0)','Per crop: CLAHE contrast on the V channel → resize to <b>256×64</b> → PaddleOCR (recognition only). Then a <b>character-by-character vote</b> over candidates that have exactly 8 characters. Result text + average of best confidence per position.'],
+   ['yes','Motorcycle (class 1)','Per crop: resize to <b>240×200</b> → detection + recognition; boxes smaller than 5% of the largest are dropped; text split into parts by position; voted per part.'],
+   ['no','Other class','<code>status=error</code>.']]},
+ {t:'Validate',d:'Car: confidence ≥ <span class="chip n">0.70</span>; after normalising, exactly 8 characters matching <code>2 digits + Persian letter + 3 digits + 2 digits</code>. Motorcycle: format rules on the voted parts. Result: <code>ok</code> (valid) or <code>invalid</code> with the reason in <code>description</code>.'},
+ {k:'img',t:'Upload two images',d:'The first crop and the best frame, PNG, to the MinIO private bucket under <code>dynamics/Valid…</code> or <code>dynamics/Invalid…</code>. A failed upload leaves the path empty; the result is still sent.',c:[['i','2 PNG per task']]},
+ {k:'store',t:'Answer the hub',d:'XADD to <span class="chip k">internal:hub:results</span> with the track <code>uid</code>, <code>task_id</code>, stage, status, plate text, confidence, validity, image paths. <b>Always</b> answered — also for skipped / error — so the hub never waits for nothing. Retried when Redis hiccups.',c:[['n','8 attempts'],['t','0.2 → 5 s backoff (~25 s)']]},
+ {k:'end',t:'Log and next',d:'<code>[TASK-DONE] total_processing_ms</code>; every 30 s a <code>[OCR-STATS]</code> line per worker (tasks, queue latency, processing ms, valid %). An unhandled exception still produces an <code>error</code> result.',c:[['t','stats every 30 s']]},
+]);
+
+/* ---------------------------------------------------------------
+   7 hub
+--------------------------------------------------------------- */
+renderFlow('f-hub-in',[
+ {k:'start',t:'engine_started',d:'Remember the engine\'s <code>boot_id</code>. Any live track of that engine from an older boot is ended with reason <code>engine_restarted</code>.'},
+ {t:'track_started',d:'Create/mark the track, store its trigger flags. If <i>periodic</i> is on: first re-query at +<span class="chip t">1 s</span>.'},
+ {t:'track_update',d:'Heartbeat with frame/crop counts; also resets the stale timer. Re-evaluates "satisfied" (e.g. liveness).'},
+ {t:'submitted',d:'Marks <code>task_id</code> as in flight. Any trigger that was waiting without a task now waits for <b>this</b> task.'},
+ {k:'decision',t:'trigger',d:'Once per event per track.',b:[
+   ['yes','Already satisfied','Publish immediately (<code>immediate</code>).'],
+   ['yes','Its result already arrived','Publish now (<code>after_recognition</code>).'],
+   ['wait','Otherwise','Hold it ("deferred") — see timers.']]},
+ {k:'decision',t:'result (from OCR)',b:[
+   ['','Normal','Add to the vote → re-check satisfied → send ack to the detector (<code>result</code>, satisfied flag, display) → publish any deferred trigger waiting for this task.'],
+   ['no','Duplicate task_id','Ignored.'],
+   ['wait','Track already CLOSED','Late result: if it changes the answer, publish the final again with <code>revision+1</code>; else log and drop.']]},
+ {t:'track_ended',d:'Mark ended, remember <code>finalize_task_id</code> as in flight, then try to close.'},
+]);
+renderFlow('f-hub-tick',[
+ {k:'wait',t:'Deferred trigger deadline',d:'A trigger that is not answered is published anyway, so the backend never gets nothing.',b:[
+   ['wait','Its task is queued','wait up to <b>15 s</b> (<code>trigger_task_wait_sec</code>) — a busy OCR delays the event rather than emptying it'],
+   ['wait','No task could be sent','wait up to <b>3 s</b> (<code>trigger_max_wait_sec</code>)']],c:[['t','15 s / 3 s']]},
+ {t:'Periodic re-query',d:'Only for cameras with the periodic flag. Every <span class="chip t">3 s</span>: if the track is not satisfied and nothing is in flight, ask the detector to send crops again (<code>ctl request</code>). The detector only sends if a better crop set exists.',c:[['t','first +1 s, then every 3 s']]},
+ {t:'Lost task guard',d:'A task in flight for more than <span class="chip t">90 s</span> (3 × finalize timeout) is forgotten so it cannot block periodic requests forever.'},
+ {k:'end',t:'Stale track',d:'No event at all for <span class="chip t">120 s</span> → the hub ends the track itself (<code>reason=stale</code>).'},
+ {k:'decision',t:'Close an ended track',b:[
+   ['wait','Tasks still in flight','wait up to <b>30 s</b> after the end (<code>finalize_timeout_sec</code>); then close and mark them <code>missing_tasks</code>'],
+   ['yes','All answered','Publish deferred triggers (<code>track_ended</code>), then the final if the gate passes (seen ≥ 8, crops ≥ 1) or anything was already published.'],
+   ['no','Gate fails and nothing published','Track DROPPED — the backend never hears about it.']],c:[['t','30 s']]},
+ {k:'store',t:'Grace and cleanup',d:'Closed tracks are kept <span class="chip t">300 s</span> to catch late results, then the checkpoint is deleted. Live checkpoints also expire by themselves after <span class="chip t">3600 s</span>.'},
+]);
+
+/* ---------------------------------------------------------------
+   8 redis table
+--------------------------------------------------------------- */
+renderTable('t-redis',['Key (after <code>plate:</code>)','Type','Written by','Read by','Bound / TTL'],[
+ ['<code>cameras:config</code>','HASH','backend','camera_stream, detector','—'],
+ ['<code>cameras:details</code>','HASH','camera_stream','detector, backend','—'],
+ ['<code>camera:config:updated</code> / <code>camera:events</code>','pub/sub','backend / camera_stream','camera_stream / detector','not stored'],
+ ['<code>cmd:ai:request</code>','LIST','backend (LPUSH)','detector (BRPOP 2 s)','drained'],
+ ['<code>cmd:ai:response:&lt;id&gt;</code>','LIST','detector','backend','TTL 60 s'],
+ ['<code>cameras:&lt;id&gt;:ai_status</code>','HASH','detector','backend','—'],
+ ['<code>internal:active_cameras</code>','HASH','detector (ledger)','detector at boot','small'],
+ ['<code>internal:detector:state</code> / <code>ocr:state</code>','HASH','detector / OCR','same, at boot','small'],
+ ['<code>internal:detector:capacity</code>','STRING','engine 0','detector, /health','1 value'],
+ ['<code>internal:detector:heartbeat</code> / <code>ocr:heartbeat</code> / <code>hub:heartbeat</code>','STRING','each service','health checks','TTL 30 s'],
+ ['<code>internal:demand:events</code>','pub/sub','detector','OCR','not stored'],
+ ['<code>internal:ocr:tasks</code>','LIST','detector (LPUSH)','OCR workers (BRPOP 1 s)','<b>unbounded</b>; pickled, ~6 JPEGs each'],
+ ['<code>internal:ocr:tasks:pending</code>','counter','detector (INCR) / OCR (DECR)','—','1 number'],
+ ['<code>internal:hub:events</code>','STREAM','detector','hub (group <code>control-hub</code>)','trimmed ~200 000 entries (<code>HUB_STREAM_MAXLEN</code>); acked ≠ deleted'],
+ ['<code>internal:hub:results</code>','STREAM','OCR','hub','trimmed ~200 000 entries'],
+ ['<code>internal:hub:ctl:&lt;engine&gt;</code>','LIST','hub (LPUSH)','detector (BRPOP 1 s)','TTL 120 s refreshed on write'],
+ ['<code>internal:hub:track:&lt;uid&gt;</code>','STRING','hub (checkpoint)','hub at restart','TTL 3600 s, deleted 300 s after close'],
+ ['<code>internal:hub:leader</code>','STRING','hub (lease)','hubs','TTL 15 s'],
+ ['<b><code>vehicle:results</code></b>','LIST','hub (RPUSH)','<b>backend</b> (outside this repo)','<b>unbounded</b>; nothing here drains it'],
+ ['<code>internal:ocr:results:&lt;engine&gt;</code>','LIST','OCR, only for tasks without a track uid (old detector)','nobody in current code','legacy; unused path'],
+]);
+
+/* ---------------------------------------------------------------
+   10 timeouts
+--------------------------------------------------------------- */
+renderTable('t-time',['Service','Name','Value','Effect when it elapses'],[
+ ['camera_stream','TCP ping to camera','0.2 s','camera counts as not reachable (error text "Network Down" vs "Stream Not Ready")'],
+ ['camera_stream','MediaMTX poll interval / API timeout','0.5 s / 1.5 s','refreshes the "ready" cache'],
+ ['camera_stream','Register / remove call timeout','1.0 s / 1.0 s','registration retried on the next loop'],
+ ['camera_stream','Monitor loop (idle)','0.3 s (1.0 s)','how fast online changes are noticed'],
+ ['camera_stream','OFFLINE_HOLD_SECONDS','10 s','a camera must stay offline this long before "offline" is published'],
+ ['detector','RTSP open / read timeout','5 s / 5 s','failed read → reconnect'],
+ ['detector','FFmpeg stimeout','5 s','stalled RTSP handshake aborted'],
+ ['detector','Reconnect / read-fail backoff','0.2 s / 0.5 s','pause before retrying'],
+ ['detector','Reader join on stop','6 s','longer than the read timeout so stop never releases mid-read'],
+ ['detector','Command queue BRPOP','2 s','idle poll for activate / deactivate'],
+ ['detector','Command response TTL','60 s','backend must read its answer within this'],
+ ['detector','CAMERA_OFFLINE_GRACE','10 s','offline camera is detached'],
+ ['detector','Engine error restart','delay 3 s, 1 retry, reset after 600 s','camera attached again once; then stays stopped'],
+ ['detector','HEARTBEAT_TIMEOUT','15 s','only marks the camera "degraded" in /health; never stops it'],
+ ['detector','Heartbeat interval / TTL','10 s / 30 s','—'],
+ ['detector','Rebalance check','30 s','may move cameras between engines'],
+ ['detector','Engine shutdown / container grace','30 s / 60 s','then killed'],
+ ['detector','Container health: start period / interval','180 s / 15 s (4 retries)','container marked unhealthy (autoheal restarts it if enabled)'],
+ ['detector','ABSENT frames','30 camera frames','track ends'],
+ ['detector','STOP_TIME_SECONDS / velocity window','2.0 s / 1.5 s','earliest stop report / speed measured over this window'],
+ ['detector','SUBMIT_TIMEOUT','15 s','an unanswered task no longer blocks the next one for the track'],
+ ['detector','TRACK_UPDATE_INTERVAL','5 s','heartbeat event to the hub'],
+ ['detector','Hub outbox retry backoff','0.2 s → 5 s (cap), max 20 000 items','oldest track_update dropped first when full'],
+ ['detector','Hub outbox flush on stop','5 s','undelivered items logged as error'],
+ ['detector','Slow loop warning','150 ms','⚠️ [INFER-SLOW]'],
+ ['detector','PERF / STATS logging','10 s / every 50 loops','—'],
+ ['OCR','Task BRPOP / retry','1 s / 1 s','—'],
+ ['OCR','Idle poll (not processing)','0.2 s','—'],
+ ['OCR','Worker model load','180 s','worker considered failed'],
+ ['OCR','Watchdog','5 s','respawn a crashed worker'],
+ ['OCR','Worker shutdown / container grace','30 s / 45 s','then killed'],
+ ['OCR','Hub result push','8 attempts, 0.2 → 5 s (~25 s)','error logged; the hub will time out instead'],
+ ['OCR','Stats log / heartbeat','30 s / 10 s (TTL 30 s)','—'],
+ ['hub','Stream read block / tick','0.2 s / 0.2 s','event and timer granularity'],
+ ['hub','Leader lease / renew','15 s / 5 s','standby takes over if not renewed'],
+ ['hub','trigger_task_wait_sec','15 s','deferred trigger published with whatever exists (task still queued)'],
+ ['hub','trigger_max_wait_sec','3 s','same, when no task could be sent'],
+ ['hub','periodic first delay / interval','1 s / 3 s','ask the detector for another read'],
+ ['hub','finalize_timeout_sec','30 s','track closed without waiting more; tasks listed as missing'],
+ ['hub','Lost in-flight task','90 s','forgotten'],
+ ['hub','track_stale_sec','120 s','track ended by the hub (stale)'],
+ ['hub','late_result_grace_sec','300 s','after this a late result is an orphan'],
+ ['hub','STATE_TTL / CTL_TTL','3600 s / 120 s','checkpoint / control list expire on their own'],
+ ['hub','Container grace','15 s','—'],
+ ['hub','Gates and caps','satisfied 0.85 · consensus 3 · final needs 8 frames + 1 crop · 50 results per track','see section 7'],
+ ['redis','AOF fsync','every second','up to ~1 s of writes lost on a hard power cut'],
+ ['all','Wait for Redis','2 s retry','—'],
+]);
+
+/* ---------------------------------------------------------------
+   11 findings
+--------------------------------------------------------------- */
+const finds = [
+ ['Redis has no memory limit',
+  'No <code>maxmemory</code> is configured. <code>ocr:tasks</code> (large pickled images) and <code>vehicle:results</code> have no length cap, and nothing in this repo drains <code>vehicle:results</code>. If OCR is down or slow, or the backend does not consume, Redis grows until the host runs out of RAM.', false],
+ ['No back-pressure on OCR',
+  'The detector pushes a task whenever a trigger or request allows, regardless of queue length. One in-flight task per track limits each track, not the total.', false],
+ ['Crop quality check is computed but not applied',
+  '<code>_quality_check_crop</code> (sharpness ≥ 100, aspect ratio, area ≥ 1000 px) only appears in the debug overlay. Crops are ranked by detector confidence and area; a blurry crop can still be one of the 5 sent.', false],
+ ['Best frame is the ROI frame',
+  'The stored "best frame" is a copy of the ROI-cropped frame while its bounding box is in full-frame coordinates. If the camera ROI is not the whole frame, the saved vehicle image is the ROI crop, not the full camera frame. Worth confirming this is intended.', false],
+ ['Periodic reads are not separate records',
+  'Only <code>cross_line</code>, <code>stop_roi</code> and the final (<code>leave_scene</code>) reach <code>vehicle:results</code>. Periodic results only improve the vote.', true],
+ ['Streams are trimmed, not drained',
+  '<code>hub:events</code> and <code>hub:results</code> keep acknowledged entries until the ~200 000 cap trims them; they do not shrink to zero when the hub is healthy.', true],
+ ['Every task uploads two PNGs',
+  'Valid or invalid, each task writes a crop and a frame to MinIO; nothing deletes them. Tasks per track can be several (trigger, periodic, leave scene).', false],
+ ['Safe against restarts',
+  'Camera ledger, hub checkpoints and unacknowledged stream entries are all restored; the hub ignores duplicates by task id and event name; the detector outbox keeps order across a Redis outage.', true],
+];
+$('#finds').innerHTML = finds.map(f=>`<div class="card find ${f[2]?'ok':''}"><h4>${f[0]}</h4><p>${f[1]}</p></div>`).join('');
+
+/* ---------------------------------------------------------------
+   5 sequence diagram
+--------------------------------------------------------------- */
+(function(){
+  const lanes = [
+    {id:'be', name:'Backend',        sub:'Django'},
+    {id:'cs', name:'camera_stream',  sub:'+ MediaMTX'},
+    {id:'de', name:'Detector',       sub:'reader + engine'},
+    {id:'rd', name:'Redis',          sub:''},
+    {id:'oc', name:'OCR worker',     sub:'1 of 3'},
+    {id:'hb', name:'Control hub',    sub:''},
+  ];
+  const LX = 90, GAP = 200, TOP = 64, ROW = 34;
+  const X = {}; lanes.forEach((l,i)=>X[l.id]=LX+i*GAP);
+  const W = LX*2 + GAP*(lanes.length-1) - 40;
+  // kinds: m = message (from→to), n = note over lane(s)
+  const ev = [
+   {t:'m',f:'be',to:'rd',l:'HSET cameras:config · LPUSH cmd:ai:request(activated)',k:'p'},
+   {t:'n',at:'de',l:'BRPOP 2 s → ledger write → attach camera → RTSP reader opens (5 s timeouts)',c:'t'},
+   {t:'m',f:'de',to:'rd',l:'cmd:ai:response OK (TTL 60 s) · ai_status=running',k:'p'},
+   {t:'m',f:'de',to:'rd',l:'engine_started · (hub: old boot tracks ended)',k:'p'},
+   {t:'n',at:'de',l:'frames: reader keeps newest → ROI → YOLO → tracker (every due frame)',c:'b'},
+   {t:'m',f:'de',to:'rd',l:'XADD hub:events track_started {uid, triggers}',k:'p'},
+   {t:'m',f:'rd',to:'hb',l:'XREADGROUP (200 ms block) → track created; periodic due at +1 s',k:'p'},
+   {t:'n',at:'hb',l:'+1 s: periodic request, then every 3 s while not satisfied',c:'t'},
+   {t:'m',f:'hb',to:'rd',l:'LPUSH hub:ctl:<engine> {request: periodic}',k:'p'},
+   {t:'m',f:'rd',to:'de',l:'BRPOP ctl → request stored; crops exist? crop set changed?',k:'p'},
+   {t:'m',f:'de',to:'rd',l:'XADD submitted {task_id} · LPUSH ocr:tasks (≤5 crop JPEG + 1 frame JPEG)',k:'g'},
+   {t:'m',f:'rd',to:'oc',l:'BRPOP ocr:tasks (1 s)',k:'p'},
+   {t:'n',at:'oc',l:'vote class → OCR each crop → vote chars → validate (conf ≥ 0.70, 8 chars) → 2 PNG to MinIO',c:'g'},
+   {t:'m',f:'oc',to:'rd',l:'XADD hub:results {uid, task_id, plate, conf, paths} (8 tries, ~25 s)',k:'p'},
+   {t:'m',f:'rd',to:'hb',l:'result → vote → satisfied? (conf ≥ 0.85 or 3 agree)',k:'p'},
+   {t:'m',f:'hb',to:'rd',l:'LPUSH hub:ctl {result ack, satisfied, display} (TTL 120 s)',k:'p'},
+   {t:'m',f:'rd',to:'de',l:'ack clears the in-flight lock (otherwise SUBMIT_TIMEOUT 15 s)',k:'p'},
+   {t:'n',at:'de',l:'car reaches the stop region: 2 frames inside, ≥2.0 s, ≤20 px/s over 1.5 s → stop_roi',c:'b'},
+   {t:'m',f:'de',to:'rd',l:'XADD trigger {event: stop_roi, task_id | null, detail}',k:'p'},
+   {t:'n',at:'hb',l:'already satisfied → publish now · else wait for its task ≤15 s (no task ≤3 s)',c:'t'},
+   {t:'m',f:'hb',to:'be',l:'RPUSH vehicle:results {update_type: stop_roi, resolved: plate, images}',k:'g'},
+   {t:'n',at:'de',l:'car leaves: no detection for 30 camera frames → track ends',c:'b'},
+   {t:'m',f:'de',to:'rd',l:'(if not satisfied, ≥8 frames, ≥1 crop) leave_scene task · XADD track_ended',k:'p'},
+   {t:'n',at:'hb',l:'wait for in-flight tasks ≤30 s → gate (8 frames, 1 crop) → close',c:'t'},
+   {t:'m',f:'hb',to:'be',l:'RPUSH vehicle:results {update_type: leave_scene, is_final, revision 1}',k:'g'},
+   {t:'n',at:'hb',l:'+300 s grace: a late result re-publishes the final (revision+1) only if the plate changed',c:'t'},
+  ];
+  const H = TOP + ev.length*ROW + 40;
+  let s = `<defs>
+    <marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--purple)"/></marker>
+    <marker id="s2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--green)"/></marker></defs>`;
+  lanes.forEach(l=>{
+    const x = X[l.id];
+    s += `<rect class="box c-grey" x="${x-64}" y="8" width="128" height="40" rx="8"/>
+      <text class="b" x="${x}" y="26" text-anchor="middle">${l.name}</text>
+      <text class="sm" x="${x}" y="40" text-anchor="middle">${l.sub}</text>
+      <line class="lane" x1="${x}" y1="48" x2="${x}" y2="${H-10}"/>`;
+  });
+  ev.forEach((e,i)=>{
+    const y = TOP + i*ROW + 10;
+    s += `<text class="sm" x="6" y="${y+4}">${i+1}</text>`;
+    if(e.t==='m'){
+      const x1 = X[e.f], x2 = X[e.to];
+      const dir = x2>x1?1:-1;
+      const cls = e.k==='g'?'ar-g':'ar-p', mk = e.k==='g'?'s2':'s1';
+      s += `<line class="${cls}" x1="${x1}" y1="${y}" x2="${x2-dir*2}" y2="${y}" marker-end="url(#${mk})"/>`;
+      const mid = (x1+x2)/2, w = Math.abs(x2-x1);
+      // label above arrow; long labels extend across lanes
+      const lbl = esc(e.l);
+      s += `<text class="sm" x="${Math.min(x1,x2)+6}" y="${y-5}" style="fill:var(--ink)">${lbl}</text>`;
+    } else {
+      const x = X[e.at];
+      const lbl = esc(e.l);
+      const w = Math.min(lbl.length*5.6+20, W-20);
+      let bx = x - w/2; if(bx<20) bx = 20; if(bx+w>W) bx = W-w;
+      const cls = e.c==='t'?'c-amber':e.c==='g'?'c-green':'c-blue';
+      s += `<rect class="${cls}" x="${bx}" y="${y-12}" width="${w}" height="24" rx="6" stroke-width="1.2"/>
+        <text x="${bx+w/2}" y="${y+4}" text-anchor="middle" style="font-size:10.5px">${lbl}</text>`;
+    }
+  });
+  const svg = $('#seqsvg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.style.minWidth = '1050px';
+  svg.innerHTML = s;
+})();
+
+/* theme toggle */
+(function(){
+  const b = $('#theme'), root = document.documentElement;
+  try{ const t = localStorage.getItem('pm-theme'); if(t) root.setAttribute('data-theme', t); }catch(e){}
+  b.addEventListener('click', ()=>{
+    const cur = root.getAttribute('data-theme') ||
+      (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const nx = cur==='dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', nx);
+    try{ localStorage.setItem('pm-theme', nx); }catch(e){}
+  });
+})();
+</script>
+</body>
+</html>
