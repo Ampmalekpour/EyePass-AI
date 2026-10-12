@@ -181,6 +181,27 @@ to see it).
 
 ---
 
+## 6b. Polygon ROI and image storage — what to look at
+
+| Log line | Meaning |
+|---|---|
+| `[ROI] camera=1 frame=1920x1080 -> polygon (grey mask outside it) \| model image 766x817 at x=.. y=..` | once per camera (and when the frame size changes): the polygon was built; the model gets a 766x817 image, outside the polygon grey |
+| `⏱️ [PERF] ... roi(crop+mask)=0.2 ms/frame` | cost of the ROI step per frame (bounding-box crop + grey mask) |
+| `🖼️ [OCR-IMAGES] worker=0 pending=0 submitted=12 uploaded=12 failed=0 dropped=0 \| webp q70 encode avg=.. ms upload avg=.. ms (background)` | the background image uploader (every `OCR_STATS_LOG_INTERVAL_SEC`) |
+| `[UPLOAD] ... FAILED after 3 attempt(s)` | an image could not be stored; its path (already in the record) points to nothing |
+| `[UPLOAD] queue full ... dropped` | the uploader queue was full; the image and its path were dropped |
+
+Checks:
+- the debug video draws the polygon (`ROI (inference area)` + outline);
+- if crops look grey at the edges: crops must come from the full frame, not the model
+  image (`engine.py`, `full_frames[idx]`);
+- if the stored frame looks cropped: the best frame must be the full frame
+  (`_set_best_frame(full_frame=full_frames[idx])`);
+- image sizes in Redis: `redis-cli MEMORY USAGE plate:internal:ocr:tasks` / `LLEN`
+  (a task = up to 5 JPEG crops + 1 full-frame JPEG q80);
+- a quick offline test of the polygon: `tools/` has no script for it; the standalone test
+  we used crops the polygon's bounding box, greys the outside and runs YOLO on it.
+
 ## 7. Every parameter is now in `.env`
 
 Everything that was a bare literal anywhere in this codebase — a

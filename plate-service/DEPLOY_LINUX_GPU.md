@@ -231,6 +231,18 @@ DETECTION_CPU_MODEL=openvino_fp32
 
 ---
 
+## 7b. Polygon ROI and image storage
+
+A camera can use a polygon ROI instead of the rectangle: `python redis_tools.py set-camera ... --roi-polygon X Y X Y X Y ...`
+(3+ points, fractions 0..1 or pixels). The detector crops the polygon's bounding box, paints the outside grey and runs
+the model on that; the log shows `[ROI] camera=... -> polygon (grey mask outside it)`.
+
+The full camera frame (JPEG q80) and the crops go to the OCR service; it defines the MinIO paths, answers the control hub
+at once, and compresses the crop and the frame to WebP q70 in the background (`.webp` objects). The backend must accept
+`.webp`. Watch `[OCR-IMAGES]` / `[UPLOAD]` in the `plate_ocr` log. Details: README, section "Polygon ROI and images".
+
+---
+
 ## 8. Updating
 
 ```bash

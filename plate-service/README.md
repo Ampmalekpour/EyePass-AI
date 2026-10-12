@@ -191,7 +191,7 @@ cameras:
 
 ```
 for each camera with a NEW frame (the RTSP reader keeps only the latest; replaced frames = missed)
-    → ROI crop
+    → ROI image (rectangle crop, or polygon bounding box with the outside greyed)
 → inference for all of them             ← the only part that differs, below
 → per camera: tracker → triggers → best crops → OCR tasks / control hub   (unchanged)
 ```
@@ -227,6 +227,58 @@ benchmark (`tools/bench_multistream.py`), implemented the same way
   `ONNXRUNTIME_VERSION` in `.env` to the venv the models were exported
   and benchmarked with, then `docker compose build plate_detector`.
   Export and run with the same OpenVINO.
+
+
+## Polygon ROI and images (ROI, full frame, crops, WebP)
+
+**ROI.** A camera's ROI is either the rectangle `roi {x,y,w,h}` (normalized, as
+before) or an optional **polygon** `roi_polygon` (3+ points, `[{"x":..,"y":..}, ...]`,
+normalized 0..1 or frame pixels; it overrides `roi`). For a polygon the detector
+(`engine._build_roi_state` / `_roi_image`):
+
+1. crops the polygon's **bounding box** (a numpy view, no copy),
+2. paints everything **outside the polygon grey** (`config.ROI_GREY_VALUE = 114`, the
+   letterbox's own padding value) with a mask built once per camera and one
+   `cv2.copyTo` per frame (~0.2-0.5 ms),
+3. gives that greyed bounding-box image to the model (YOLO accepts only rectangles; the
+   model never sees the pixels outside the polygon),
+4. maps the boxes back to the frame with the bounding box's offset. **There is no
+   polygon filter on the detections.** A rectangle ROI (no `roi_polygon`) behaves as
+   before: a plain crop, no mask.
+
+```
+python redis_tools.py set-camera --id 1 --address publisher \
+    --roi-polygon 0.55 0.10  0.80 0.10  0.98 0.90  0.55 0.90          # X Y X Y ... (3+ points)
+```
+
+The log shows `[ROI] camera=1 frame=1920x1080 -> polygon (grey mask outside it) | model
+image 766x817 at x=1061 y=103` once per camera, and the `[PERF]` line has
+`roi(crop+mask)=… ms/frame`.
+
+**What is sent for recognition.**
+
+| | Format | From |
+|---|---|---|
+| crops (up to 5) | JPEG, OpenCV default (as before) | cut from the **original full frame** (never the grey-masked image) |
+| frame (1) | JPEG, `config.FRAME_JPEG_QUALITY = 80` | the **full camera frame** (with or without an ROI), box in full-frame pixels |
+
+**What the OCR service stores in MinIO.** After the recognition the object keys are
+defined first (`ocr_service/src/image_store.py`, `build_image_keys`: valid -> `vp/vf`,
+invalid -> `ip/if`, under `dynamics/<Valid|Invalid><Plate|Vehicle>Image/`, now
+**`.webp`**) and go into the result sent to the control hub at once. The first crop and
+the frame are compressed to **WebP q70** and uploaded by a background thread per worker
+(`ImageUploader`, bounded queue), so neither compression nor upload delays the answer.
+Settings (`ocr_service/src/config.py`): `STORED_WEBP_QUALITY`, `STORED_WEBP_METHOD`,
+`IMAGE_UPLOAD_QUEUE_MAX`, `IMAGE_UPLOAD_RETRIES`, `IMAGE_UPLOAD_RETRY_BACKOFF_SEC`,
+`IMAGE_UPLOAD_THREADS`.
+
+Things to know:
+- a path can exist for a moment (WebP encode + upload) before its image does; a
+  permanently failed upload (after the retries) leaves a path with no object and is
+  logged as `[UPLOAD] ... FAILED`; a full queue drops the image *and* its path
+  (`dropped` in `[OCR-IMAGES]`);
+- pending uploads are flushed on shutdown (up to `WORKER_SHUTDOWN_TIMEOUT_SEC - 5`);
+- the backend must accept the `.webp` extension.
 
 
 ## Real-time capacity (CPU)
@@ -472,7 +524,7 @@ Rebuild once: `docker compose build`.
 
 | Key | Type | Direction |
 |---|---|---|
-| `plate:cameras:config` | HASH `camera_id -> json` | backend → camera_stream, detector |
+| `plate:cameras:config` | HASH `camera_id -> json` (`roi {x,y,w,h}`; optional `roi_polygon [{x,y},...]`) | backend → camera_stream, detector |
 | `plate:cameras:details` | HASH `camera_id -> json` | camera_stream → backend, detector |
 | `plate:camera:events` (**singular** "camera") | PUB/SUB | camera_stream → detector |
 | `plate:cmd:ai:request` | LIST (BRPOP) | backend → detector |
@@ -612,11 +664,12 @@ See `tests/test_engine_manager_rebalance.py`, verified.
 
 | | Where | Why |
 |---|---|---|
-| Valid/invalid plate crops + vehicle frames sent to the backend | **MinIO** (`common/platecore/minio_store.py`, defaults `eyepass-private-bucket`/`eyepass-public-bucket` — matching your existing deployment) | pipeline data — durable, shared, what the backend resolves into URLs |
+| Valid/invalid plate crops (WebP q70) + full vehicle frames (WebP q70) sent to the backend | **MinIO** (`common/platecore/minio_store.py`, defaults `eyepass-private-bucket`/`eyepass-public-bucket` — matching your existing deployment) | pipeline data — durable, shared, what the backend resolves into URLs |
 | Annotated detector debug video | **local bind-mounted volume** (`detector_data`, `DEBUG_VIDEO_*` env vars) | debugging only — never uploaded, never read by anything outside the container that wrote it |
 
 The OCR service is the only service that touches MinIO at all — the
-detector never does (see `detector/requirements.txt`).
+detector never does (see `detector/requirements.txt`). The images are compressed and
+uploaded in the background (see "Polygon ROI and images").
 
 
 ## Camera frames — always via the MediaMTX relay
