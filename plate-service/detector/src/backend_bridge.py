@@ -92,6 +92,23 @@ def _bbox_to_points(bbox: Optional[dict]) -> Tuple[float, float, float, float, f
     return (x, y, x + w, y, x + w, y + h, x, y + h)
 
 
+def _polygon_points(raw) -> Optional[Tuple[Tuple[float, float], ...]]:
+    """roi_polygon from the camera config: a list of {x, y} dicts or [x, y] pairs
+    (fractions of the frame 0..1, or pixels - the engine tells them apart).
+    Returns None when absent or unusable, so the camera falls back to its roi rectangle."""
+    if not raw:
+        return None
+    try:
+        pts = []
+        for p in raw:
+            x, y = (p.get("x"), p.get("y")) if isinstance(p, dict) else (p[0], p[1])
+            pts.append((float(x), float(y)))
+        return tuple(pts) if len(pts) >= 3 else None
+    except Exception:
+        logger.warning("ignoring unusable roi_polygon %r - using the roi rectangle", raw)
+        return None
+
+
 @dataclass
 class CameraJob:
     camera_id: str
@@ -104,6 +121,7 @@ class CameraJob:
     cross_line_trig: bool
     stop_roi_trig: bool
     leave_scene_trig: bool
+    roi_polygon: Optional[Tuple[Tuple[float, float], ...]] = None
 
 
 def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
@@ -132,6 +150,7 @@ def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
         cross_line_trig=bool(cfg.get("cross_line")),
         stop_roi_trig=bool(cfg.get("stop_roi")),
         leave_scene_trig=True,
+        roi_polygon=_polygon_points(cfg.get("roi_polygon")),
     )
 
 
@@ -190,6 +209,7 @@ class DetectorBridge:
             stop_roi_p2_x=job.stop_roi[1][0], stop_roi_p2_y=job.stop_roi[1][1],
             stop_roi_p3_x=job.stop_roi[2][0], stop_roi_p3_y=job.stop_roi[2][1],
             stop_roi_p4_x=job.stop_roi[3][0], stop_roi_p4_y=job.stop_roi[3][1],
+            roi_polygon=job.roi_polygon,
         )
         with self._running_lock:
             self._running_cameras.add(str(camera_id))

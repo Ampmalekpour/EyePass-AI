@@ -125,8 +125,11 @@ _RESTART_CMDS = {
 # =====================================================================
 
 def set_camera(camera_id, address, title="Camera", usage="plate",
-                roi=(0.0, 0.0, 1.0, 1.0), line=None, stop_roi=None):
-    """roi: (x, y, w, h) normalized 0..1. line: (x1, y1, x2, y2) and
+                roi=(0.0, 0.0, 1.0, 1.0), line=None, stop_roi=None, roi_polygon=None):
+    """roi: (x, y, w, h) normalized 0..1. roi_polygon: optional list of (x, y)
+    points (normalized 0..1 or frame pixels, 3 or more) - when given the detector
+    crops its bounding box and greys everything outside it; roi stays as the
+    fallback. line: (x1, y1, x2, y2) and
     stop_roi: (x, y, w, h) either in pixel coords of the camera frame or
     as fractions 0..1 (the detector tells them apart), or None to
     disable that trigger."""
@@ -135,6 +138,8 @@ def set_camera(camera_id, address, title="Camera", usage="plate",
         "id": camera_id, "title": title, "address": address, "usage": usage,
         "roi": {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]},
     }
+    if roi_polygon:
+        cfg["roi_polygon"] = [{"x": px, "y": py} for px, py in roi_polygon]
     if line is not None:
         x1, y1, x2, y2 = line
         cfg["cross_line"] = {"start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}}
@@ -505,6 +510,9 @@ def main():
     sc.add_argument("--title", default="Camera")
     sc.add_argument("--usage", default="plate")
     sc.add_argument("--roi", nargs=4, type=float, default=[0, 0, 1, 1], metavar=("X", "Y", "W", "H"))
+    sc.add_argument("--roi-polygon", nargs="+", type=float, default=None, metavar="V",
+                    help="polygon ROI as X Y X Y X Y ... (3+ points, normalized 0..1 or pixels); "
+                         "overrides --roi; everything outside the polygon is greyed before detection")
     sc.add_argument("--line", nargs=4, type=float, default=None, metavar=("X1", "Y1", "X2", "Y2"))
     sc.add_argument("--stop-roi", nargs=4, type=float, default=None, metavar=("X", "Y", "W", "H"))
 
@@ -532,7 +540,12 @@ def main():
     if args.cmd == "set-camera":
         set_camera(args.id, args.address, title=args.title, usage=args.usage,
                     roi=tuple(args.roi), line=tuple(args.line) if args.line else None,
-                    stop_roi=tuple(args.stop_roi) if args.stop_roi else None)
+                    stop_roi=tuple(args.stop_roi) if args.stop_roi else None,
+                    roi_polygon=([(args.roi_polygon[i], args.roi_polygon[i + 1])
+                                  for i in range(0, len(args.roi_polygon) - 1, 2)]
+                                 if args.roi_polygon and len(args.roi_polygon) >= 6 and len(args.roi_polygon) % 2 == 0
+                                 else (p.error("--roi-polygon needs an even number of values (>= 6)")
+                                       if args.roi_polygon else None)))
     elif args.cmd == "remove":
         remove_camera_config(args.id)
     elif args.cmd == "list":

@@ -191,6 +191,53 @@ def to_frame_pixels(points, W: int, H: int):
     return tuple(pts), "pixels"
 
 
+def _build_roi_state(shape, roi_rect, roi_polygon, grey: int) -> Dict[str, Any]:
+    """Per-camera ROI state, built once per frame size (and whenever the ROI
+    config changes).
+
+      bbox  (x1, y1, x2, y2)  what is cropped: the polygon's bounding box, or the
+                              rectangle when the camera has no polygon
+      mask  uint8, bbox-sized (255 inside the polygon) or None when the polygon fills
+                              its whole bounding box (nothing to grey)
+      buf   bbox-sized BGR image pre-filled with `grey`; each frame only the pixels
+                              inside the polygon are copied onto it (cv2.copyTo)
+      poly  int32 (N, 2) polygon in full-frame pixels, or None (debug drawing)
+    """
+    H, W = shape[:2]
+    if roi_polygon:
+        pts, mode = to_frame_pixels(roi_polygon, W, H)
+        if mode != "invalid" and len(pts) >= 3:
+            poly = np.array([[int(round(min(max(px, 0.0), W - 1.0))), int(round(min(max(py, 0.0), H - 1.0)))]
+                             for px, py in pts], np.int32)
+            bx, by, bw, bh = cv2.boundingRect(poly)
+            if bw >= 2 and bh >= 2:
+                mask = np.zeros((bh, bw), np.uint8)
+                cv2.fillPoly(mask, [poly - np.array([bx, by], np.int32)], 255)
+                if cv2.countNonZero(mask) == bw * bh:
+                    mask = None
+                buf = np.full((bh, bw, 3), int(grey), np.uint8) if mask is not None else None
+                return {"shape": (H, W), "bbox": (bx, by, bx + bw, by + bh), "mask": mask, "buf": buf, "poly": poly}
+    x, y, w, h = roi_rect
+    x1 = int(max(0, min(W - 1, x * W)))
+    y1 = int(max(0, min(H - 1, y * H)))
+    x2 = int(max(0, min(W, (x + w) * W)))
+    y2 = int(max(0, min(H, (y + h) * H)))
+    if x2 <= x1 or y2 <= y1:
+        x1, y1, x2, y2 = 0, 0, W, H
+    return {"shape": (H, W), "bbox": (x1, y1, x2, y2), "mask": None, "buf": None, "poly": None}
+
+
+def _roi_image(frame: np.ndarray, st: Dict[str, Any]) -> np.ndarray:
+    """The image the model receives: the bounding-box crop (a numpy view) with
+    everything outside the polygon painted grey. Rectangle ROI -> the view itself."""
+    x1, y1, x2, y2 = st["bbox"]
+    view = frame[y1:y2, x1:x2]
+    if st["mask"] is None:
+        return view
+    cv2.copyTo(view, st["mask"], st["buf"])
+    return st["buf"]
+
+
 # --------------------------------------------------------------------
 # Engine process (one per detection worker)
 # --------------------------------------------------------------------
@@ -377,7 +424,8 @@ class Engine:
                     stop_roi_trig: bool = False, leave_scene_trig: bool = False,
                     line_p1_x=0.0, line_p1_y=0.0, line_p2_x=0.0, line_p2_y=0.0,
                     stop_roi_p1_x=0.0, stop_roi_p1_y=0.0, stop_roi_p2_x=0.0, stop_roi_p2_y=0.0,
-                    stop_roi_p3_x=0.0, stop_roi_p3_y=0.0, stop_roi_p4_x=0.0, stop_roi_p4_y=0.0):
+                    stop_roi_p3_x=0.0, stop_roi_p3_y=0.0, stop_roi_p4_x=0.0, stop_roi_p4_y=0.0,
+                    roi_polygon=None):
         camera_id = str(camera_id)
 
         line_points = ((line_p1_x, line_p1_y), (line_p2_x, line_p2_y))
@@ -395,6 +443,8 @@ class Engine:
         if camera_id in self.cameras:
             self.cameras[camera_id]["url"] = url
             self.cameras[camera_id]["roi"] = roi
+            self.cameras[camera_id]["roi_polygon"] = roi_polygon
+            self.cameras[camera_id]["_roi"] = None            # rebuilt on the next frame
             self.cameras[camera_id]["line_points"] = line_points
             self.cameras[camera_id]["stop_roi"] = stop_roi
             self.cameras[camera_id]["triggers"] = triggers
@@ -423,6 +473,7 @@ class Engine:
 
         self.cameras[camera_id] = {
             "camera_id": camera_id, "url": url, "roi": roi,
+            "roi_polygon": roi_polygon, "_roi": None,
             "line_points": line_points, "stop_roi": stop_roi,
             "line_points_px": None, "stop_roi_px": None, "triggers": triggers,
             "trigger_states": {}, "rec_state": {},
@@ -616,7 +667,7 @@ class Engine:
         best_frame_data = None
         bf = cam["best_frame"].get(track_id)
         if bf:
-            encoded_frame = encode_image(bf["frame"])
+            encoded_frame = encode_image(bf["frame"], config.FRAME_JPEG_QUALITY)
             if encoded_frame:
                 best_frame_data = {"image_bytes": encoded_frame, "bbox": bf["bbox"], "resolution": bf["resolution"]}
         return {
@@ -818,7 +869,8 @@ class Engine:
             "fid": fid, "url": cam.get("url", ""), "cam_status": "running" if cam.get("active", True) else "idle",
             "device": self.backend.label, "imgsz": self.imgsz, "conf": self.conf, "batch_size": len(self.cameras),
             "infer_ms": self._last_infer_ms, "ocr_qin": -1, "ocr_qout": -1,
-            "frame_wh": (W, H), "roi_px": roi_offset, "line_px": cam.get("line_points_px"),
+            "frame_wh": (W, H), "roi_px": roi_offset,
+            "roi_poly": (cam.get("_roi") or {}).get("poly"), "line_px": cam.get("line_points_px"),
             "stop_roi_px": cam.get("stop_roi_px"), "triggers": triggers,
             "trig_cross": bool(triggers.get("cross_line_trig", False)),
             "trig_stop": bool(triggers.get("stop_roi_trig", False)),
@@ -990,7 +1042,17 @@ class Engine:
                         self.logger.info(f"Camera {camera_id}: stop_roi {sr} read as {mode} -> "
                                          f"pixel={cam['stop_roi_px']} (frame {W}x{H})")
 
-                roi_frame, (rx1, ry1, rx2, ry2) = _apply_roi(frame, cam["roi"])
+                roi_st = cam.get("_roi")
+                if roi_st is None or roi_st["shape"] != frame.shape[:2]:
+                    roi_st = cam["_roi"] = _build_roi_state(frame.shape, cam["roi"], cam.get("roi_polygon"),
+                                                            config.ROI_GREY_VALUE)
+                    _bb = roi_st["bbox"]
+                    self.logger.info(
+                        f"[ROI] camera={camera_id} frame={frame.shape[1]}x{frame.shape[0]} -> "
+                        f"{'polygon' if roi_st['poly'] is not None else 'rectangle'}"
+                        f"{' (grey mask outside it)' if roi_st['mask'] is not None else ''} | model image "
+                        f"{_bb[2] - _bb[0]}x{_bb[3] - _bb[1]} at x={_bb[0]} y={_bb[1]}")
+                rx1, ry1, rx2, ry2 = roi_st["bbox"]
 
                 # ---- detect cadence gate (config.DETECT_EVERY_N_FRAMES) ----
                 # N=1 (default) -> every frame goes to the model, unchanged.
@@ -1020,6 +1082,11 @@ class Engine:
                         except Exception as e:
                             self.logger.warning(f"[DEBUG-REC] coast frame write failed: {e}")
                     continue
+
+                # the image the model gets: bounding-box crop, polygon outside painted grey
+                _t_roi = time.perf_counter()
+                roi_frame = _roi_image(frame, roi_st)
+                self.perf.roi_done(camera_id, (time.perf_counter() - _t_roi) * 1000.0)
 
                 frames.append(roi_frame)
                 cam_ids.append(camera_id)
@@ -1128,7 +1195,9 @@ class Engine:
                         H, W = roi_frame.shape[:2]
                         x1 = max(0, min(x1, W - 1)); x2 = max(0, min(x2, W))
                         y1 = max(0, min(y1, H - 1)); y2 = max(0, min(y2, H))
-                        crop = roi_frame[y1:y2, x1:x2]
+                        # crops come from the ORIGINAL full frame (no grey from the polygon mask);
+                        # x/y are model-image pixels, rx1/ry1 is where that image sits in the frame
+                        crop = full_frames[idx][y1 + ry1:y2 + ry1, x1 + rx1:x2 + rx1]
                         if crop is None or crop.size == 0:
                             continue
 
@@ -1203,7 +1272,7 @@ class Engine:
 
                         if updated_best:
                             full_bbox = (x1 + rx1, y1 + ry1, x2 + rx1, y2 + ry1)
-                            self._set_best_frame(cam=cam, track_id=track_id, full_frame=roi_frame,
+                            self._set_best_frame(cam=cam, track_id=track_id, full_frame=full_frames[idx],
                                                  bbox_xyxy=full_bbox, det_score=score, resolution=reso)
 
                         meta["last_bbox_full"] = (x1 + rx1, y1 + ry1, x2 + rx1, y2 + ry1)

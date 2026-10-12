@@ -39,7 +39,7 @@ def _p95(v: List[float]) -> float:
 
 class _CamWin:
     __slots__ = ("captured", "processed", "missed", "coasted", "pre", "inf", "post", "track",
-                 "lat", "dets", "t0")
+                 "lat", "dets", "t0", "roi")
 
     def __init__(self):
         self.captured = self.processed = self.missed = self.coasted = self.dets = 0
@@ -47,6 +47,7 @@ class _CamWin:
         self.inf: List[float] = []
         self.post: List[float] = []
         self.track: List[float] = []
+        self.roi: List[float] = []
         self.lat: List[float] = []
         self.t0 = time.time()
 
@@ -78,6 +79,10 @@ class EnginePerf:
         t = self.totals[cid]
         t["captured"] += new_frames
         t["missed"] += missed
+
+    def roi_done(self, cid: str, roi_ms: float):
+        """time of the ROI step (bounding-box crop + grey polygon mask) for one frame"""
+        self._cam(cid).roi.append(roi_ms)
 
     def frame_coasted(self, cid: str):
         self._cam(cid).coasted += 1
@@ -139,7 +144,7 @@ class EnginePerf:
                 f"fps in={w.captured / el:.1f} proc={got:.1f} | {rate}"
                 f"missed={w.missed} ({miss_pct:.1f}%) coasted={w.coasted} | "
                 f"pre={_avg(w.pre):.1f} infer={_avg(w.inf):.1f} (p95 {_p95(w.inf):.1f}) "
-                f"post={_avg(w.post):.1f} track={_avg(w.track):.1f} ms/frame | "
+                f"post={_avg(w.post):.1f} track={_avg(w.track):.1f} roi(crop+mask)={_avg(w.roi):.2f} ms/frame | "
                 f"latency={_avg(w.lat):.0f} (p95 {_p95(w.lat):.0f}) ms | dets/frame="
                 f"{w.dets / max(w.processed, 1):.2f} | lifetime missed="
                 f"{100.0 * t.get('missed', 0) / tot_seen if tot_seen else 0.0:.1f}%"

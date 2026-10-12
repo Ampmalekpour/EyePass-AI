@@ -235,8 +235,12 @@ class RTSPStreamReader:
         self.frame = None
 
 
-def encode_image(img: np.ndarray) -> Optional[bytes]:
-    ok, buf = cv2.imencode(".jpg", img)
+def encode_image(img: np.ndarray, quality: Optional[int] = None) -> Optional[bytes]:
+    """JPEG bytes. quality=None -> OpenCV's default (crops, as before)."""
+    if quality is None:
+        ok, buf = cv2.imencode(".jpg", img)
+    else:
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
     if not ok:
         return None
     return buf.tobytes()

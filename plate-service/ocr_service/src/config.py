@@ -67,6 +67,17 @@ OCR_CLAHE_GRID_SIZE = 8
 # motorcycle OCR drops text boxes smaller than this fraction of the largest
 OCR_MOTOR_MIN_BOX_AREA_RATIO = 0.05
 
+# ---- images stored in MinIO ----------------------------------------------------
+# After the recognition the object keys are fixed first and put in the result;
+# the crop and the full frame are compressed to WebP and uploaded in the
+# background (image_store.ImageUploader), so the answer does not wait for them.
+STORED_WEBP_QUALITY = 70
+STORED_WEBP_METHOD = 4                # 0 (fastest) .. 6 (smallest, much slower); 4 = Pillow's default
+IMAGE_UPLOAD_QUEUE_MAX = 200          # pending images per worker; when full, new ones are dropped (logged)
+IMAGE_UPLOAD_RETRIES = 3
+IMAGE_UPLOAD_RETRY_BACKOFF_SEC = 0.5
+IMAGE_UPLOAD_THREADS = 1
+
 # ============================================================================
 # 3. WORKER POOL / SELF-HEALING
 # ============================================================================
