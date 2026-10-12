@@ -58,6 +58,55 @@ class RoiStateTests(unittest.TestCase):
         self.assertAlmostEqual(y1, 20, delta=1); self.assertAlmostEqual(y2, 180, delta=2)
         self.assertIsNone(st["mask"])        # a rectangle polygon fills its bbox -> no grey needed
 
+    HEX = [(0.63, 0.0954), (0.87, 0.0954), (0.9516, 0.4737), (0.87, 0.8519), (0.63, 0.8519), (0.5526, 0.4737)]
+
+    def test_hexagon_in_any_order_gives_the_same_mask(self):
+        import itertools, random
+        ref = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), self.HEX, GREY)
+        self.assertEqual(len(ref["poly"]), 6)
+        rnd = random.Random(1)
+        for _ in range(12):
+            pts = list(self.HEX); rnd.shuffle(pts)
+            st = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), pts, GREY)
+            self.assertEqual(st["bbox"], ref["bbox"])
+            self.assertTrue(np.array_equal(st["mask"], ref["mask"]))
+
+    def test_given_order_keeps_a_bow_tie(self):
+        old = config.ROI_POLYGON_ORDER
+        try:
+            config.ROI_POLYGON_ORDER = "given"
+            pts = [self.HEX[i] for i in (0, 2, 1, 3, 4, 5)]
+            st = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), pts, GREY)
+            ref = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), self.HEX, GREY)
+            self.assertFalse(np.array_equal(st["mask"], ref["mask"]))
+        finally:
+            config.ROI_POLYGON_ORDER = old
+
+    def test_hull_mode_orders_too(self):
+        old = config.ROI_POLYGON_ORDER
+        try:
+            config.ROI_POLYGON_ORDER = "hull"
+            pts = [self.HEX[i] for i in (3, 0, 5, 1, 4, 2)]
+            st = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), pts, GREY)
+            ref = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), self.HEX, GREY)
+            self.assertTrue(np.array_equal(st["mask"], ref["mask"]))
+        finally:
+            config.ROI_POLYGON_ORDER = old
+
+    def test_duplicates_dropped_and_overshoot_is_still_normalized(self):
+        pts = [(0.1, 0.1), (0.1, 0.1), (1.0003, 0.1), (1.0003, 0.9), (0.1, 0.9), (0.5, 0.5)]
+        st = engine_mod._build_roi_state((100, 200, 3), (0, 0, 1, 1), pts, GREY)
+        self.assertEqual(st["bbox"][2], 200)                    # x clipped to the frame, not read as pixels
+        self.assertEqual(len(st["poly"]), 5)
+
+    def test_many_points_polygon(self):
+        import math as m
+        pts = [(0.5 + 0.3 * m.cos(a * 2 * m.pi / 12), 0.5 + 0.3 * m.sin(a * 2 * m.pi / 12)) for a in range(12)]
+        pts = pts[::2] + pts[1::2]                                # scrambled
+        st = engine_mod._build_roi_state((1000, 1000, 3), (0, 0, 1, 1), pts, GREY)
+        self.assertEqual(len(st["poly"]), 12)
+        self.assertAlmostEqual(int((st["mask"] > 0).sum()) / 270000.0, 1.0, delta=0.03)   # 12-gon area = 3 r^2
+
     def test_no_polygon_is_the_old_rectangle_view(self):
         f = _frame()
         st = engine_mod._build_roi_state(f.shape, (0.25, 0.5, 0.5, 0.5), None, GREY)

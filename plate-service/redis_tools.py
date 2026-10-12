@@ -511,7 +511,7 @@ def main():
     sc.add_argument("--usage", default="plate")
     sc.add_argument("--roi", nargs=4, type=float, default=[0, 0, 1, 1], metavar=("X", "Y", "W", "H"))
     sc.add_argument("--roi-polygon", nargs="+", type=float, default=None, metavar="V",
-                    help="polygon ROI as X Y X Y X Y ... (3+ points, normalized 0..1 or pixels); "
+                    help="polygon ROI as X Y X Y X Y ... (3+ points, any order, normalized 0..1 as the backend sends them; pixels also work); "
                          "overrides --roi; everything outside the polygon is greyed before detection")
     sc.add_argument("--line", nargs=4, type=float, default=None, metavar=("X1", "Y1", "X2", "Y2"))
     sc.add_argument("--stop-roi", nargs=4, type=float, default=None, metavar=("X", "Y", "W", "H"))
