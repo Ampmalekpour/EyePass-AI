@@ -207,6 +207,18 @@ TRIGGER_POSITION_HISTORY_MAX = 30
 TRIGGER_CONFIDENCE_HISTORY_MAX = 10
 TRIGGER_VELOCITY_WINDOW = 10
 
+# ---- polygon ROI -------------------------------------------------------------
+# A camera's ROI may be a polygon (config key `roi_polygon`). The detector crops
+# the polygon's bounding box, paints everything outside the polygon this grey
+# (the same value the letterbox pads with) and gives that image to the model.
+ROI_GREY_VALUE = 114
+
+# ---- images sent to the OCR service (over Redis) ------------------------------
+# Crops are sent as today (OpenCV's default JPEG). The FULL camera frame (never the
+# ROI frame) is sent as JPEG at this quality; the OCR service turns it into WebP
+# for MinIO. Lower = smaller Redis tasks.
+FRAME_JPEG_QUALITY = 80
+
 # OCR hand-off to the control hub
 SUBMIT_TIMEOUT_SEC = 15.0
 TRACK_UPDATE_INTERVAL_SEC = 5.0

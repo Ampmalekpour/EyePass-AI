@@ -411,6 +411,9 @@ class DebugRecorder:
             x1, y1, x2, y2 = [int(v * s) for v in roi_px]
             _dashed_rect(img, (x1, y1), (x2, y2), C_ROI, 1)
             _text(img, "ROI (inference area)", (x1 + 4, max(12, y1 - 6)), C_ROI, 0.42)
+        poly = ctx.get("roi_poly")
+        if poly is not None and len(poly) >= 3:
+            cv2.polylines(img, [(np.asarray(poly, np.float32) * s).astype(np.int32)], True, C_ROI, 2, cv2.LINE_AA)
 
         lp = ctx.get("line_px")
         if lp and not (tuple(map(int, lp[0])) == (0, 0) and tuple(map(int, lp[1])) == (0, 0)):

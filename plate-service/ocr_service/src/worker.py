@@ -59,6 +59,7 @@ from platecore.bus import RedisBus
 from platecore.codec import decode_task, encode_result
 from platecore.logging_setup import setup_logger
 from platecore.minio_store import PRIVATE_BUCKET, ensure_bucket, upload_bytes
+from image_store import ImageUploader, build_image_keys
 
 
 class OcrWorker(mp.Process):
@@ -76,6 +77,7 @@ class OcrWorker(mp.Process):
         self.SAVE_ALL_CROPS = config.SAVE_ALL_CROPS
 
         self.bus: Optional[RedisBus] = None
+        self.uploader: Optional[ImageUploader] = None
         self.car_ocr: Optional[PaddleOCR] = None
         self.motor_ocr: Optional[PaddleOCR] = None
         self.logger = None
@@ -384,63 +386,41 @@ class OcrWorker(mp.Process):
         compact = f"{ut}{lt}"
         return True, "0", display, compact
 
-    def _upload_image_to_minio(self, key: str, img: np.ndarray, tag: str) -> bool:
-        try:
-            if img is None or not isinstance(img, np.ndarray) or img.size == 0:
-                self.logger.error("[OCR-%s] [UPLOAD] %s image invalid/empty -> %s", self.worker_id, tag, key)
-                return False
-            ok, buf = cv2.imencode(".png", img)
-            if not ok:
-                self.logger.error("[OCR-%s] [UPLOAD] cv2.imencode failed -> %s", self.worker_id, key)
-                return False
-            upload_bytes(buf.tobytes(), key=key, bucket=PRIVATE_BUCKET, content_type="image/png")
-            return True
-        except Exception as e:
-            self.logger.error("[OCR-%s] [UPLOAD] %s -> %s failed: %s", self.worker_id, tag, key, e)
-            return False
+    def _upload_webp(self, data: bytes, key: str):
+        """The uploader's upload function (runs in the background thread)."""
+        upload_bytes(data, key=key, bucket=PRIVATE_BUCKET, content_type="image/webp")
 
     def save_prep_for_mysql(
             self, track_id: int, frame_number: int, crops_bgr: list,
             best_frame_bgr: Optional[np.ndarray], is_valid: bool, description: str,
             plate_number: str, voted_class: int, process_id: int, stream_idx: int,
             video_source: str, save_all_crops: Optional[bool] = None,
+            plate_bytes: Optional[bytes] = None, frame_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
-        """Uploads crops + best frame to MinIO. Object key layout is
-        verbatim from ocr_worker.py: valid -> vp/vf, invalid -> ip/if,
-        under dynamics/<Valid|Invalid><Plate|Vehicle>Image/. Django
-        resolves these keys through its own PrivateMediaStorage, so the
-        layout must not change independently of a backend change."""
-        if save_all_crops is None:
-            save_all_crops = self.SAVE_ALL_CROPS
+        """Defines where the images go in MinIO and queues them for the background
+        uploader; returns at once with the paths (it does NOT wait for the upload).
 
+        Key layout (image_store.build_image_keys): valid -> vp/vf, invalid -> ip/if,
+        under dynamics/<Valid|Invalid><Plate|Vehicle>Image/, now with a .webp
+        extension. plate_bytes / frame_bytes are the JPEG bytes the detector sent
+        (the first crop, and the full frame); when missing, the decoded arrays are
+        JPEG-encoded here as a fallback."""
         current_time = datetime.now()
-        date_str = current_time.strftime("%Y-%m-%d")
-        filename_time_str = current_time.strftime("%H-%M-%S-%f")
         mysql_time_str = current_time.strftime("%H:%M:%S.%f")
         date_obj = current_time.date()
         time_obj = datetime.strptime(mysql_time_str, "%H:%M:%S.%f").time()
 
-        camera_name = str(stream_idx)
+        plate_key, frame_key = build_image_keys(stream_idx, is_valid, ".webp", current_time)
 
-        if is_valid:
-            plate_folder, frame_folder = "dynamics/ValidPlateImage", "dynamics/ValidVehicleImage"
-            plate_prefix, frame_prefix = "vp", "vf"
-        else:
-            plate_folder, frame_folder = "dynamics/InvalidPlateImage", "dynamics/InvalidVehicleImage"
-            plate_prefix, frame_prefix = "ip", "if"
+        if not plate_bytes and crops_bgr:
+            ok, buf = cv2.imencode(".jpg", crops_bgr[0])
+            plate_bytes = buf.tobytes() if ok else None
+        if not frame_bytes and best_frame_bgr is not None:
+            ok, buf = cv2.imencode(".jpg", best_frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            frame_bytes = buf.tobytes() if ok else None
 
-        plate_key = f"{plate_folder}/{plate_prefix}_{camera_name}_{date_str}_{filename_time_str}.png"
-        frame_key = f"{frame_folder}/{frame_prefix}_{camera_name}_{date_str}_{filename_time_str}.png"
-
-        plate_url = None
-        if crops_bgr:
-            if self._upload_image_to_minio(plate_key, crops_bgr[0], tag="crop"):
-                plate_url = plate_key
-
-        frame_url = None
-        if best_frame_bgr is not None:
-            if self._upload_image_to_minio(frame_key, best_frame_bgr, tag="best_frame"):
-                frame_url = frame_key
+        plate_url = plate_key if (plate_bytes and self.uploader.submit(plate_key, plate_bytes, "crop")) else None
+        frame_url = frame_key if (frame_bytes and self.uploader.submit(frame_key, frame_bytes, "frame")) else None
 
         vehic_type_hint = 1 if voted_class == 0 else 2 if voted_class == 1 else 0
 
@@ -521,6 +501,14 @@ class OcrWorker(mp.Process):
                 self.worker_id, el, st["tasks"], st["tasks"] / el, st["ok"], st["invalid"], st["error"],
                 100.0 * st["ok"] / st["tasks"], pm.mean(), np.percentile(pm, 95), qm.mean(),
                 np.percentile(qm, 95))
+            if self.uploader is not None:
+                u = self.uploader.snapshot_and_reset()
+                done = max(1, u["uploaded"] + u["failed"])
+                self.logger.info(
+                    "🖼️ [OCR-IMAGES] worker=%s pending=%d submitted=%d uploaded=%d failed=%d dropped=%d | "
+                    "webp q%d encode avg=%.0f ms upload avg=%.0f ms (background)",
+                    self.worker_id, u["pending"], u["submitted"], u["uploaded"], u["failed"], u["dropped"],
+                    config.STORED_WEBP_QUALITY, u["encode_ms"] / done, u["upload_ms"] / done)
         self._stats = self._new_stats()
 
     def _emit_result(self, task: Dict[str, Any], **kwargs):
@@ -595,16 +583,18 @@ class OcrWorker(mp.Process):
         )
 
         best_frame_bgr = None
+        best_frame_bytes = None
         bf = task.get("best_frame")
         if bf and bf.get("image_bytes"):
-            best_frame_bgr = self._decode_image(bf["image_bytes"])
+            best_frame_bytes = bf["image_bytes"]
+            best_frame_bgr = self._decode_image(best_frame_bytes)
 
         if not crops:
             self.logger.warning("[OCR-%s] [TASK-SKIP] task=%s reason=no_crops", self.worker_id, task_id)
             self._emit_result(task, status="skipped", description="no crops", error="no crops in OCR task")
             return
 
-        decoded_crops, class_votes, crop_det_scores = [], [], []
+        decoded_crops, crop_bytes, class_votes, crop_det_scores = [], [], [], []
         for crop in crops:
             image_bytes = crop.get("image_bytes")
             class_flag = crop.get("class_flag")
@@ -614,6 +604,7 @@ class OcrWorker(mp.Process):
             if image is None:
                 continue
             decoded_crops.append(image)
+            crop_bytes.append(image_bytes)
             class_votes.append(class_flag)
             crop_det_scores.append(round(float(crop.get("score", 0.0) or 0.0), 3))
 
@@ -681,6 +672,7 @@ class OcrWorker(mp.Process):
                 best_frame_bgr=best_frame_bgr, is_valid=is_valid, description=desc,
                 plate_number=norm_plate, voted_class=voted_class, process_id=process_id,
                 stream_idx=stream_idx, video_source=video_source, save_all_crops=None,
+                plate_bytes=crop_bytes[0] if crop_bytes else None, frame_bytes=best_frame_bytes,
             )
             self._emit_result(task, status="ok" if is_valid else "invalid", plate_text=norm_plate,
                                confidence=voted_conf, is_valid=is_valid, description=desc,
@@ -735,6 +727,7 @@ class OcrWorker(mp.Process):
                 best_frame_bgr=best_frame_bgr, is_valid=is_valid, description=desc,
                 plate_number=compact, voted_class=voted_class, process_id=process_id,
                 stream_idx=stream_idx, video_source=video_source, save_all_crops=None,
+                plate_bytes=crop_bytes[0] if crop_bytes else None, frame_bytes=best_frame_bytes,
             )
             self._emit_result(task, status="ok" if is_valid else "invalid", plate_text=compact,
                                confidence=voted_conf, is_valid=is_valid, description=desc,
@@ -767,6 +760,11 @@ class OcrWorker(mp.Process):
 
         self._load_models()
         self._warmup()
+        self.uploader = ImageUploader(
+            self._upload_webp, self.logger, quality=config.STORED_WEBP_QUALITY, method=config.STORED_WEBP_METHOD,
+            queue_max=config.IMAGE_UPLOAD_QUEUE_MAX, retries=config.IMAGE_UPLOAD_RETRIES,
+            backoff_sec=config.IMAGE_UPLOAD_RETRY_BACKOFF_SEC, threads=config.IMAGE_UPLOAD_THREADS,
+            name=f"ocr{self.worker_id}-img").start()
 
         if self.loaded_event is not None:
             self.loaded_event.set()
@@ -799,4 +797,6 @@ class OcrWorker(mp.Process):
                 if isinstance(task, dict):
                     self._emit_result(task, status="error", description="unhandled OCR error", error=str(e))
 
+        if self.uploader is not None:       # finish the queued images before the process ends
+            self.uploader.stop(max(1.0, config.WORKER_SHUTDOWN_TIMEOUT_SEC - 5.0))
         self.logger.info("[OCR-%s] Stopped.", self.worker_id)
