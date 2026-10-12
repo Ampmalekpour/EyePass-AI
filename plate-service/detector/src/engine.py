@@ -394,11 +394,11 @@ class Engine:
         return cam.get("debug")
 
     def _dbg_log(self, camera_id: str, kind: str, text: str,
-                 track_id: Optional[int] = None, data: Optional[dict] = None):
+                 track_id: Optional[int] = None, data: Optional[dict] = None, point=None):
         rec = self._dbg(camera_id)
         if rec is not None:
             try:
-                rec.log(kind, text, track_id=track_id, data=data)
+                rec.log(kind, text, track_id=track_id, data=data, point=point)
             except Exception:
                 pass
 
@@ -800,6 +800,9 @@ class Engine:
     def _drain_hub_ctl(self):
         now = time.time()
         for msg in self.hub.drain():
+            if msg.get("action") in ("published", "final", "dropped", "late_result"):
+                self._show_hub_notice(msg)       # the hub's own steps: shown in the video + log
+                continue
             loc = self._uid_index.get(msg.get("uid"))
             if not loc:
                 continue  # track already ended here — the hub owns it now
@@ -826,6 +829,31 @@ class Engine:
             if rec_state.satisfied and not was_satisfied:
                 self._tlog(f"✅ [SATISFIED] camera={camera_id} track={track_id} plate={disp.get('label')!r} "
                                  f"— no more OCR for this track")
+                self._dbg_log(camera_id, "SATISFIED", f"#{track_id} '{disp.get('label')}' conf={disp.get('confidence')}"
+                                                      f" - no more OCR", track_id=track_id)
+
+    def _show_hub_notice(self, msg: dict):
+        """Control-hub steps that leave no trace in the detector: an event published to the
+        backend, the final dispatch (the track is already gone here), a drop, a late re-dispatch."""
+        camera_id = str(msg.get("camera_id", ""))
+        action = msg.get("action")
+        tid = msg.get("track_id")
+        label = msg.get("label")
+        conf = msg.get("confidence")
+        if action == "published":
+            kind, text = "PUBLISH", f"#{tid} {msg.get('event')} -> backend ({msg.get('resolution')}) plate={label!r} conf={conf}"
+        elif action == "final":
+            kind, text = "FINAL", (f"#{tid} FINAL -> backend rev{msg.get('revision')} ({msg.get('reason')}) "
+                                   f"plate={label!r} conf={conf}{'' if msg.get('complete', True) else ' INCOMPLETE'}")
+        elif action == "dropped":
+            kind, text = "DROPPED", f"#{tid} dropped by the hub: {msg.get('why')}"
+        else:
+            kind, text = "LATE_RESULT", f"#{tid} late result -> re-sent rev{msg.get('revision')} plate={label!r}"
+        self._tlog(f"📤 [HUB-{action.upper()}] camera={camera_id} track={tid} {text}")
+        cam = self.cameras.get(camera_id)
+        alive = bool(cam) and tid in cam.get("track_meta", {})
+        self._dbg_log(camera_id, kind, text, track_id=int(tid) if alive and tid is not None else None,
+                      data={k: v for k, v in msg.items() if k != "display"})
 
     # ---------------- debug frame assembly ----------------
     def _debug_ocr_fields(self, cam, track_id: int, now: float) -> Dict[str, Any]:
@@ -1204,6 +1232,8 @@ class Engine:
                                 "uid": uid, "camera_id": camera_id, "track_id": track_id,
                                 "video_source": cam["url"], "triggers": self._hub_triggers(cam),
                             })
+                            self._dbg_log(camera_id, "TRACK_NEW", f"#{track_id} uid={uid[-8:]} fid={fid}",
+                                          track_id=track_id)
                         else:
                             meta["last_seen_fid"] = fid
                             meta["seen_frames"] += 1
@@ -1265,6 +1295,13 @@ class Engine:
                                 "seen_frames": meta.get("seen_frames", 0),
                                 "n_crops": len(cam["best_crops"].get(track_id, [])),
                             })
+                            _det = self._trigger_detail(ev)
+                            self._dbg_log(
+                                camera_id, "LINE_CROSS" if stage == "cross_line" else "STOPPED",
+                                f"#{track_id} {_det.get('direction', '') if isinstance(_det, dict) else ''} "
+                                f"-> hub task={str(task_id)[-6:] if task_id else 'none (waiting for crops)'}",
+                                track_id=track_id, data={"task_id": task_id, "detail": _det},
+                                point=ev.get("point"))
                             emoji = self.STAGE_EMOJI.get(stage, "🔔")
                             self.logger.info(
                                 f"{emoji} [{'LINE-CROSS' if stage == 'cross_line' else 'STOPPED-ROI'}] camera={camera_id} "
@@ -1278,9 +1315,13 @@ class Engine:
                                 f"[ROI-ENTRY] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} "
                                 f"point={ev['point']} confidence={ev['confidence']:.2f}"
                             )
+                            self._dbg_log(camera_id, "ROI_ENTRY", f"#{track_id} entered the stop ROI",
+                                          track_id=track_id, point=ev["point"])
                         if stop_roi_trig and trigger_events.get("roi_exit"):
                             ev = trigger_events["roi_exit"]
                             self._tlog(f"[ROI-EXIT] camera={ev['camera_id']} track={ev['track_id']} class={ev['class']} point={ev['point']}")
+                            self._dbg_log(camera_id, "ROI_EXIT", f"#{track_id} left the stop ROI",
+                                          track_id=track_id, point=ev["point"])
 
                         quality_ok = self._quality_check_crop(track_class, crop, sharp)
                         hh, ww = crop.shape[:2]

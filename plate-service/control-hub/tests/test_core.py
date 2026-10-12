@@ -231,3 +231,43 @@ class PlateLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HubNoticesToTheDetector(unittest.TestCase):
+    """Show-only ctl messages, so the detector's log and debug video can show what the hub did."""
+
+    def _notices(self, fx):
+        return [m for _, m in fx.ctl if m["action"] in (P.A_PUBLISHED, P.A_FINAL, P.A_DROPPED, P.A_LATE_RESULT)]
+
+    def test_published_event_is_announced(self):
+        c = plate_core()
+        start(c)
+        plate_result(c, "u1", "t0", "cross_line", "12B34567", 0.95, t=1)
+        fx = c.handle(P.K_TRIGGER, {"uid": "u1", "event": "cross_line", "detail": {}}, 2)
+        n = self._notices(fx)
+        self.assertEqual([m["action"] for m in n], [P.A_PUBLISHED])
+        self.assertEqual((n[0]["event"], n[0]["camera_id"], n[0]["track_id"]), ("cross_line", "cam1", 7))
+        self.assertEqual(n[0]["resolution"], "immediate")
+
+    def test_final_and_drop_are_announced(self):
+        c = plate_core()
+        start(c)
+        plate_result(c, "u1", "t0", "cross_line", "12B34567", 0.95, t=1)
+        c.handle(P.K_TRIGGER, {"uid": "u1", "event": "cross_line", "detail": {}}, 2)
+        fx = c.handle(P.K_TRACK_ENDED, {"uid": "u1", "reason": "absent", "seen_frames": 20, "n_crops": 3}, 3)
+        fx.merge(c.tick(100.0))
+        self.assertIn(P.A_FINAL, [m["action"] for m in self._notices(fx)])
+
+        c2 = plate_core()
+        start(c2, uid="u2")
+        fx2 = c2.handle(P.K_TRACK_ENDED, {"uid": "u2", "reason": "absent", "seen_frames": 1, "n_crops": 0}, 3)
+        fx2.merge(c2.tick(100.0))
+        n2 = self._notices(fx2)
+        self.assertEqual([m["action"] for m in n2], [P.A_DROPPED])
+        self.assertIn("nothing published", n2[0]["why"])
+
+    def test_no_engine_no_notice(self):
+        c = plate_core()
+        start(c, engine=None)
+        fx = c.handle(P.K_TRIGGER, {"uid": "u1", "event": "cross_line", "detail": {}}, 2)
+        self.assertEqual(self._notices(fx), [])

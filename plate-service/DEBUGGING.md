@@ -109,6 +109,31 @@ nothing, only the env var does. Same pattern as the face module's own
 
 ---
 
+## 3b. What the annotated video shows (every pipeline step)
+
+Every event that is logged is also in the video, in three places: the **PIPELINE EVENTS** list in the
+side panel (`DEBUG_VIDEO_EVENT_LINES`), a **stack of lines over the video**, bottom-left, for the last
+`DEBUG_VIDEO_TOAST_SECONDS` (`DEBUG_VIDEO_TOAST_LINES` lines), and - when the event has a place on the
+frame - a **ring with its name at that point** for `DEBUG_VIDEO_MARKER_FRAMES` frames. The cross line
+turns bright white for the same time after a crossing. All of it is also in the `seg_*.jsonl` file.
+
+| kind | when | where it comes from |
+|---|---|---|
+| `TRACK_NEW` | a track is created | detector |
+| `LINE_CROSS` | a plate changed side of the cross line (ring at the anchor point, line lit up) | detector |
+| `ROI_ENTRY` / `ROI_EXIT` / `STOPPED` | the stop ROI events | detector |
+| `OCR_SUBMIT` / `OCR_SKIP` | a task sent to OCR / why one was not | detector |
+| `OCR_RESULT` / `SATISFIED` | the hub's answer / no more OCR needed | control hub, via the detector |
+| `HUB_REQUEST` | the hub asked for another read | control hub |
+| `PUBLISH` | an event (cross_line, stop_roi) went to the backend, with plate and resolution | control hub |
+| `FINAL` | the final record went to the backend (revision, reason, complete or not) | control hub |
+| `DROPPED` / `LATE_RESULT` | the hub dropped a noise track / re-sent a final after a late result | control hub |
+| `FINALIZE` | the track left; was a leave_scene task sent | detector |
+
+The hub's steps reach the detector as show-only `ctl` messages (`published`, `final`, `dropped`,
+`late_result`, see `control-hub/src/protocol.py`); they change nothing. The OCR service's own steps
+(WebP uploads, `[OCR-IMAGES]`) stay in its log.
+
 ## 4. Detector — OCR-submission montage (new, off by default)
 
 `DEBUG_OCR_SUBMISSION_MONTAGE_ENABLED=true` saves one labelled-grid

@@ -57,6 +57,10 @@ class DebugConfig:
         self.ghost_frames = int(config.DEBUG_VIDEO_GHOST_FRAMES)  # draw lost tracks N frames
         self.event_lines = int(config.DEBUG_VIDEO_EVENT_LINES)
         self.trail_len = int(config.DEBUG_VIDEO_TRAIL)
+        # events drawn over the video itself (not only in the side panel)
+        self.toast_seconds = float(getattr(config, "DEBUG_VIDEO_TOAST_SECONDS", 8.0))
+        self.toast_lines = int(getattr(config, "DEBUG_VIDEO_TOAST_LINES", 8))
+        self.marker_frames = int(getattr(config, "DEBUG_VIDEO_MARKER_FRAMES", 45))
 
     def as_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -93,8 +97,14 @@ EVENT_COLORS = {
     "OCR_SKIP": C_DIM,
     "OCR_RESULT": (140, 255, 200),
     "OCR_LATE": C_BAD,
+    "TRACK_NEW": (200, 255, 200),
+    "SATISFIED": (110, 230, 130),
+    "HUB_REQUEST": (255, 190, 70),
     "PUBLISH": (255, 140, 220),
+    "FINAL": (255, 140, 220),
     "FINALIZE": (255, 140, 220),
+    "DROPPED": C_BAD,
+    "LATE_RESULT": C_BAD,
     "DROP": C_BAD,
     "TIMEOUT": C_BAD,
     "ERROR": C_BAD,
@@ -171,6 +181,8 @@ class DebugRecorder:
 
         self.events = deque(maxlen=400)          # (ts, kind, text)
         self.flashes: Dict[int, Tuple[str, int, Tuple[int, int, int]]] = {}
+        self.markers: List[Dict[str, Any]] = []   # event points drawn on the frame for a while
+        self.line_flash = 0                       # frames left of the highlighted cross line
         self._last_wall = time.time()
         self._fps_ema = 0.0
         self._draw_ms_ema = 0.0
@@ -291,13 +303,21 @@ class DebugRecorder:
 
     # ---------------- events ----------------
     def log(self, kind: str, text: str, track_id: Optional[int] = None,
-            flash_frames: int = 25, data: Optional[dict] = None):
-        """Record a pipeline event: it lands in the panel, on the track box, and in the jsonl."""
+            flash_frames: int = 25, data: Optional[dict] = None,
+            point: Optional[Tuple[float, float]] = None):
+        """Record a pipeline event: it lands in the panel, as a toast over the video, on the
+        track box, at `point` on the frame (a marker), and in the jsonl."""
         if not self.enabled or self.broken:
             return
         ts = time.time()
         self.events.append((ts, kind, text))
 
+        if point is not None:
+            self.markers.append({"pt": (int(point[0]), int(point[1])), "kind": kind, "text": text,
+                                 "n": self.cfg.marker_frames, "col": EVENT_COLORS.get(kind, C_TEXT)})
+            self.markers = self.markers[-12:]
+        if kind == "LINE_CROSS":
+            self.line_flash = self.cfg.marker_frames
         if track_id is not None and flash_frames > 0:
             self.flashes[int(track_id)] = (
                 kind, int(flash_frames), EVENT_COLORS.get(kind, C_TEXT)
@@ -364,6 +384,11 @@ class DebugRecorder:
         self._draw_ms_ema = dt if self._draw_ms_ema == 0 else (0.9 * self._draw_ms_ema + 0.1 * dt)
 
     def _decay_flashes(self):
+        for m in self.markers:
+            m["n"] -= 1
+        self.markers = [m for m in self.markers if m["n"] > 0]
+        if self.line_flash > 0:
+            self.line_flash -= 1
         for tid in list(self.flashes.keys()):
             kind, n, col = self.flashes[tid]
             if n <= 1:
@@ -392,6 +417,8 @@ class DebugRecorder:
         self._draw_geometry(img, ctx, s)
         self._draw_detections(img, ctx, s)
         self._draw_tracks(img, ctx, s)
+        self._draw_markers(img, s)
+        self._draw_toasts(img)
         self._draw_banner(img, ctx)
 
         if self.cfg.panel_width > 0:
@@ -421,6 +448,8 @@ class DebugRecorder:
             p2 = (int(lp[1][0] * s), int(lp[1][1] * s))
             on = ctx.get("trig_cross", False)
             col = C_LINE if on else C_DIM
+            if self.line_flash > 0:                      # a plate just crossed: light the line up
+                cv2.line(img, p1, p2, (255, 255, 255), 9, cv2.LINE_AA)
             cv2.line(img, p1, p2, col, 2, cv2.LINE_AA)
             # side labels: which half is "positive"
             mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
@@ -443,6 +472,31 @@ class DebugRecorder:
                 _text(img, f"STOP ROI [{'ON' if on else 'OFF'}]",
                       (int(pts[:, 0].min()) + 4, int(pts[:, 1].min()) - 8),
                       col, 0.45, 1, (20, 20, 20))
+
+    # ---- event points: where a crossing / stop / entry happened, for ~marker_frames frames ----
+    def _draw_markers(self, img, s):
+        for m in self.markers:
+            x, y = int(m["pt"][0] * s), int(m["pt"][1] * s)
+            col = m["col"]
+            r = 12 + int(18 * m["n"] / max(1, self.cfg.marker_frames))     # ring shrinks as it ages
+            cv2.circle(img, (x, y), r, col, 3, cv2.LINE_AA)
+            cv2.circle(img, (x, y), 4, col, -1, cv2.LINE_AA)
+            _text(img, f"{m['kind']} {m['text']}"[:60], (x + r + 6, y + 5), col, 0.5, 1, (15, 15, 15))
+
+    # ---- the last pipeline events as a stack of lines over the video (bottom-left) ----
+    def _draw_toasts(self, img):
+        if self.cfg.toast_lines <= 0 or self.cfg.toast_seconds <= 0:
+            return
+        now = time.time()
+        recent = [e for e in self.events if now - e[0] <= self.cfg.toast_seconds][-self.cfg.toast_lines:]
+        if not recent:
+            return
+        h = img.shape[0]
+        y = h - 10 - 20 * (len(recent) - 1)
+        for ts, kind, text in recent:
+            hh = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            _text(img, f"{hh} {kind} {text}"[:110], (10, y), EVENT_COLORS.get(kind, C_TEXT), 0.5, 1, (15, 15, 15))
+            y += 20
 
     # ---- raw YOLO output, before the tracker had a say ----
     def _draw_detections(self, img, ctx, s):
