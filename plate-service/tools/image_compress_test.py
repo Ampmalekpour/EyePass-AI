@@ -1,31 +1,30 @@
 """
-image_compress_test.py
+image_compress_test.py  (OpenCV + Pillow)
 --------------------------------------------------------------------
-Measures how the OCR service stores images in MinIO today and what a
-better (still lossless) setting would give, on YOUR images.
+Today the OCR service stores images with   cv2.imencode(".png", img)
+(no parameters = PNG level 1, the fastest and biggest setting).
 
-Today (ocr_service/src/worker.py `_upload_image_to_minio`):
-    ok, buf = cv2.imencode(".png", img)        # no parameters
-OpenCV's defaults for PNG are: compression level 1 (fastest, biggest),
-strategy RLE. PNG is lossless, so nothing is lost - but the files are
-bigger than they need to be.
+This script compares that with other ways to store the same image, on
+YOUR images:  OpenCV PNG levels, Pillow PNG (compress_level, optimize),
+WebP lossless (several effort levels) and JPEG 4:4:4 (lossy).
 
-What this script does for every image in the input folder:
-  1. CURRENT method  -> saves  <out>/current/<name>.png  and prints size + time
-  2. tries other encoders (PNG levels / strategies, WebP lossless, JPEG)
-     and prints size, encode time, decode time and whether the result is
-     bit-identical (lossless) or its PSNR (lossy)
-  3. OPTIMIZED       -> saves the smallest LOSSLESS PNG that encodes within
-     MAX_ENCODE_MS (40 ms; the slowest PNG settings can take ~1 s) as
-     <out>/optimized/<name>.png and prints size + time
-At the end it prints the average of every method over all images.
+For every image in the folder it
+  1. saves the CURRENT method to   <out>\\current\\       and prints size + time
+  2. saves the best lossless result that encodes within MAX_ENCODE_MS to
+     <out>\\optimized\\  (any format) and the best PNG to <out>\\optimized_png\\
+  3. prints a table: size, encode ms, decode ms, bit-identical / PSNR
+and at the end the average per method.
 
-Usage (cmd):
-    pip install opencv-python numpy
+It never "freezes": every method prints its name BEFORE it runs, slow
+settings are measured once instead of 5 times, and settings that would
+take many seconds on a big image are skipped.
+
+    pip install opencv-python numpy pillow
     python image_compress_test.py
     python image_compress_test.py "C:\\path\\to\\images"
 --------------------------------------------------------------------
 """
+import io
 import os
 import statistics
 import sys
@@ -34,64 +33,103 @@ import time
 import cv2
 import numpy as np
 
+try:
+    from PIL import Image, features
+except ImportError:
+    Image = None
+
 DEFAULT_DIR = r"C:\Users\eyerik.com\Desktop\Snowa\faulty_ocr\small"
 EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
-REPEAT = 5   # encodes per method; the median time is reported
-MAX_ENCODE_MS = 40.0   # "optimized" = smallest lossless PNG that encodes within this time
+MAX_ENCODE_MS = 40.0      # "optimized" = smallest lossless result within this encode time
+SKIP_ABOVE_MS = 4000.0    # a method whose first run exceeds this is not repeated / not run on later images
+BIG_PIXELS = 1_500_000    # above this, the very slow settings are skipped up front
+
+SKIPPED = set()           # methods that proved too slow on this machine
 
 
 def kb(n):
     return f"{n / 1024:8.1f} KB"
 
 
+# ---------------------------------------------------------------- encoders
+def cv_encode(ext, params=None):
+    def f(ctx):
+        ok, buf = cv2.imencode(ext, ctx["bgr"], params) if params else cv2.imencode(ext, ctx["bgr"])
+        return buf.tobytes() if ok else None
+    return f
+
+
+def pil_encode(fmt, **kw):
+    def f(ctx):
+        b = io.BytesIO()
+        ctx["pil"].save(b, fmt, **kw)
+        return b.getvalue()
+    return f
+
+
 def method_list():
-    """(name, extension, params). Skips options this OpenCV build lacks."""
+    """(name, extension, encoder, 'slow' flag). Skips what this install lacks."""
     g = lambda n: getattr(cv2, n, None)
-    m = [("CURRENT png default (level 1, RLE)", ".png", None)]
-    strategies = [("RLE", g("IMWRITE_PNG_STRATEGY_RLE")),
-                  ("FILTERED", g("IMWRITE_PNG_STRATEGY_FILTERED")),
-                  ("DEFAULT", g("IMWRITE_PNG_STRATEGY_DEFAULT"))]
-    for level in (3, 6, 9):
-        for sname, sval in strategies:
-            if sval is None or g("IMWRITE_PNG_COMPRESSION") is None:
-                continue
-            m.append((f"png level {level} {sname}", ".png",
-                      [cv2.IMWRITE_PNG_COMPRESSION, level, cv2.IMWRITE_PNG_STRATEGY, sval]))
-    if g("IMWRITE_WEBP_QUALITY") is not None:
-        m.append(("webp LOSSLESS", ".webp", [cv2.IMWRITE_WEBP_QUALITY, 101]))
-    for q in (95, 98, 100):
+    m = [("CURRENT  cv2 png default (level 1)", ".png", cv_encode(".png"), False)]
+    if g("IMWRITE_PNG_COMPRESSION") is not None and g("IMWRITE_PNG_STRATEGY_DEFAULT") is not None:
+        for level in (3, 6, 9):
+            m.append((f"cv2 png level {level} (zlib default)", ".png",
+                      cv_encode(".png", [cv2.IMWRITE_PNG_COMPRESSION, level,
+                                         cv2.IMWRITE_PNG_STRATEGY, cv2.IMWRITE_PNG_STRATEGY_DEFAULT]), level == 9))
+    if Image is not None:
+        m.append(("pil png compress_level 6", ".png", pil_encode("PNG", compress_level=6), False))
+        m.append(("pil png compress_level 9", ".png", pil_encode("PNG", compress_level=9), True))
+        m.append(("pil png level 9 + optimize", ".png", pil_encode("PNG", compress_level=9, optimize=True), True))
+        if features.check("webp"):
+            for meth in (0, 2, 4, 6):
+                m.append((f"pil webp LOSSLESS method {meth}", ".webp",
+                          pil_encode("WEBP", lossless=True, quality=100, method=meth), meth == 6))
+    elif g("IMWRITE_WEBP_QUALITY") is not None:
+        m.append(("cv2 webp LOSSLESS", ".webp", cv_encode(".webp", [cv2.IMWRITE_WEBP_QUALITY, 101]), True))
+    for q in (95, 98):
         p = [cv2.IMWRITE_JPEG_QUALITY, q]
         if g("IMWRITE_JPEG_SAMPLING_FACTOR_444") is not None:
             p += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
         if g("IMWRITE_JPEG_OPTIMIZE") is not None:
             p += [cv2.IMWRITE_JPEG_OPTIMIZE, 1]
-        m.append((f"jpeg q{q} 4:4:4 optimized (lossy)", ".jpg", p))
+        m.append((f"cv2 jpeg q{q} 4:4:4 (lossy)", ".jpg", cv_encode(".jpg", p), False))
+    if Image is not None:
+        m.append(("pil jpeg q95 4:4:4 optimize (lossy)", ".jpg",
+                  pil_encode("JPEG", quality=95, subsampling=0, optimize=True), False))
     return m
 
 
-def encode(img, ext, params):
-    t = []
-    buf = None
-    for _ in range(REPEAT):
-        t0 = time.perf_counter()
-        ok, buf = cv2.imencode(ext, img, params) if params else cv2.imencode(ext, img)
-        t.append((time.perf_counter() - t0) * 1000)
-        if not ok:
-            return None, None
-    return buf, statistics.median(t)
-
-
-def check(img, buf):
+def timed_encode(enc, ctx):
     t0 = time.perf_counter()
-    dec = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    data = enc(ctx)
+    first = (time.perf_counter() - t0) * 1000
+    if data is None:
+        return None, None
+    reps = 1 if first > 300 else (3 if first > 50 else 7)
+    times = [first]
+    for _ in range(reps - 1):
+        t0 = time.perf_counter()
+        enc(ctx)
+        times.append((time.perf_counter() - t0) * 1000)
+    return data, statistics.median(times)
+
+
+def check(bgr, data):
+    t0 = time.perf_counter()
+    try:
+        arr = np.frombuffer(data, np.uint8)
+        dec = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if dec is None and Image is not None:
+            dec = cv2.cvtColor(np.array(Image.open(io.BytesIO(data)).convert("RGB")), cv2.COLOR_RGB2BGR)
+    except Exception:
+        dec = None
     dt = (time.perf_counter() - t0) * 1000
-    if dec is None or dec.shape != img.shape:
+    if dec is None or dec.shape != bgr.shape:
         return dt, "decode failed", None
-    if np.array_equal(dec, img):
+    if np.array_equal(dec, bgr):
         return dt, "lossless", None
-    mse = float(np.mean((dec.astype(np.float32) - img.astype(np.float32)) ** 2))
-    psnr = 99.0 if mse == 0 else 10 * np.log10(255.0 ** 2 / mse)
-    return dt, "lossy", psnr
+    mse = float(np.mean((dec.astype(np.float32) - bgr.astype(np.float32)) ** 2))
+    return dt, "lossy", (99.0 if mse == 0 else 10 * np.log10(255.0 ** 2 / mse))
 
 
 def main():
@@ -100,75 +138,91 @@ def main():
         print(f"Folder not found: {src}")
         return
     out = os.path.join(src, "compressed_test")
-    cur_dir, opt_dir = os.path.join(out, "current"), os.path.join(out, "optimized")
-    os.makedirs(cur_dir, exist_ok=True)
-    os.makedirs(opt_dir, exist_ok=True)
+    d_cur, d_opt, d_png = (os.path.join(out, n) for n in ("current", "optimized", "optimized_png"))
+    for d in (d_cur, d_opt, d_png):
+        os.makedirs(d, exist_ok=True)
     files = [f for f in sorted(os.listdir(src)) if f.lower().endswith(EXTS)]
     if not files:
         print(f"No images in {src}")
         return
-    print(f"OpenCV {cv2.__version__} | {len(files)} image(s) from {src}\nOutput: {out}\n")
+    print(f"OpenCV {cv2.__version__} | Pillow {'%s' % __import__('PIL').__version__ if Image else 'NOT installed (pip install pillow)'}"
+          f" | {len(files)} image(s) | output: {out}\n", flush=True)
 
     methods = method_list()
-    totals = {name: {"size": [], "enc": [], "dec": [], "psnr": [], "lossless": True} for name, _, _ in methods}
-    raw_total = 0
+    totals = {n: {"size": [], "ratio": [], "enc": [], "dec": [], "psnr": [], "lossless": True} for n, *_ in methods}
     for fname in files:
-        path = os.path.join(src, fname)
-        img = cv2.imread(path, cv2.IMREAD_COLOR)
-        if img is None:
+        bgr = cv2.imread(os.path.join(src, fname), cv2.IMREAD_COLOR)
+        if bgr is None:
             print(f"skip (cannot read): {fname}")
             continue
-        h, w = img.shape[:2]
-        raw = img.nbytes
-        raw_total += raw
-        print("=" * 100)
-        print(f"{fname}   {w}x{h}   raw pixels {kb(raw)}   original file {kb(os.path.getsize(path))}")
-        print("-" * 100)
-        best_png = None
-        rows = []
-        for name, ext, params in methods:
-            buf, enc_ms = encode(img, ext, params)
-            if buf is None:
+        h, w = bgr.shape[:2]
+        ctx = {"bgr": bgr}
+        if Image is not None:
+            ctx["pil"] = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        base = os.path.splitext(fname)[0]
+        print("=" * 104)
+        print(f"{fname}   {w}x{h}   raw {kb(bgr.nbytes)}   original file {kb(os.path.getsize(os.path.join(src, fname)))}", flush=True)
+        print("-" * 104)
+        rows, cur_size = [], None
+        best_any = best_png = None
+        for name, ext, enc, slow in methods:
+            if name in SKIPPED or (slow and w * h > BIG_PIXELS):
+                print(f"  skipped (too slow for this size): {name}", flush=True)
                 continue
-            dec_ms, kind, psnr = check(img, buf)
-            size = len(buf)
-            tt = totals[name]
-            tt["size"].append(size); tt["enc"].append(enc_ms); tt["dec"].append(dec_ms)
+            print(f"  testing {name} ...", end="", flush=True)
+            data, ms = timed_encode(enc, ctx)
+            if data is None:
+                print(" failed")
+                continue
+            print(f" {ms:8.1f} ms", flush=True)
+            if ms > SKIP_ABOVE_MS:
+                SKIPPED.add(name)
+            dec_ms, kind, psnr = check(bgr, data)
+            size = len(data)
+            t = totals[name]
+            t["size"].append(size); t["enc"].append(ms); t["dec"].append(dec_ms)
+            t["ratio"].append(size / cur_size if cur_size else 1.0)
             if kind == "lossy":
-                tt["lossless"] = False
-                tt["psnr"].append(psnr)
-            rows.append((name, size, enc_ms, dec_ms, kind, psnr))
-            if ext == ".png" and kind == "lossless" and enc_ms <= MAX_ENCODE_MS and (best_png is None or size < best_png[1]):
-                best_png = (name, size, enc_ms, buf)
+                t["lossless"] = False
+                t["psnr"].append(psnr)
+            rows.append((name, size, ms, dec_ms, kind, psnr))
             if name.startswith("CURRENT"):
-                with open(os.path.join(cur_dir, os.path.splitext(fname)[0] + ".png"), "wb") as f:
-                    f.write(buf)
-                cur_size, cur_ms = size, enc_ms
-                print(f"CURRENT METHOD saved -> current\\{os.path.splitext(fname)[0]}.png   size {kb(size)}   compress time {enc_ms:7.2f} ms")
-        if best_png:
-            with open(os.path.join(opt_dir, os.path.splitext(fname)[0] + ".png"), "wb") as f:
-                f.write(best_png[3])
-            print(f"OPTIMIZED      saved -> optimized\\{os.path.splitext(fname)[0]}.png  size {kb(best_png[1])}   compress time {best_png[2]:7.2f} ms"
-                  f"   ({best_png[0]})   {100 * (1 - best_png[1] / cur_size):.1f}% smaller than current")
-        print(f"\n{'method':42s} {'size':>12s} {'vs current':>10s} {'encode ms':>10s} {'decode ms':>10s}  quality")
-        for name, size, enc_ms, dec_ms, kind, psnr in rows:
+                cur_size = size
+                with open(os.path.join(d_cur, base + ".png"), "wb") as f:
+                    f.write(data)
+                print(f"\n  >>> CURRENT METHOD saved -> current\\{base}.png   size {kb(size)}   compress time {ms:8.2f} ms\n", flush=True)
+            if kind == "lossless" and ms <= MAX_ENCODE_MS:
+                if best_any is None or size < best_any[1]:
+                    best_any = (name, size, ms, data, ext)
+                if ext == ".png" and (best_png is None or size < best_png[1]):
+                    best_png = (name, size, ms, data, ext)
+        cur_size = cur_size or 1
+        for label, best, folder in (("OPTIMIZED (any lossless format)", best_any, d_opt),
+                                    ("OPTIMIZED (PNG only, same format as today)", best_png, d_png)):
+            if best:
+                with open(os.path.join(folder, base + best[4]), "wb") as f:
+                    f.write(best[3])
+                print(f"  >>> {label} saved -> {os.path.basename(folder)}\\{base}{best[4]}   size {kb(best[1])}   "
+                      f"compress time {best[2]:8.2f} ms   [{best[0]}]   {100 * (1 - best[1] / cur_size):.1f}% smaller")
+        print(f"\n{'method':44s} {'size':>12s} {'vs current':>10s} {'encode ms':>10s} {'decode ms':>10s}  quality")
+        for name, size, ms, dec_ms, kind, psnr in rows:
             q = "bit-identical" if kind == "lossless" else (f"PSNR {psnr:.1f} dB" if psnr else kind)
-            print(f"{name:42s} {kb(size):>12s} {100 * size / cur_size:9.1f}% {enc_ms:10.2f} {dec_ms:10.2f}  {q}")
-        print()
+            print(f"{name:44s} {kb(size):>12s} {100 * size / cur_size:9.1f}% {ms:10.2f} {dec_ms:10.2f}  {q}")
+        print(flush=True)
 
-    print("=" * 100)
-    print("AVERAGE OVER ALL IMAGES")
-    print("-" * 100)
-    base = statistics.mean(totals[methods[0][0]]["size"]) if totals[methods[0][0]]["size"] else 1
-    print(f"{'method':42s} {'avg size':>12s} {'vs current':>10s} {'encode ms':>10s} {'decode ms':>10s}  quality")
-    for name, _, _ in methods:
-        tt = totals[name]
-        if not tt["size"]:
+    print("=" * 104)
+    n_img = len(totals[methods[0][0]]["size"])
+    print(f"AVERAGE OVER {n_img} IMAGE(S)  (size = average of each image's size relative to the current method;")
+    print("n = images the method ran on - very slow settings are skipped on big images)")
+    print("-" * 104)
+    print(f"{'method':44s} {'size vs current':>16s} {'avg size':>12s} {'encode ms':>10s} {'decode ms':>10s} {'n':>3s}  quality")
+    for name, *_ in methods:
+        t = totals[name]
+        if not t["size"]:
             continue
-        s = statistics.mean(tt["size"])
-        q = "bit-identical" if tt["lossless"] else f"PSNR {statistics.mean(tt['psnr']):.1f} dB"
-        print(f"{name:42s} {kb(s):>12s} {100 * s / base:9.1f}% {statistics.mean(tt['enc']):10.2f} "
-              f"{statistics.mean(tt['dec']):10.2f}  {q}")
+        q = "bit-identical" if t["lossless"] else f"PSNR {statistics.mean(t['psnr']):.1f} dB"
+        print(f"{name:44s} {100 * statistics.mean(t['ratio']):15.1f}% {kb(statistics.mean(t['size'])):>12s} "
+              f"{statistics.mean(t['enc']):10.2f} {statistics.mean(t['dec']):10.2f} {len(t['size']):3d}  {q}")
     print(f"\nFiles written to: {out}")
 
 
