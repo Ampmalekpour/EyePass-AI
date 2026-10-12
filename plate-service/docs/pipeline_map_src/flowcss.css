@@ -1,0 +1,17 @@
+.flowsvg{display:block;background:var(--panel)}
+.flowsvg .nd{stroke-width:1.5}
+.flowsvg .tt{font:12.5px system-ui,sans-serif;fill:var(--ink)}
+.flowsvg .tt.b{font-weight:600}
+.flowsvg .ed{fill:none;stroke-width:1.6;stroke-linejoin:round}
+.flowsvg .e-n{stroke:var(--muted)} .flowsvg .e-y{stroke:var(--green)} .flowsvg .e-x{stroke:var(--red)}
+.flowsvg .e-d{stroke:var(--purple)} .flowsvg .e-l{stroke:var(--amber);stroke-dasharray:6 4}
+.flowsvg .mk-n{fill:var(--muted)} .flowsvg .mk-y{fill:var(--green)} .flowsvg .mk-x{fill:var(--red)} .flowsvg .mk-d{fill:var(--purple)} .flowsvg .mk-l{fill:var(--amber)}
+.flowsvg .lb{font:11.5px system-ui,sans-serif;fill:var(--muted);paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
+.flowsvg .lb-y{fill:var(--green);font-weight:600} .flowsvg .lb-x{fill:var(--red);font-weight:600}
+.flowsvg .lb-d{fill:var(--purple)} .flowsvg .lb-l{fill:var(--amber)}
+.flowsvg .lane-band{fill:transparent;stroke:var(--line);stroke-width:1} .flowsvg .lane-band.alt{fill:color-mix(in srgb,var(--soft) 60%,transparent)}
+.flowsvg .lane-name{font:600 13px system-ui,sans-serif;fill:var(--muted)}
+.flowsvg .chart-title{font:600 14px system-ui,sans-serif;fill:var(--muted)}
+.flowsvg .c-blue{fill:var(--blue-bg);stroke:var(--blue)} .flowsvg .c-green{fill:var(--green-bg);stroke:var(--green)}
+.flowsvg .c-amber{fill:var(--amber-bg);stroke:var(--amber)} .flowsvg .c-purple{fill:var(--purple-bg);stroke:var(--purple)}
+.flowsvg .c-red{fill:var(--red-bg);stroke:var(--red)} .flowsvg .c-grey{fill:var(--soft);stroke:var(--line)} .flowsvg .c-teal{fill:var(--teal-bg);stroke:var(--teal)}

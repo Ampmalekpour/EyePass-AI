@@ -40,9 +40,10 @@ A step-by-step record of everything we did together: installing the server, inst
 11. Change settings or code later (Part 18)
 12. Start automatically at boot (Part 19)
 13. Daily basics: power off, health, updates, accounts (Part 20)
-14. Command reference
-15. Troubleshooting
-16. Not done yet
+14. Polygon ROI and how images are stored (Part 21)
+15. Command reference
+16. Troubleshooting
+17. Not done yet
 
 ---
 
@@ -978,6 +979,46 @@ If an `scp` from your PC is interrupted, run it again.
 | all Docker data (images, volumes) | `/var/lib/docker` |
 
 What to keep a copy of on your PC: the `plate_for_sanat` folder (code, models, video, `.env`) and `E:\docker_images\sanat_plate_images`. With those you can rebuild the server's stack from nothing (Parts 12 and 13).
+
+---
+
+## Part 21: Polygon ROI and how images are stored (SERVER)
+
+### A polygon instead of a rectangle
+
+By default a camera uses the rectangle `--roi X Y W H` (fractions of the frame). To use a
+polygon (for example a road that narrows towards the top), add `--roi-polygon` with three
+or more points, as `X Y X Y X Y ...` (fractions 0..1, or pixels):
+
+```
+rt set-camera --id 1 --address publisher --title "Test 1" --roi 0 0 1 1 --roi-polygon 0.55 0.10 0.80 0.10 0.98 0.90 0.55 0.90
+rt activate --id 1
+```
+
+The detector crops the polygon's bounding box, paints everything outside the polygon grey
+and gives that image to the model. In the detector log you see once per camera:
+
+```
+docker compose logs plate_detector 2>&1 | grep "\[ROI\]"
+```
+
+and the `[PERF]` lines have `roi(crop+mask)=… ms/frame` (a few tenths of a millisecond).
+Without `--roi-polygon` the camera behaves exactly as before. Re-running `set-camera` and
+`activate` for a camera that is already active updates its ROI.
+
+### What is sent and stored
+
+- Detector → Redis: up to 5 crops (JPEG, cut from the full frame) and **the full camera frame**
+  as JPEG q80 (`FRAME_JPEG_QUALITY` in `detector/src/config.py`).
+- The OCR service defines the MinIO paths right after the recognition, answers the control hub,
+  and in the background compresses the first crop and the frame to **WebP q70** and uploads them.
+  The stored files end in `.webp`.
+- Watch it with: `docker compose logs plate_ocr 2>&1 | grep -E "OCR-IMAGES|UPLOAD"`.
+  `failed` or `dropped` above zero means some images were not stored (MinIO down, or the
+  queue was full).
+- Settings (OCR): `STORED_WEBP_QUALITY`, `STORED_WEBP_METHOD`, `IMAGE_UPLOAD_QUEUE_MAX`,
+  `IMAGE_UPLOAD_RETRIES` in `ocr_service/src/config.py`. After changing a value: rebuild or
+  use the source-mount overlay (Part 18) and restart `plate_ocr`.
 
 ---
 

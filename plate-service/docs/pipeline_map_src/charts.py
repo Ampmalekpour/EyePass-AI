@@ -17,9 +17,9 @@ def overview():
     n('be2', BE, 290, 'Activate camera\nLPUSH cmd:ai:request', 'start')
     n('rd_cmd', RD, 290, 'cmd:ai:request', 'store', minw=170)
     n('de1', DE, 380, 'Command worker (BRPOP 2 s)\nwrite active_cameras ledger\nattach camera: RTSP reader,\ntracker, model instance', 'proc')
-    n('de2', DE, 540, 'Newest frame → crop ROI\n→ YOLO detect → BYTETracker\n(auto-degrade if over capacity)', 'proc')
+    n('de2', DE, 540, 'Newest frame → ROI image\n(polygon bbox, outside grey)\n→ YOLO → BYTETracker\n(auto-degrade if over capacity)', 'proc')
     n('de3', DE, 690, 'Trigger fired or\nhub asked again?', 'dec')
-    n('de4', DE, 840, 'Build task: ≤5 crops + 1 frame\n(JPEG) · emit trigger / submitted', 'proc')
+    n('de4', DE, 840, 'Build task: ≤5 crops (JPEG)\n+ FULL frame (JPEG q80)\nemit trigger / submitted', 'proc')
     n('de5', DE, 990, 'Track unseen\n> 30 frames?', 'dec')
     n('de6', DE, 1130, 'leave_scene task (if rules)\nemit track_ended · forget track', 'proc')
     n('rd_ev', RD, 840, 'hub:events (STREAM)', 'store', minw=190)
@@ -27,7 +27,7 @@ def overview():
     n('oc1', OC, 1070, 'BRPOP task (1 s)\nvote class: car / motorcycle', 'good')
     n('oc2', OC, 1185, 'OCR every crop\nvote characters', 'good')
     n('oc3', OC, 1320, 'Valid?\nconf ≥ 0.70, 8 chars,\nplate pattern', 'dec')
-    n('oc4', OC, 1465, 'Upload crop + best frame\n(2 PNG) to MinIO', 'good')
+    n('oc4', OC, 1465, 'Define paths (.webp) → answer;\nbackground: WebP q70\ncrop + full frame → MinIO', 'good')
     n('oc5', OC, 1565, 'Answer ALWAYS sent\n(ok / invalid / skipped / error)', 'good')
     n('mn', MN, 1465, 'MinIO\nprivate bucket', 'store', minw=130)
     n('rd_res', RD, 1565, 'hub:results (STREAM)', 'store', minw=190)
@@ -60,7 +60,7 @@ def overview():
     c.e('oc1', 'oc2'); c.e('oc2', 'oc3')
     c.e('oc3', 'oc4', 'valid → ok · invalid → invalid', st='y', pos=40)
     c.e('oc4', 'oc5')
-    c.e('oc4', 'mn', st='n', sa='r', ta='l', label='2 PNG', pos=90)
+    c.e('oc4', 'mn', st='n', sa='r', ta='l', label='2 WebP (background)', pos=90)
     c.e('oc5', 'rd_res', st='d', sa='l', ta='r')
     c.e('rd_ev', 'hb1', st='d', sa='r', ta='l')
     c.e('hb1', 'hb_p'); c.e('hb_p', 'hb2')
@@ -95,13 +95,13 @@ def frameloop():
         ('f1', 'proc', 'Apply add / remove camera commands\nDrain hub:ctl (result · request · state)'),
         ('f2', 'proc', 'For each camera: take the newest frame\n(reader thread keeps only the latest one)'),
         ('f3', 'dec', 'New frame since\nlast time?'),
-        ('f4', 'proc', 'missed = new frames − 1 · fid += new frames\nCrop the camera ROI (keep offset → full-frame px)'),
+        ('f4', 'proc', 'missed = new frames − 1 · fid += new frames\nROI image: rectangle crop, or polygon bounding box\nwith the outside painted grey (offset kept)'),
         ('f5', 'dec', 'Due for detection?\nfid ≥ _next_due'),
         ('f6', 'proc', 'ONE inference call for all due frames\nGPU: one batched predict() · CPU: one instance per camera\nconf ≥ 0.25 · NMS IoU 0.7 · ≤ 300 boxes'),
         ('f7', 'proc', 'BYTETracker.update(detections, dt)\ndt = real camera frames since the last update'),
         ('f8', 'dec', 'Active track\nis new?'),
-        ('f9', 'proc', 'Cut plate crop from ROI frame · sharpness (Laplacian)\nRun triggers  (flowchart 3)'),
-        ('f10', 'proc', 'Update best-5 crops (rank = conf×100, area)\nUpdate best frame when the best crop improved'),
+        ('f9', 'proc', 'Cut plate crop from the FULL frame (offset added)\nsharpness (Laplacian)\nRun triggers  (flowchart 3)'),
+        ('f10', 'proc', 'Update best-5 crops (rank = conf×100, area)\nBest frame = copy of the FULL frame (when best improves)'),
         ('f11', 'dec', 'Recognition\nrequested?'),
         ('f12', 'proc', 'Emit track_update (at most every 5 s)'),
         ('f13', 'dec', 'Any track unseen\n> 30 frames?'),
@@ -185,7 +185,7 @@ def submit_end():
         ('s3', 'dec', 'Any crop stored\nfor this track?'),
         ('s4', 'dec', 'Crop set changed since\nthe last send?\n(best frame no. : crop count)'),
         ('s5', 'proc', 'Pick the stage by priority\nleave_scene 3 > cross_line / stop_roi 2 > periodic 1'),
-        ('s6', 'proc', 'Encode ≤ 5 crops + 1 best frame as JPEG\n+ camera, track, uid, stage, class flags, scores\n→ pickle'),
+        ('s6', 'proc', 'Encode ≤ 5 crops (JPEG) + the FULL frame (JPEG q80)\n+ camera, track, uid, stage, class flags, scores\n→ pickle'),
         ('s7', 'store', 'emit "submitted" → hub:events, THEN LPUSH task → ocr:tasks\n(in-memory outbox keeps the order; retry 0.2 → 5 s)'),
     ], gap=30)
     c.e('s0', 's1')
@@ -233,7 +233,7 @@ def ocr():
     c.n('val', X, y4 + 290, 'Valid?\ncar: conf ≥ 0.70, 8 chars,\n2 digits + letter + 3 + 2\nmotorcycle: format rules', 'dec')
     c.e('car', 'val', sa='b', ta='l', st='n', via=[(X - 230, y4 + 290)])
     c.e('mot', 'val', sa='b', ta='r', st='n', via=[(X + 230, y4 + 290)])
-    c.n('up', X, y4 + 440, 'Upload crop[0] + best frame as PNG to MinIO\nvalid → dynamics/ValidPlateImage/vp_… + ValidVehicleImage/vf_…\ninvalid → InvalidPlateImage/ip_… + InvalidVehicleImage/if_…', 'good')
+    c.n('up', X, y4 + 440, 'Define the paths first (.webp): valid → vp_/vf_, invalid → ip_/if_\nreturn them in the result NOW; background thread: crop[0] + full frame\n→ WebP q70 → MinIO (bounded queue, 3 retries)', 'good')
     c.e('val', 'up', 'yes → status ok\nno → status invalid + reason', st='y', pos=30)
     c.n('push', X, y4 + 560, 'XADD internal:hub:results {uid, task_id, stage, status,\nplate, confidence, validity, image paths}\n8 attempts, 0.2 → 5 s backoff (~25 s)', 'store')
     c.e('up', 'push', st='d')
