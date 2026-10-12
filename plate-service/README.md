@@ -232,8 +232,12 @@ benchmark (`tools/bench_multistream.py`), implemented the same way
 ## Polygon ROI and images (ROI, full frame, crops, WebP)
 
 **ROI.** A camera's ROI is either the rectangle `roi {x,y,w,h}` (normalized, as
-before) or an optional **polygon** `roi_polygon` (3+ points, `[{"x":..,"y":..}, ...]`,
-normalized 0..1 or frame pixels; it overrides `roi`). For a polygon the detector
+before) or an optional **polygon** `roi_polygon` (any number of points >= 3,
+`[{"x":..,"y":..}, ...]`, **normalized 0..1** - the backend contract; frame pixels are also
+accepted for testing; it overrides `roi`). The point **order is not trusted**: the detector
+orders the points around the polygon's centroid itself (`config.ROI_POLYGON_ORDER`:
+`angle` default | `hull` | `given`), drops duplicates, and a value slightly over 1.0 is still
+read as normalized. For a polygon the detector
 (`engine._build_roi_state` / `_roi_image`):
 
 1. crops the polygon's **bounding box** (a numpy view, no copy),

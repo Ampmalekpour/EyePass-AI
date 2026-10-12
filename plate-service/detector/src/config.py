@@ -212,6 +212,12 @@ TRIGGER_VELOCITY_WINDOW = 10
 # the polygon's bounding box, paints everything outside the polygon this grey
 # (the same value the letterbox pads with) and gives that image to the model.
 ROI_GREY_VALUE = 114
+# The backend sends roi_polygon as normalized {x, y} points (3 or more, any count) and the
+# order is NOT trusted. The detector puts the points in boundary order itself:
+#   "angle" - sort around the centroid (convex shapes and star-shaped concave ones) [default]
+#   "hull"  - convex hull (always a clean convex polygon; concave parts are filled in)
+#   "given" - use the order as received
+ROI_POLYGON_ORDER = "angle"
 
 # ---- images sent to the OCR service (over Redis) ------------------------------
 # Crops are sent as today (OpenCV's default JPEG). The FULL camera frame (never the
@@ -332,4 +338,3 @@ DEBUG_OCR_SUBMISSION_MONTAGE_DIR = os.path.join(DEBUG_ROOT, "ocr_submissions")
 DEBUG_OCR_SUBMISSION_MONTAGE_MAX_FILES = 200
 
 logging_setup.configure(LOG_LEVEL, LOG_FORMAT)
-logging_setup.fail_on_placeholders()

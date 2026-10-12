@@ -43,6 +43,7 @@ forgets a track the moment it emits track_ended.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import threading
@@ -191,6 +192,22 @@ def to_frame_pixels(points, W: int, H: int):
     return tuple(pts), "pixels"
 
 
+def order_polygon_points(pts):
+    """Return the points in boundary order, so a list given in the wrong order still
+    describes the intended polygon (no bow-tie). Duplicate points are dropped.
+    config.ROI_POLYGON_ORDER: "angle" (around the centroid) | "hull" | "given"."""
+    uniq = list(dict.fromkeys((round(float(x), 3), round(float(y), 3)) for x, y in pts))
+    mode = str(getattr(config, "ROI_POLYGON_ORDER", "angle")).lower()
+    if len(uniq) < 3 or mode == "given":
+        return uniq
+    if mode == "hull":
+        hull = cv2.convexHull(np.array(uniq, np.float32)).reshape(-1, 2)
+        return [(float(x), float(y)) for x, y in hull]
+    cx = sum(x for x, _ in uniq) / len(uniq)
+    cy = sum(y for _, y in uniq) / len(uniq)
+    return sorted(uniq, key=lambda p: (math.atan2(p[1] - cy, p[0] - cx), (p[0] - cx) ** 2 + (p[1] - cy) ** 2))
+
+
 def _build_roi_state(shape, roi_rect, roi_polygon, grey: int) -> Dict[str, Any]:
     """Per-camera ROI state, built once per frame size (and whenever the ROI
     config changes).
@@ -206,6 +223,11 @@ def _build_roi_state(shape, roi_rect, roi_polygon, grey: int) -> Dict[str, Any]:
     H, W = shape[:2]
     if roi_polygon:
         pts, mode = to_frame_pixels(roi_polygon, W, H)
+        if mode == "pixels" and max(max(abs(v) for v in p) for p in roi_polygon) <= 1.05:
+            # normalized points that overshoot the frame by rounding (1.0003): still fractions
+            pts, mode = tuple((min(max(x, 0.0), 1.0) * W, min(max(y, 0.0), 1.0) * H) for x, y in roi_polygon), "fractions"
+        if mode != "invalid":
+            pts = order_polygon_points(pts)
         if mode != "invalid" and len(pts) >= 3:
             poly = np.array([[int(round(min(max(px, 0.0), W - 1.0))), int(round(min(max(py, 0.0), H - 1.0)))]
                              for px, py in pts], np.int32)
@@ -1049,7 +1071,7 @@ class Engine:
                     _bb = roi_st["bbox"]
                     self.logger.info(
                         f"[ROI] camera={camera_id} frame={frame.shape[1]}x{frame.shape[0]} -> "
-                        f"{'polygon' if roi_st['poly'] is not None else 'rectangle'}"
+                        f"{('polygon ' + str(len(roi_st['poly'])) + ' pts ' + roi_st['poly'].tolist().__str__()) if roi_st['poly'] is not None else 'rectangle'}"
                         f"{' (grey mask outside it)' if roi_st['mask'] is not None else ''} | model image "
                         f"{_bb[2] - _bb[0]}x{_bb[3] - _bb[1]} at x={_bb[0]} y={_bb[1]}")
                 rx1, ry1, rx2, ry2 = roi_st["bbox"]
