@@ -68,6 +68,29 @@ class LineCrossingTests(unittest.TestCase):
         events = self._feed(1, x=50, y=100)
         self.assertIsNone(events["line_cross"], "CROSSING_COOLDOWN_FRAMES must suppress an immediate re-cross")
 
+    def test_fast_car_crossing_after_two_frames_fires(self):
+        self._feed(1, x=20, y=100)                       # first sight, left of the line
+        events = self._feed(1, x=180, y=100)             # next detection already far past it
+        self.assertIsNotNone(events["line_cross"])
+        self.assertEqual(events["line_cross"]["direction"].count("_to_"), 1)
+
+    def test_jump_over_the_line_between_two_frames_fires_once(self):
+        fired = 0
+        for x in (10, 30, 60, 170, 190, 210):            # 60 -> 170 jumps the line at x=100
+            if self._feed(1, x=x, y=100)["line_cross"]:
+                fired += 1
+        self.assertEqual(fired, 1)
+
+    def test_track_first_seen_past_the_line_does_not_fire(self):
+        for x in (150, 160, 170, 180):
+            self.assertIsNone(self._feed(1, x=x, y=100)["line_cross"])
+
+    def test_one_confident_detection_is_enough_but_never_confident_is_not(self):
+        for x, sc in ((20, 0.2), (30, 0.2), (180, 0.2)):
+            self.assertIsNone(self._feed(1, x=x, y=100, score=sc)["line_cross"])
+        # the same track gets one good detection while still on the new side -> now it fires
+        self.assertIsNotNone(self._feed(1, x=185, y=100, score=0.9)["line_cross"])
+
     def test_low_confidence_track_never_crosses(self):
         for _ in range(config.MIN_TRACK_AGE_FOR_CROSSING + 2):
             events = self._feed(2, x=50, y=100, score=0.01)

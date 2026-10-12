@@ -185,8 +185,11 @@ ERROR_RESTART_COUNTER_RESET_AFTER_SEC = 600.0
 # ============================================================================
 # 5. TRIGGERS / TRACKS / CROPS
 # ============================================================================
-MIN_TRACK_AGE_FOR_CROSSING = 5
-MIN_CONFIDENCE_FOR_CROSSING = 0.40
+# Line crossing: the side of the line is recorded from the first observation; these two gates
+# only decide whether a side change may fire. (Was 5 observations and the AVERAGE confidence,
+# which missed fast cars that cross within a few tracked frames.)
+MIN_TRACK_AGE_FOR_CROSSING = 2
+MIN_CONFIDENCE_FOR_CROSSING = 0.40   # compared with the BEST of the last TRIGGER_CONFIDENCE_HISTORY_MAX confidences
 CROSSING_COOLDOWN_FRAMES = 30
 # ---- stop ROI ("stopped inside the stop region") ------------------------
 # A plate is "stopped" when it has been inside the stop ROI for at least

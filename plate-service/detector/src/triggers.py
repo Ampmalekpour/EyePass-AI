@@ -61,6 +61,9 @@ class TriggerTrackState:
         self.frame_count += 1
         self.frames_since_last_cross += 1
 
+    def get_max_confidence(self):
+        return max(self.confidence_history) if self.confidence_history else 0.0
+
     def get_avg_confidence(self):
         if not self.confidence_history:
             return 0.0
@@ -215,27 +218,36 @@ def process_track_triggers(
     valid_line = not (line_p1 == (0, 0) and line_p2 == (0, 0))
 
     if valid_line:
-        if state.frame_count >= config.MIN_TRACK_AGE_FOR_CROSSING:
-            if avg_conf >= config.MIN_CONFIDENCE_FOR_CROSSING:
-                side_value = point_side_of_line(point_full, line_p1, line_p2)
-                current_side = get_side_label(side_value)
+        # The side is recorded from the FIRST observation of the track (no age or
+        # confidence gate): a fast car that is tracked for only a few frames before
+        # the line must already know which side it started on. The gates below
+        # only decide whether a flip may FIRE. A flip is a change of side between
+        # two consecutive observations, so a car that jumps over the line between
+        # two detected frames (fast car, missed frames) still counts.
+        side_value = point_side_of_line(point_full, line_p1, line_p2)
+        current_side = get_side_label(side_value)
 
-                if current_side is not None:
-                    if state.side_of_line is None:
-                        state.side_of_line = current_side
-                    elif state.side_of_line != current_side:
-                        if state.frames_since_last_cross >= config.CROSSING_COOLDOWN_FRAMES:
-                            direction = f"{state.side_of_line}_to_{current_side}"
-                            events["line_cross"] = {
-                                "camera_id": camera_id,
-                                "track_id": track_id,
-                                "class": track_class,
-                                "direction": direction,
-                                "point": point_full,
-                                "confidence": avg_conf,
-                            }
-                            state.frames_since_last_cross = 0
-                        state.side_of_line = current_side
+        if current_side is not None:
+            if state.side_of_line is None:
+                state.side_of_line = current_side
+            elif state.side_of_line != current_side:
+                gates_ok = (state.frame_count >= config.MIN_TRACK_AGE_FOR_CROSSING
+                            and state.get_max_confidence() >= config.MIN_CONFIDENCE_FOR_CROSSING)
+                if gates_ok:
+                    if state.frames_since_last_cross >= config.CROSSING_COOLDOWN_FRAMES:
+                        direction = f"{state.side_of_line}_to_{current_side}"
+                        events["line_cross"] = {
+                            "camera_id": camera_id,
+                            "track_id": track_id,
+                            "class": track_class,
+                            "direction": direction,
+                            "point": point_full,
+                            "confidence": avg_conf,
+                        }
+                        state.frames_since_last_cross = 0
+                    state.side_of_line = current_side
+                # gates not met yet: keep the old side, so the flip fires on the
+                # first observation that does meet them instead of being lost
 
     # ============================================================
     # 2. Detect ROI entry / ROI exit / stopped inside ROI
