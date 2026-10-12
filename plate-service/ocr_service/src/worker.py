@@ -57,6 +57,7 @@ import config
 import debug_extras
 from platecore.bus import RedisBus
 from platecore.codec import decode_task, encode_result
+from platecore.imgcodec import encode_jpeg
 from platecore.logging_setup import setup_logger
 from platecore.minio_store import PRIVATE_BUCKET, ensure_bucket, upload_bytes
 
@@ -384,16 +385,21 @@ class OcrWorker(mp.Process):
         compact = f"{ut}{lt}"
         return True, "0", display, compact
 
-    def _upload_image_to_minio(self, key: str, img: np.ndarray, tag: str) -> bool:
+    def _upload_image_to_minio(self, key: str, img: Optional[np.ndarray], tag: str,
+                               data: Optional[bytes] = None) -> bool:
+        """Store an image in MinIO as JPEG. `data` = the JPEG bytes the detector
+        already produced (stored unchanged: no second encode, no extra loss);
+        only when it is missing the decoded array is encoded (q95, 4:4:4)."""
         try:
-            if img is None or not isinstance(img, np.ndarray) or img.size == 0:
-                self.logger.error("[OCR-%s] [UPLOAD] %s image invalid/empty -> %s", self.worker_id, tag, key)
-                return False
-            ok, buf = cv2.imencode(".png", img)
-            if not ok:
-                self.logger.error("[OCR-%s] [UPLOAD] cv2.imencode failed -> %s", self.worker_id, key)
-                return False
-            upload_bytes(buf.tobytes(), key=key, bucket=PRIVATE_BUCKET, content_type="image/png")
+            if data is None:
+                if img is None or not isinstance(img, np.ndarray) or img.size == 0:
+                    self.logger.error("[OCR-%s] [UPLOAD] %s image invalid/empty -> %s", self.worker_id, tag, key)
+                    return False
+                data = encode_jpeg(img, config.IMAGE_JPEG_QUALITY)
+                if data is None:
+                    self.logger.error("[OCR-%s] [UPLOAD] jpeg encode failed -> %s", self.worker_id, key)
+                    return False
+            upload_bytes(data, key=key, bucket=PRIVATE_BUCKET, content_type="image/jpeg")
             return True
         except Exception as e:
             self.logger.error("[OCR-%s] [UPLOAD] %s -> %s failed: %s", self.worker_id, tag, key, e)
@@ -404,6 +410,7 @@ class OcrWorker(mp.Process):
             best_frame_bgr: Optional[np.ndarray], is_valid: bool, description: str,
             plate_number: str, voted_class: int, process_id: int, stream_idx: int,
             video_source: str, save_all_crops: Optional[bool] = None,
+            plate_bytes: Optional[bytes] = None, frame_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """Uploads crops + best frame to MinIO. Object key layout is
         verbatim from ocr_worker.py: valid -> vp/vf, invalid -> ip/if,
@@ -429,17 +436,17 @@ class OcrWorker(mp.Process):
             plate_folder, frame_folder = "dynamics/InvalidPlateImage", "dynamics/InvalidVehicleImage"
             plate_prefix, frame_prefix = "ip", "if"
 
-        plate_key = f"{plate_folder}/{plate_prefix}_{camera_name}_{date_str}_{filename_time_str}.png"
-        frame_key = f"{frame_folder}/{frame_prefix}_{camera_name}_{date_str}_{filename_time_str}.png"
+        plate_key = f"{plate_folder}/{plate_prefix}_{camera_name}_{date_str}_{filename_time_str}.jpg"
+        frame_key = f"{frame_folder}/{frame_prefix}_{camera_name}_{date_str}_{filename_time_str}.jpg"
 
         plate_url = None
-        if crops_bgr:
-            if self._upload_image_to_minio(plate_key, crops_bgr[0], tag="crop"):
+        if crops_bgr or plate_bytes:
+            if self._upload_image_to_minio(plate_key, crops_bgr[0] if crops_bgr else None, tag="crop", data=plate_bytes):
                 plate_url = plate_key
 
         frame_url = None
-        if best_frame_bgr is not None:
-            if self._upload_image_to_minio(frame_key, best_frame_bgr, tag="best_frame"):
+        if best_frame_bgr is not None or frame_bytes:
+            if self._upload_image_to_minio(frame_key, best_frame_bgr, tag="best_frame", data=frame_bytes):
                 frame_url = frame_key
 
         vehic_type_hint = 1 if voted_class == 0 else 2 if voted_class == 1 else 0
@@ -595,16 +602,18 @@ class OcrWorker(mp.Process):
         )
 
         best_frame_bgr = None
+        best_frame_bytes = None
         bf = task.get("best_frame")
         if bf and bf.get("image_bytes"):
-            best_frame_bgr = self._decode_image(bf["image_bytes"])
+            best_frame_bytes = bf["image_bytes"]
+            best_frame_bgr = self._decode_image(best_frame_bytes)
 
         if not crops:
             self.logger.warning("[OCR-%s] [TASK-SKIP] task=%s reason=no_crops", self.worker_id, task_id)
             self._emit_result(task, status="skipped", description="no crops", error="no crops in OCR task")
             return
 
-        decoded_crops, class_votes, crop_det_scores = [], [], []
+        decoded_crops, crop_bytes, class_votes, crop_det_scores = [], [], [], []
         for crop in crops:
             image_bytes = crop.get("image_bytes")
             class_flag = crop.get("class_flag")
@@ -614,6 +623,7 @@ class OcrWorker(mp.Process):
             if image is None:
                 continue
             decoded_crops.append(image)
+            crop_bytes.append(image_bytes)
             class_votes.append(class_flag)
             crop_det_scores.append(round(float(crop.get("score", 0.0) or 0.0), 3))
 
@@ -681,6 +691,7 @@ class OcrWorker(mp.Process):
                 best_frame_bgr=best_frame_bgr, is_valid=is_valid, description=desc,
                 plate_number=norm_plate, voted_class=voted_class, process_id=process_id,
                 stream_idx=stream_idx, video_source=video_source, save_all_crops=None,
+                plate_bytes=crop_bytes[0] if crop_bytes else None, frame_bytes=best_frame_bytes,
             )
             self._emit_result(task, status="ok" if is_valid else "invalid", plate_text=norm_plate,
                                confidence=voted_conf, is_valid=is_valid, description=desc,
@@ -735,6 +746,7 @@ class OcrWorker(mp.Process):
                 best_frame_bgr=best_frame_bgr, is_valid=is_valid, description=desc,
                 plate_number=compact, voted_class=voted_class, process_id=process_id,
                 stream_idx=stream_idx, video_source=video_source, save_all_crops=None,
+                plate_bytes=crop_bytes[0] if crop_bytes else None, frame_bytes=best_frame_bytes,
             )
             self._emit_result(task, status="ok" if is_valid else "invalid", plate_text=compact,
                                confidence=voted_conf, is_valid=is_valid, description=desc,

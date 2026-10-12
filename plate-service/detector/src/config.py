@@ -211,6 +211,11 @@ TRIGGER_VELOCITY_WINDOW = 10
 SUBMIT_TIMEOUT_SEC = 15.0
 TRACK_UPDATE_INTERVAL_SEC = 5.0
 
+# JPEG quality of the crops / best frame sent to OCR AND stored in MinIO (the
+# OCR service uploads these exact bytes). 95 + 4:4:4 is visually lossless
+# (platecore/imgcodec.py). Lower = smaller files / Redis tasks.
+IMAGE_JPEG_QUALITY = 95
+
 # crop quality gates
 SHARPNESS_MIN_THRESHOLD = 100.0
 RESOLUTION_MIN_AREA = 1000
