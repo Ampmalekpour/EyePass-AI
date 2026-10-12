@@ -285,6 +285,22 @@ Things to know:
 - the backend must accept the `.webp` extension.
 
 
+## Cross-line trigger
+
+`cross_line` (`--line X1 Y1 X2 Y2`, normalized) fires when a plate's anchor (the bottom-centre
+of its box) changes side of the line between two consecutive observations. The line is infinite
+(which side of it), the direction is only reported (`positive_to_negative` / `negative_to_positive`),
+and each track fires it once.
+
+* The side is recorded from the track's **first** observation. A fast car tracked for only a few
+  frames before the line still knows where it started, and a car that jumps over the line between two
+  detected frames still counts.
+* Gates that only decide whether a flip may fire (`detector/src/config.py`):
+  `MIN_TRACK_AGE_FOR_CROSSING = 2` observations, `MIN_CONFIDENCE_FOR_CROSSING = 0.40` against the
+  **best** of the last 10 confidences, `CROSSING_COOLDOWN_FRAMES = 30`. A flip that fails the gates
+  keeps the old side and fires on the first observation that meets them.
+* A track that first appears already beyond the line does not fire (it never changed side).
+
 ## Real-time capacity (CPU)
 
 **Rule:** real-time means every camera is served at ≥ `REALTIME_MIN_FPS`
