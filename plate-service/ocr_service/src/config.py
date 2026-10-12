@@ -67,10 +67,6 @@ OCR_CLAHE_GRID_SIZE = 8
 # motorcycle OCR drops text boxes smaller than this fraction of the largest
 OCR_MOTOR_MIN_BOX_AREA_RATIO = 0.05
 
-# JPEG quality used ONLY when a task arrives without ready-made image bytes
-# (normally the detector's JPEG bytes are stored unchanged).
-IMAGE_JPEG_QUALITY = 95
-
 # ============================================================================
 # 3. WORKER POOL / SELF-HEALING
 # ============================================================================

@@ -25,7 +25,6 @@ import cv2
 import numpy as np
 
 import config
-from platecore.imgcodec import encode_jpeg
 
 
 class RTSPStreamReader:
@@ -237,9 +236,10 @@ class RTSPStreamReader:
 
 
 def encode_image(img: np.ndarray) -> Optional[bytes]:
-    """JPEG q95 4:4:4 (config.IMAGE_JPEG_QUALITY). These bytes travel to the
-    OCR service and are stored in MinIO unchanged."""
-    return encode_jpeg(img, config.IMAGE_JPEG_QUALITY)
+    ok, buf = cv2.imencode(".jpg", img)
+    if not ok:
+        return None
+    return buf.tobytes()
 
 
 def measure_sharpness(image: np.ndarray) -> float:
