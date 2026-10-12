@@ -48,7 +48,7 @@ python3 -m venv .venv && .venv/bin/pip install redis
 export REDIS_URL=redis://localhost:6379/0
 for i in 1 2 3 4; do
   .venv/bin/python redis_tools.py set-camera --id $i --address publisher --title "Test $i" --roi 0 0 1 1
-  # optional polygon ROI instead of the rectangle: add  --roi-polygon X Y X Y X Y ...  (3+ points; see README "Polygon ROI and images")
+  # polygon ROI instead of the rectangle: --roi X Y X Y X Y ...  (3+ points in order, normalized; see README "Polygon ROI and images")
   .venv/bin/python redis_tools.py activate --id $i
 done
 .venv/bin/python redis_tools.py list

@@ -125,21 +125,20 @@ _RESTART_CMDS = {
 # =====================================================================
 
 def set_camera(camera_id, address, title="Camera", usage="plate",
-                roi=(0.0, 0.0, 1.0, 1.0), line=None, stop_roi=None, roi_polygon=None):
-    """roi: (x, y, w, h) normalized 0..1. roi_polygon: optional list of (x, y)
-    points (normalized 0..1 or frame pixels, 3 or more) - when given the detector
-    crops its bounding box and greys everything outside it; roi stays as the
-    fallback. line: (x1, y1, x2, y2) and
+                roi=(0.0, 0.0, 1.0, 1.0), line=None, stop_roi=None):
+    """roi: either (x, y, w, h) normalized 0..1 (old rectangle) or a list of
+    (x, y) points in order, normalized 0..1, 3 or more (polygon: the detector crops
+    its bounding box and greys everything outside it). line: (x1, y1, x2, y2) and
     stop_roi: (x, y, w, h) either in pixel coords of the camera frame or
     as fractions 0..1 (the detector tells them apart), or None to
     disable that trigger."""
     camera_id = str(camera_id)
     cfg = {
         "id": camera_id, "title": title, "address": address, "usage": usage,
-        "roi": {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]},
+        "roi": ({"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]}
+                if len(roi) == 4 and not isinstance(roi[0], (list, tuple))
+                else [{"x": px, "y": py} for px, py in roi]),
     }
-    if roi_polygon:
-        cfg["roi_polygon"] = [{"x": px, "y": py} for px, py in roi_polygon]
     if line is not None:
         x1, y1, x2, y2 = line
         cfg["cross_line"] = {"start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}}
@@ -509,10 +508,9 @@ def main():
     sc.add_argument("--address", required=True, help="RTSP URL or video path")
     sc.add_argument("--title", default="Camera")
     sc.add_argument("--usage", default="plate")
-    sc.add_argument("--roi", nargs=4, type=float, default=[0, 0, 1, 1], metavar=("X", "Y", "W", "H"))
-    sc.add_argument("--roi-polygon", nargs="+", type=float, default=None, metavar="V",
-                    help="polygon ROI as X Y X Y X Y ... (3+ points, any order, normalized 0..1 as the backend sends them; pixels also work); "
-                         "overrides --roi; everything outside the polygon is greyed before detection")
+    sc.add_argument("--roi", nargs="+", type=float, default=[0, 0, 1, 1], metavar="V",
+                    help="4 values X Y W H = rectangle, or 6+ values X Y X Y X Y ... = polygon points "
+                         "in order (normalized 0..1, as the backend sends them)")
     sc.add_argument("--line", nargs=4, type=float, default=None, metavar=("X1", "Y1", "X2", "Y2"))
     sc.add_argument("--stop-roi", nargs=4, type=float, default=None, metavar=("X", "Y", "W", "H"))
 
@@ -538,14 +536,16 @@ def main():
     args = p.parse_args()
 
     if args.cmd == "set-camera":
+        v = args.roi
+        if len(v) == 4:
+            roi_arg = tuple(v)
+        elif len(v) >= 6 and len(v) % 2 == 0:
+            roi_arg = [(v[i], v[i + 1]) for i in range(0, len(v), 2)]
+        else:
+            p.error("--roi needs 4 values (X Y W H) or 6+ values (X Y per point, at least 3 points)")
         set_camera(args.id, args.address, title=args.title, usage=args.usage,
-                    roi=tuple(args.roi), line=tuple(args.line) if args.line else None,
-                    stop_roi=tuple(args.stop_roi) if args.stop_roi else None,
-                    roi_polygon=([(args.roi_polygon[i], args.roi_polygon[i + 1])
-                                  for i in range(0, len(args.roi_polygon) - 1, 2)]
-                                 if args.roi_polygon and len(args.roi_polygon) >= 6 and len(args.roi_polygon) % 2 == 0
-                                 else (p.error("--roi-polygon needs an even number of values (>= 6)")
-                                       if args.roi_polygon else None)))
+                    roi=roi_arg, line=tuple(args.line) if args.line else None,
+                    stop_roi=tuple(args.stop_roi) if args.stop_roi else None)
     elif args.cmd == "remove":
         remove_camera_config(args.id)
     elif args.cmd == "list":

@@ -228,13 +228,13 @@ benchmark (`tools/bench_multistream.py`), implemented the same way
 
 ## Polygon ROI and images (ROI, full frame, crops, WebP)
 
-**ROI.** A camera's ROI is either the rectangle `roi {x,y,w,h}` (normalized, as
-before) or an optional **polygon** `roi_polygon` (any number of points >= 3,
-`[{"x":..,"y":..}, ...]`, **normalized 0..1** - the backend contract; frame pixels are also
-accepted for testing; it overrides `roi`). The point **order is not trusted**: the detector
-orders the points around the polygon's centroid itself (`config.ROI_POLYGON_ORDER`:
-`angle` default | `hull` | `given`), drops duplicates, and a value slightly over 1.0 is still
-read as normalized. For a polygon the detector
+**ROI.** The camera's `roi` is a **list of points in order** - the polygon
+(`"roi": [{"x":..,"y":..}, ...]`, 3 or more points, **normalized 0..1**). The old
+`"roi": {"x","y","w","h"}` rectangle is still accepted and behaves exactly as before
+(plain crop, no mask). The detector uses the points in the order received
+(`config.ROI_POLYGON_ORDER`: `given` default | `angle` re-sorts around the centroid |
+`hull`), drops duplicate points, and a value slightly over 1.0 is still read as
+normalized. For a polygon the detector
 (`engine._build_roi_state` / `_roi_image`):
 
 1. crops the polygon's **bounding box** (a numpy view, no copy),
@@ -244,12 +244,12 @@ read as normalized. For a polygon the detector
 3. gives that greyed bounding-box image to the model (YOLO accepts only rectangles; the
    model never sees the pixels outside the polygon),
 4. maps the boxes back to the frame with the bounding box's offset. **There is no
-   polygon filter on the detections.** A rectangle ROI (no `roi_polygon`) behaves as
+   polygon filter on the detections.** A rectangle ROI (`roi` as {x,y,w,h}) behaves as
    before: a plain crop, no mask.
 
 ```
 python redis_tools.py set-camera --id 1 --address publisher \
-    --roi-polygon 0.55 0.10  0.80 0.10  0.98 0.90  0.55 0.90          # X Y X Y ... (3+ points)
+    --roi 0.55 0.10  0.80 0.10  0.98 0.90  0.55 0.90                  # 6+ values = X Y per point; 4 values = X Y W H
 ```
 
 The log shows `[ROI] camera=1 frame=1920x1080 -> polygon (grey mask outside it) | model
@@ -602,7 +602,7 @@ Rebuild once: `docker compose build`.
 
 | Key | Type | Direction |
 |---|---|---|
-| `plate:cameras:config` | HASH `camera_id -> json` (`roi {x,y,w,h}`; optional `roi_polygon [{x,y},...]`) | backend → camera_stream, detector |
+| `plate:cameras:config` | HASH `camera_id -> json` (`roi`: `[{x,y},...]` points in order, or the old `{x,y,w,h}`) | backend → camera_stream, detector |
 | `plate:cameras:details` | HASH `camera_id -> json` | camera_stream → backend, detector |
 | `plate:camera:events` (**singular** "camera") | PUB/SUB | camera_stream → detector |
 | `plate:cmd:ai:request` | LIST (BRPOP) | backend → detector |

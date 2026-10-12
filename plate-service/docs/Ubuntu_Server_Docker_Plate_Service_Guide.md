@@ -986,12 +986,12 @@ What to keep a copy of on your PC: the `plate_for_sanat` folder (code, models, v
 
 ### A polygon instead of a rectangle
 
-By default a camera uses the rectangle `--roi X Y W H` (fractions of the frame). To use a
-polygon (for example a road that narrows towards the top), add `--roi-polygon` with three
-or more points, as `X Y X Y X Y ...` (fractions 0..1, or pixels):
+A camera's `--roi` is either the rectangle `X Y W H` (4 values, fractions of the frame) or a
+polygon: three or more points in order, as `X Y X Y X Y ...` (6+ values, fractions 0..1) -
+for example a road that narrows towards the top:
 
 ```
-rt set-camera --id 1 --address publisher --title "Test 1" --roi 0 0 1 1 --roi-polygon 0.55 0.10 0.80 0.10 0.98 0.90 0.55 0.90
+rt set-camera --id 1 --address publisher --title "Test 1" --roi 0.55 0.10 0.80 0.10 0.98 0.90 0.55 0.90
 rt activate --id 1
 ```
 
@@ -1003,7 +1003,7 @@ docker compose logs plate_detector 2>&1 | grep "\[ROI\]"
 ```
 
 and the `[PERF]` lines have `roi(crop+mask)=… ms/frame` (a few tenths of a millisecond).
-Without `--roi-polygon` the camera behaves exactly as before. Re-running `set-camera` and
+With a 4-value `--roi` the camera behaves exactly as before. Re-running `set-camera` and
 `activate` for a camera that is already active updates its ROI.
 
 ### What is sent and stored
