@@ -311,7 +311,7 @@ API_PORT = 8010
 DEBUG_VIDEO_ENABLED = True
 DEBUG_VIDEO_DIR = DEBUG_ROOT
 DEBUG_VIDEO_SEGMENT_SECONDS = 60.0     # each piece is closed (finalized) after this long; 0 = never roll
-DEBUG_VIDEO_FPS = 12.5              # nominal fps of the file (see the next two switches)
+DEBUG_VIDEO_FPS = 20.0              # starting fps of the file; with FOLLOWS_DETECTION it then tracks the real processing rate (see the next two switches)
 # True: only frames that were actually run through the detector are written
 # (every Nth frame when DETECT_EVERY_N_FRAMES / auto-degrade skips frames).
 # False: the skipped frames are written too, drawn from the tracker's last boxes.
