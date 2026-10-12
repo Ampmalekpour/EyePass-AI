@@ -332,7 +332,11 @@ DEBUG_VIDEO_CODEC = "MJPG"
 DEBUG_VIDEO_EXT = ".avi"
 DEBUG_VIDEO_JSONL = True
 DEBUG_VIDEO_GHOST_FRAMES = 45
-DEBUG_VIDEO_EVENT_LINES = 14
+DEBUG_VIDEO_EVENT_LINES = 26         # lines of the PIPELINE EVENTS list in the side panel
+# Events are also drawn over the video itself:
+DEBUG_VIDEO_TOAST_SECONDS = 8.0      # the last events (this many seconds) as lines, bottom-left of the frame
+DEBUG_VIDEO_TOAST_LINES = 8
+DEBUG_VIDEO_MARKER_FRAMES = 45       # a crossing / stop / entry point stays marked on the frame this long
 DEBUG_VIDEO_TRAIL = 30
 DEBUG_VIDEO_PANEL_WIDTH = 430
 # A labelled-grid JPEG of the crops sent to OCR, per submission.

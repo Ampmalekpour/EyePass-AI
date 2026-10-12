@@ -349,6 +349,7 @@ class HubCore:
         st["revision"] = int(st.get("revision") or 1) + 1
         st["missing_tasks"] = [t for t in st.get("missing_tasks") or [] if t != data.get("task_id")]
         fx.publish.append(self._final(st, now, "late_result"))
+        fx.ctl.extend(self._notice(st, P.A_LATE_RESULT, revision=st["revision"]))
         self.log.warning(
             "🧟📤 uid=%s cam=%s track=%s LATE RESULT after track closed (%.1fs ago, end_reason=%s) "
             "— re-dispatching to plate:vehicle:results | task=%s answer %s -> %s | revision now %d",
@@ -451,6 +452,15 @@ class HubCore:
                                          "display": self.policy.display(st, decision)}))
         return fx
 
+    def _notice(self, st, action: str, **fields) -> List[Tuple[Any, Dict[str, Any]]]:
+        """A show-only message to the track's detector engine (its log and debug video)."""
+        if st.get("engine_id") is None:
+            return []
+        d = self.policy.display(st, self.policy.resolve(st))
+        return [(st["engine_id"], {"action": action, "uid": st["uid"], "camera_id": st.get("camera_id"),
+                                   "track_id": st.get("track_id"), "label": d.get("label"),
+                                   "confidence": d.get("confidence"), **fields})]
+
     def _publish_event(self, st, name, resolution, now) -> Effects:
         fx = Effects()
         ev = st["events"][name]
@@ -460,6 +470,7 @@ class HubCore:
         ev["published_ts"] = now
         ev["resolution"] = resolution
         fx.publish.append(self.policy.event_payload(st, name, resolution, now))
+        fx.ctl.extend(self._notice(st, P.A_PUBLISHED, event=name, resolution=resolution))
         st["published_any"] = True
         self.stats["published_events"] += 1
         self.log.info("uid=%s cam=%s track=%s -> %s published (%s)",
@@ -488,6 +499,9 @@ class HubCore:
             int(st.get("n_crops") or 0) >= self.cfg.final_min_crops
         if gate_ok or st["published_any"]:
             fx.publish.append(self._final(st, now, "track_ended"))
+            fx.ctl.extend(self._notice(st, P.A_FINAL, reason=(st.get("end") or {}).get("reason"),
+                                       revision=int(st.get("revision") or 1),
+                                       complete=not st.get("missing_tasks")))
             st["final_published"] = True
             self.stats["published_finals"] += 1
             decision = self.policy.resolve(st)
@@ -502,6 +516,10 @@ class HubCore:
             )
         else:
             self.stats["dropped_tracks"] += 1
+            fx.ctl.extend(self._notice(
+                st, P.A_DROPPED,
+                why=f"seen {st.get('seen_frames')}/{self.cfg.final_min_seen_frames} frames, "
+                    f"crops {st.get('n_crops')}/{self.cfg.final_min_crops}, nothing published"))
             self.log.info("uid=%s cam=%s track=%s DROPPED (seen=%s/%s crops=%s/%s, nothing published)",
                           st["uid"], st.get("camera_id"), st.get("track_id"),
                           st.get("seen_frames"), self.cfg.final_min_seen_frames,

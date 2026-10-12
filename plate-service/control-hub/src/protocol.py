@@ -64,6 +64,11 @@ hub -> detector (hub:ctl:{engine_id}, JSON per LIST item)
 {"action": "result",  "uid", "task_id", "satisfied", "display"}
 {"action": "request", "uid", "stage"}          # e.g. periodic re-query
 {"action": "state",   "uid", "satisfied", "display"}
+-- notices (show-only: the detector prints them in its log and debug video, nothing else) --
+{"action": "published", "uid", "camera_id", "track_id", "event", "resolution", "label", "confidence"}
+{"action": "final",     "uid", "camera_id", "track_id", "reason", "revision", "complete", "label", "confidence"}
+{"action": "dropped",   "uid", "camera_id", "track_id", "why"}
+{"action": "late_result", "uid", "camera_id", "track_id", "revision", "label", "confidence"}
 --------------------------------------------------------------------
 """
 
@@ -81,6 +86,10 @@ K_RESULT = "result"
 A_RESULT = "result"
 A_REQUEST = "request"
 A_STATE = "state"
+A_PUBLISHED = "published"
+A_FINAL = "final"
+A_DROPPED = "dropped"
+A_LATE_RESULT = "late_result"
 
 
 def keys(module: str) -> dict:
