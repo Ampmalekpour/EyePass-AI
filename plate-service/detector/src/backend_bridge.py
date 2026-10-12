@@ -92,21 +92,30 @@ def _bbox_to_points(bbox: Optional[dict]) -> Tuple[float, float, float, float, f
     return (x, y, x + w, y, x + w, y + h, x, y + h)
 
 
-def _polygon_points(raw) -> Optional[Tuple[Tuple[float, float], ...]]:
-    """roi_polygon from the camera config: a list of {x, y} dicts or [x, y] pairs
-    (fractions of the frame 0..1, or pixels - the engine tells them apart).
-    Returns None when absent or unusable, so the camera falls back to its roi rectangle."""
-    if not raw:
-        return None
-    try:
-        pts = []
-        for p in raw:
-            x, y = (p.get("x"), p.get("y")) if isinstance(p, dict) else (p[0], p[1])
-            pts.append((float(x), float(y)))
-        return tuple(pts) if len(pts) >= 3 else None
-    except Exception:
-        logger.warning("ignoring unusable roi_polygon %r - using the roi rectangle", raw)
-        return None
+def _parse_roi(raw):
+    """The camera's `roi` from the backend config. Two shapes, one key:
+
+      * a list of points in order, normalized 0..1:  [{"x":..,"y":..}, ...]  (3 or more)
+        -> a polygon; the detector crops its bounding box and greys the outside
+      * the old {"x","y","w","h"} dict -> a plain rectangle (no mask)
+
+    Returns (rect (x, y, w, h), polygon points or None). The rect of a polygon is its
+    bounding box (only used if the polygon turns out unusable)."""
+    if isinstance(raw, (list, tuple)):
+        try:
+            pts = []
+            for p in raw:
+                x, y = (p.get("x"), p.get("y")) if isinstance(p, dict) else (p[0], p[1])
+                pts.append((float(x), float(y)))
+            if len(pts) >= 3:
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)), tuple(pts)
+        except Exception:
+            pass
+        logger.warning("ignoring unusable roi %r - using the whole frame", raw)
+        return (0.0, 0.0, 1.0, 1.0), None
+    d = raw if isinstance(raw, dict) else {}
+    return (float(d.get("x", 0)), float(d.get("y", 0)), float(d.get("w", 1)), float(d.get("h", 1))), None
 
 
 @dataclass
@@ -126,11 +135,11 @@ class CameraJob:
 
 def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
     """cfg is exactly the JSON object stored per-camera in
-    `plate:cameras:config` (roi: {x,y,w,h}, cross_line: {start:{x,y},
+    `plate:cameras:config` (roi: [{x,y},...] points or {x,y,w,h}, cross_line: {start:{x,y},
     end:{x,y}}, stop_roi: {x,y,w,h}) — the same shape alpr_api.py's own
     _build_video_config reads. address comes from cameras:details (or
     from cfg itself if the backend already inlines it there)."""
-    roi_d = cfg.get("roi") or {}
+    roi_rect, roi_poly = _parse_roi(cfg.get("roi"))
     cl = cfg.get("cross_line") or {}
     cl_start = cl.get("start") or {}
     cl_end = cl.get("end") or {}
@@ -139,10 +148,7 @@ def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
     return CameraJob(
         camera_id=str(camera_id),
         video_path=rtsp_url(camera_id),
-        roi=(
-            float(roi_d.get("x", 0)), float(roi_d.get("y", 0)),
-            float(roi_d.get("w", 1)), float(roi_d.get("h", 1)),
-        ),
+        roi=roi_rect,
         line_p1=(float(cl_start.get("x", 0)), float(cl_start.get("y", 0))),
         line_p2=(float(cl_end.get("x", 0)), float(cl_end.get("y", 0))),
         stop_roi=((sr[0], sr[1]), (sr[2], sr[3]), (sr[4], sr[5]), (sr[6], sr[7])),
@@ -150,7 +156,7 @@ def build_camera_job(camera_id: str, cfg: dict) -> CameraJob:
         cross_line_trig=bool(cfg.get("cross_line")),
         stop_roi_trig=bool(cfg.get("stop_roi")),
         leave_scene_trig=True,
-        roi_polygon=_polygon_points(cfg.get("roi_polygon")),
+        roi_polygon=roi_poly,
     )
 
 

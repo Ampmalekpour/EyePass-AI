@@ -61,15 +61,28 @@ class RoiStateTests(unittest.TestCase):
     HEX = [(0.63, 0.0954), (0.87, 0.0954), (0.9516, 0.4737), (0.87, 0.8519), (0.63, 0.8519), (0.5526, 0.4737)]
 
     def test_hexagon_in_any_order_gives_the_same_mask(self):
-        import itertools, random
-        ref = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), self.HEX, GREY)
-        self.assertEqual(len(ref["poly"]), 6)
-        rnd = random.Random(1)
-        for _ in range(12):
-            pts = list(self.HEX); rnd.shuffle(pts)
-            st = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), pts, GREY)
-            self.assertEqual(st["bbox"], ref["bbox"])
-            self.assertTrue(np.array_equal(st["mask"], ref["mask"]))
+        import random
+        old = config.ROI_POLYGON_ORDER
+        try:
+            config.ROI_POLYGON_ORDER = "angle"
+            ref = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), self.HEX, GREY)
+            self.assertEqual(len(ref["poly"]), 6)
+            rnd = random.Random(1)
+            for _ in range(12):
+                pts = list(self.HEX); rnd.shuffle(pts)
+                st = engine_mod._build_roi_state((1080, 1920, 3), (0, 0, 1, 1), pts, GREY)
+                self.assertEqual(st["bbox"], ref["bbox"])
+                self.assertTrue(np.array_equal(st["mask"], ref["mask"]))
+        finally:
+            config.ROI_POLYGON_ORDER = old
+
+    def test_given_order_is_the_default_and_keeps_a_concave_shape(self):
+        self.assertEqual(config.ROI_POLYGON_ORDER, "given")
+        # an L-shape in boundary order: re-sorting around the centroid would wreck it
+        L = [(0.1, 0.1), (0.5, 0.1), (0.5, 0.5), (0.9, 0.5), (0.9, 0.9), (0.1, 0.9)]
+        st = engine_mod._build_roi_state((1000, 1000, 3), (0, 0, 1, 1), L, GREY)
+        self.assertEqual(int(st["mask"][10, 790]), 0)      # the notch (top-right) is outside
+        self.assertEqual(int(st["mask"][10, 10]), 255)
 
     def test_given_order_keeps_a_bow_tie(self):
         old = config.ROI_POLYGON_ORDER
@@ -103,7 +116,12 @@ class RoiStateTests(unittest.TestCase):
         import math as m
         pts = [(0.5 + 0.3 * m.cos(a * 2 * m.pi / 12), 0.5 + 0.3 * m.sin(a * 2 * m.pi / 12)) for a in range(12)]
         pts = pts[::2] + pts[1::2]                                # scrambled
-        st = engine_mod._build_roi_state((1000, 1000, 3), (0, 0, 1, 1), pts, GREY)
+        old = config.ROI_POLYGON_ORDER
+        try:
+            config.ROI_POLYGON_ORDER = "angle"
+            st = engine_mod._build_roi_state((1000, 1000, 3), (0, 0, 1, 1), pts, GREY)
+        finally:
+            config.ROI_POLYGON_ORDER = old
         self.assertEqual(len(st["poly"]), 12)
         self.assertAlmostEqual(int((st["mask"] > 0).sum()) / 270000.0, 1.0, delta=0.03)   # 12-gon area = 3 r^2
 
@@ -261,17 +279,27 @@ class CameraJobPolygonTests(unittest.TestCase):
     BASE = {"address": "x", "roi": {"x": 0, "y": 0, "w": 1, "h": 1}}
 
     def test_dict_points(self):
-        job = build_camera_job("1", dict(self.BASE, roi_polygon=[{"x": .1, "y": .1}, {"x": .9, "y": .1}, {"x": .9, "y": .9}]))
+        job = build_camera_job("1", dict(self.BASE, roi=[{"x": .1, "y": .1}, {"x": .9, "y": .1}, {"x": .9, "y": .9}]))
         self.assertEqual(job.roi_polygon, ((.1, .1), (.9, .1), (.9, .9)))
 
     def test_pair_points(self):
-        job = build_camera_job("1", dict(self.BASE, roi_polygon=[[1, 2], [3, 4], [5, 6], [7, 8]]))
+        job = build_camera_job("1", dict(self.BASE, roi=[[1, 2], [3, 4], [5, 6], [7, 8]]))
         self.assertEqual(len(job.roi_polygon), 4)
+
+    def test_roi_list_is_the_polygon_and_rect_is_its_bbox(self):
+        job = build_camera_job("1", dict(self.BASE, roi=[{"x": .2, "y": .1}, {"x": .8, "y": .1}, {"x": .9, "y": .7}, {"x": .1, "y": .7}]))
+        self.assertEqual(len(job.roi_polygon), 4)
+        self.assertEqual([round(v, 3) for v in job.roi], [.1, .1, .8, .6])
+
+    def test_old_xywh_roi_is_still_a_plain_rectangle(self):
+        job = build_camera_job("1", {"address": "x", "roi": {"x": .1, "y": .2, "w": .5, "h": .6}})
+        self.assertIsNone(job.roi_polygon)
+        self.assertEqual(job.roi, (.1, .2, .5, .6))
 
     def test_absent_or_bad_polygon_is_none(self):
         self.assertIsNone(build_camera_job("1", self.BASE).roi_polygon)
-        self.assertIsNone(build_camera_job("1", dict(self.BASE, roi_polygon=[[1, 2], [3, 4]])).roi_polygon)
-        self.assertIsNone(build_camera_job("1", dict(self.BASE, roi_polygon="nonsense")).roi_polygon)
+        self.assertIsNone(build_camera_job("1", dict(self.BASE, roi=[[1, 2], [3, 4]])).roi_polygon)
+        self.assertIsNone(build_camera_job("1", dict(self.BASE, roi="nonsense")).roi_polygon)
 
 
 class PerfRoiTimerTests(unittest.TestCase):

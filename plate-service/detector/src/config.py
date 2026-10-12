@@ -208,16 +208,16 @@ TRIGGER_CONFIDENCE_HISTORY_MAX = 10
 TRIGGER_VELOCITY_WINDOW = 10
 
 # ---- polygon ROI -------------------------------------------------------------
-# A camera's ROI may be a polygon (config key `roi_polygon`). The detector crops
+# A camera's ROI (config key `roi`) is a list of normalized points in order, i.e. a polygon
+# (the old {x,y,w,h} rectangle is still accepted). The detector crops
 # the polygon's bounding box, paints everything outside the polygon this grey
 # (the same value the letterbox pads with) and gives that image to the model.
 ROI_GREY_VALUE = 114
-# The backend sends roi_polygon as normalized {x, y} points (3 or more, any count) and the
-# order is NOT trusted. The detector puts the points in boundary order itself:
-#   "angle" - sort around the centroid (convex shapes and star-shaped concave ones) [default]
+# The backend sends the points in order (3 or more). What the detector does with the order:
+#   "given" - use it as received [default]
+#   "angle" - re-sort around the centroid (fixes scrambled convex / star-shaped polygons)
 #   "hull"  - convex hull (always a clean convex polygon; concave parts are filled in)
-#   "given" - use the order as received
-ROI_POLYGON_ORDER = "angle"
+ROI_POLYGON_ORDER = "given"
 
 # ---- images sent to the OCR service (over Redis) ------------------------------
 # Crops are sent as today (OpenCV's default JPEG). The FULL camera frame (never the
