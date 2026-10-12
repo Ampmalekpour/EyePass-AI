@@ -81,7 +81,7 @@ IMAGE_UPLOAD_THREADS = 1
 # ============================================================================
 # 3. WORKER POOL / SELF-HEALING
 # ============================================================================
-DEFAULT_WORKER_COUNT = 3              # workers on a fresh boot (then the saved count)
+DEFAULT_WORKER_COUNT = 1              # workers on a fresh boot (then the saved count)
 WORKER_LOAD_TIMEOUT_SEC = 180.0
 WORKER_SHUTDOWN_TIMEOUT_SEC = 30.0
 WATCHDOG_INTERVAL_SEC = 5.0           # respawn crashed workers

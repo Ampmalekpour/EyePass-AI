@@ -106,7 +106,7 @@ are**. Everything else is set in each service's `config.py`:
 | `DETECTION_CPU_MODEL` | `openvino_fp32` · `openvino_int8` · `onnx` |
 | `CAPACITY_AUTO_DEGRADE` | `true` · `false` — CPU only: lower the per-camera detection rate when over the measured capacity (`false` = warn only) |
 | `OCR_DEVICE` | `cpu` · `gpu` |
-| `COMPOSE_PROFILES` | `standalone-stream` (own relay, dev) · empty (the system's streamer) · `+test-video`, `+watchdog` |
+| `COMPOSE_PROFILES` | `standalone-stream` (own relay, dev) · empty (the system's streamer) · `+test-video` (camera 1 only; `+test-video-all` adds 2..8), `+watchdog` |
 | Redis / MinIO / relay / ports / folders | deployment values (`[FILL_IN]` in `.env.prod.example`) |
 
 | Everything else | File |

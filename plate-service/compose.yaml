@@ -161,7 +161,7 @@ services:
   plate_video_publisher_2:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_2
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/2
       VIDEO_FILE: /media/video.mp4
@@ -173,7 +173,7 @@ services:
   plate_video_publisher_3:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_3
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/3
       VIDEO_FILE: /media/video.mp4
@@ -185,7 +185,7 @@ services:
   plate_video_publisher_4:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_4
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/4
       VIDEO_FILE: /media/video.mp4
@@ -197,7 +197,7 @@ services:
   plate_video_publisher_5:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_5
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/5
       VIDEO_FILE: /media/video.mp4
@@ -209,7 +209,7 @@ services:
   plate_video_publisher_6:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_6
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/6
       VIDEO_FILE: /media/video.mp4
@@ -221,7 +221,7 @@ services:
   plate_video_publisher_7:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_7
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/7
       VIDEO_FILE: /media/video.mp4
@@ -233,7 +233,7 @@ services:
   plate_video_publisher_8:
     build: { context: ., dockerfile: Dockerfile.publisher }
     container_name: plate_video_publisher_8
-    profiles: [ test-video ]
+    profiles: [ test-video-all ]
     environment:
       MTX_RTSP_URL: ${TEST_VIDEO_RTSP_BASE_URL:-rtsp://mediamtx:8554}/8
       VIDEO_FILE: /media/video.mp4
