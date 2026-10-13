@@ -56,6 +56,16 @@ class DebugEventTests(unittest.TestCase):
             self.assertIn(k, EVENT_COLORS)
 
 
+class LineLabelTests(unittest.TestCase):
+    def test_pos_label_is_on_the_side_the_detector_calls_positive(self):
+        from debug_recorder import line_side_label_points
+        from triggers import point_side_of_line
+        for p1, p2 in (((1225, 403), (1823, 409)), ((1823, 409), (1225, 403)), ((100, 50), (120, 400)), ((300, 300), (50, 20))):
+            pos_pt, neg_pt = line_side_label_points(p1, p2)
+            self.assertGreater(point_side_of_line(pos_pt, p1, p2), 0, (p1, p2))
+            self.assertLess(point_side_of_line(neg_pt, p1, p2), 0, (p1, p2))
+
+
 class HubNoticeTests(unittest.TestCase):
     def _engine(self):
         eng = object.__new__(engine_mod.Engine)

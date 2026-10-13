@@ -111,6 +111,17 @@ EVENT_COLORS = {
 }
 
 
+def line_side_label_points(p1, p2, dist: int = 34):
+    """Where to write 'pos' / 'neg' next to the cross line. The detector's side value is
+    (x2-x1)*(y-y1) - (y2-y1)*(x-x1): positive on the (-dy, dx) side of the start->end
+    direction (the right-hand side when walking start -> end, with y pointing down)."""
+    mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    n = math.hypot(dx, dy) or 1.0
+    nx, ny = int(-dy / n * dist), int(dx / n * dist)
+    return (mx + nx, my + ny), (mx - nx, my - ny)
+
+
 def _color_for_track(tid: int) -> Tuple[int, int, int]:
     """Stable, readable per-track hue."""
     h = (int(tid) * 47) % 180
@@ -452,12 +463,12 @@ class DebugRecorder:
                 cv2.line(img, p1, p2, (255, 255, 255), 9, cv2.LINE_AA)
             cv2.line(img, p1, p2, col, 2, cv2.LINE_AA)
             # side labels: which half is "positive"
-            mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
-            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-            n = math.hypot(dx, dy) or 1.0
-            nx, ny = int(-dy / n * 34), int(dx / n * 34)
-            _text(img, "neg", (mx + nx - 10, my + ny), col, 0.45, 1, (20, 20, 20))
-            _text(img, "pos", (mx - nx - 10, my - ny), col, 0.45, 1, (20, 20, 20))
+            pos_pt, neg_pt = line_side_label_points(p1, p2)
+            _text(img, "pos", (pos_pt[0] - 10, pos_pt[1]), col, 0.45, 1, (20, 20, 20))
+            _text(img, "neg", (neg_pt[0] - 10, neg_pt[1]), col, 0.45, 1, (20, 20, 20))
+            # which way the line runs: start -> end (this decides pos / neg)
+            cv2.arrowedLine(img, p1, p2, col, 2, cv2.LINE_AA, tipLength=0.04)
+            _text(img, "start", (p1[0] - 4, p1[1] + 16), col, 0.4, 1, (20, 20, 20))
             _text(img, f"CROSS LINE [{'ON' if on else 'OFF'}]",
                   (p1[0] + 4, p1[1] - 8), col, 0.45, 1, (20, 20, 20))
 
